@@ -24,7 +24,10 @@ class BettingLine:
     home_value: float
     away_value: float
     timestamp: datetime
+    home_price: float | None = None
+    away_price: float | None = None
 
-    # For spreads: home_value/away_value are the spread numbers
-    # For totals: home_value is the over/under number, away_value is unused
     # For moneylines: home_value/away_value are the odds (e.g., -150, +130)
+    # For spreads: values are the spread, prices are the juice
+    # For totals: home_value is over number, away_value is under number,
+    #             home_price/away_price are the juice for over/under
