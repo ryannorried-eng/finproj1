@@ -8,7 +8,6 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from line_tracker.alerts import AlertManager
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
@@ -169,6 +168,22 @@ def _style_best_lines(
     return display_df.style.apply(lambda _: css, axis=None)
 
 
+def _highlight_best(
+    display_df: pd.DataFrame, raw_df: pd.DataFrame,
+) -> pd.io.formats.style.Styler:
+    """Highlight the best Home/Away values in a single-group table."""
+    css = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
+    if raw_df.empty or len(raw_df) < 2:
+        return display_df.style
+
+    if "Home" in css.columns and "Home" in raw_df.columns:
+        css.loc[raw_df["Home"].idxmax(), "Home"] = _BEST_CELL
+    if "Away" in css.columns and "Away" in raw_df.columns:
+        css.loc[raw_df["Away"].idxmax(), "Away"] = _BEST_CELL
+
+    return display_df.style.apply(lambda _: css, axis=None)
+
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -237,178 +252,7 @@ def _sidebar():
 
 
 # ---------------------------------------------------------------------------
-# Tab: Live Odds
-# ---------------------------------------------------------------------------
-
-def _tab_live():
-    sport = _sport_name()
-    st.subheader(f"Live {sport} Odds")
-    st.caption(
-        "Click the button to pull the latest lines from every major sportsbook."
-    )
-
-    if st.button("Fetch Latest Odds", type="primary", key="btn_fetch"):
-        api_key = _require_key()
-        if api_key is None:
-            return
-        with st.spinner("Pulling odds from sportsbooks..."):
-            try:
-                with OddsClient(api_key=api_key) as client:
-                    lines = client.get_odds(sport=_sport_key())
-            except Exception as exc:
-                st.error(f"Could not reach the API: {exc}")
-                return
-
-        if not lines:
-            st.info(f"No {sport} games available right now.")
-            return
-
-        with LineStore(DB_PATH) as store:
-            count = store.save_lines(lines)
-
-        st.success(f"Got {len(lines)} lines across {sport}. Saved {count} new rows.")
-        st.session_state["last_fetch"] = lines
-
-    lines = st.session_state.get("last_fetch")
-    if not lines:
-        return
-
-    compact = _compact_mode()
-    max_rows = _max_display_rows()
-    display_df = _lines_to_df(lines, compact=compact)
-    raw_df = _lines_to_raw_df(lines)
-
-    # Summary metrics
-    books = display_df["Sportsbook"].nunique()
-    games = display_df["Game"].nunique()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Sportsbooks", books)
-    c2.metric("Games", games)
-    c3.metric("Total Lines", len(display_df))
-
-    # Filters
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        events = ["All games"] + sorted(display_df["Game"].unique().tolist())
-        event_pick = st.selectbox("Game", events, key="live_game")
-    with col2:
-        type_opts = ["All types"] + list(
-            BET_TYPE_SHORT.values() if compact else BET_TYPE_LABELS.values()
-        )
-        type_pick = st.selectbox("Bet type", type_opts, key="live_type")
-    with col3:
-        book_opts = ["All books"] + sorted(
-            display_df["Sportsbook"].unique().tolist()
-        )
-        book_pick = st.selectbox("Sportsbook", book_opts, key="live_book")
-
-    mask = pd.Series(True, index=display_df.index)
-    if event_pick != "All games":
-        mask &= display_df["Game"] == event_pick
-    if type_pick != "All types":
-        mask &= display_df["Bet Type"] == type_pick
-    if book_pick != "All books":
-        mask &= display_df["Sportsbook"] == book_pick
-
-    filtered_display = display_df[mask].head(max_rows)
-    filtered_raw = raw_df[mask].head(max_rows)
-
-    if not filtered_display.empty and len(filtered_display) <= max_rows:
-        styled = _style_best_lines(filtered_display, filtered_raw)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(filtered_display, use_container_width=True, hide_index=True)
-
-    total_matching = int(mask.sum())
-    if total_matching > max_rows:
-        st.caption(
-            f"Showing {max_rows} of {total_matching} rows (adjust in sidebar)"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Tab: Best Lines
-# ---------------------------------------------------------------------------
-
-def _tab_best_lines():
-    st.subheader("Best Available Lines")
-    st.caption(
-        "Shows the best odds each sportsbook is offering right now "
-        "for every game. Fetches from your saved data — "
-        "go to **Live Odds** and fetch first if this is empty."
-    )
-
-    with LineStore(DB_PATH) as store:
-        events = store.get_events()
-
-    if not events:
-        st.info(
-            "No data yet. Head to the **Live Odds** tab and fetch some odds first."
-        )
-        return
-
-    col1, col2 = st.columns(2)
-    with col1:
-        event_pick = st.selectbox("Game", events, key="best_event")
-    with col2:
-        bt_pick = st.selectbox(
-            "Bet type",
-            list(BET_TYPE_LABELS.keys()),
-            format_func=lambda k: BET_TYPE_LABELS[k],
-            key="best_type",
-        )
-
-    bt = BetType(bt_pick)
-    with LineStore(DB_PATH) as store:
-        latest = store.get_latest_for_event(event_pick, bt)
-
-    if not latest:
-        st.info("No lines found for this game + bet type combination.")
-        return
-
-    compact = _compact_mode()
-    display_df = _lines_to_df(latest, compact=compact)
-    raw_df = _lines_to_raw_df(latest)
-
-    if not display_df.empty:
-        styled = _style_best_lines(display_df, raw_df)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    # Best-value callouts
-    if bt == BetType.MONEYLINE:
-        best_home = max(latest, key=lambda ln: ln.home_value)
-        best_away = max(latest, key=lambda ln: ln.away_value)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric(
-                f"Best Home odds: {best_home.sportsbook}",
-                _format_odds(best_home.home_value),
-            )
-        with c2:
-            st.metric(
-                f"Best Away odds: {best_away.sportsbook}",
-                _format_odds(best_away.away_value),
-            )
-    elif bt == BetType.SPREAD:
-        best_home = max(latest, key=lambda ln: ln.home_value)
-        best_away = max(latest, key=lambda ln: ln.away_value)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric(
-                f"Best Home spread: {best_home.sportsbook}",
-                f"{best_home.home_value:+.1f}",
-            )
-        with c2:
-            st.metric(
-                f"Best Away spread: {best_away.sportsbook}",
-                f"{best_away.away_value:+.1f}",
-            )
-
-
-# ---------------------------------------------------------------------------
-# Tab: Arbitrage
+# Arb stake calculator
 # ---------------------------------------------------------------------------
 
 def _compute_arb_stakes(
@@ -438,409 +282,151 @@ def _compute_arb_stakes(
     return round(stake_a, 2), round(stake_b, 2), round(profit, 2), round(roi, 2)
 
 
-def _tab_arbs():
+# ---------------------------------------------------------------------------
+# Data fetching and indexing
+# ---------------------------------------------------------------------------
+
+def _fetch_odds():
+    """Fetch latest odds, save to DB, and auto-scan for arbs/movements."""
     sport = _sport_name()
-    st.subheader(f"{sport} Arbitrage Scanner")
-    st.caption(
-        "Scans every sportsbook for pricing disagreements.  \n"
-        "A **profitable arb** means you can bet both sides and guarantee a profit. "
-        "A **near-arb** is close but not quite there yet — worth watching."
-    )
+    api_key = _require_key()
+    if api_key is None:
+        return
 
-    if st.button("Scan for Arbitrage", type="primary", key="btn_arb"):
-        api_key = _require_key()
-        if api_key is None:
+    with st.spinner("Pulling odds from sportsbooks..."):
+        try:
+            with OddsClient(api_key=api_key) as client:
+                lines = client.get_odds(sport=_sport_key())
+        except Exception as exc:
+            st.error(f"Could not reach the API: {exc}")
             return
-
-        with st.spinner("Comparing odds across all sportsbooks..."):
-            try:
-                with OddsClient(api_key=api_key) as client:
-                    lines = client.get_odds(sport=_sport_key())
-            except Exception as exc:
-                st.error(f"Could not reach the API: {exc}")
-                return
-
-        ml_arbs = find_moneyline_arbs(lines)
-        spread_arbs = find_spread_arbs(lines)
-        all_arbs = ml_arbs + spread_arbs
-
-        mgr = AlertManager(arb_min_margin=-5.0)
-        alerts = mgr.check_arbitrage(all_arbs)
-
-        st.session_state["last_arbs"] = all_arbs
-        st.session_state["last_arb_alerts"] = alerts
-
-    all_arbs = st.session_state.get("last_arbs")
-    alerts = st.session_state.get("last_arb_alerts", [])
-
-    if all_arbs is None:
-        return
-
-    if not all_arbs:
-        st.info(
-            "No arbitrage opportunities right now.  \n"
-            "This is normal — true arbs are rare and short-lived."
-        )
-        return
-
-    profitable = [a for a in all_arbs if a.profitable]
-    near = [a for a in all_arbs if not a.profitable]
-
-    # Summary
-    c1, c2 = st.columns(2)
-    c1.metric("Profitable Arbs", len(profitable))
-    c2.metric("Near Arbs", len(near))
-
-    for alert in alerts:
-        if alert.level.value == "critical":
-            st.error(alert.message)
-
-    # Profitable arbs — expanded cards with stake calculator
-    if profitable:
-        st.success(f"Found {len(profitable)} profitable arb(s)!")
-        for arb in profitable:
-            with st.container(border=True):
-                st.markdown(
-                    f"**{arb.event}** — "
-                    f"{BET_TYPE_LABELS.get(arb.bet_type.value, arb.bet_type.value)}"
-                )
-                c1, c2, c3 = st.columns(3)
-                c1.metric(
-                    "Bet side A at",
-                    arb.side_a.sportsbook,
-                    help=f"Home value: {arb.side_a.home_value}",
-                )
-                c2.metric(
-                    "Bet side B at",
-                    arb.side_b.sportsbook,
-                    help=f"Away value: {arb.side_b.away_value}",
-                )
-                c3.metric("Profit margin", f"{arb.margin:+.2f}%")
-
-                # Actionable stake calculator for moneyline arbs
-                if arb.bet_type == BetType.MONEYLINE:
-                    result = _compute_arb_stakes(
-                        arb.side_a.home_value, arb.side_b.away_value,
-                    )
-                    if result:
-                        stake_a, stake_b, profit, roi = result
-                        with st.expander(
-                            "Stake calculator ($100 total)", expanded=True,
-                        ):
-                            lc1, lc2 = st.columns(2)
-                            with lc1:
-                                st.markdown(
-                                    f"**Leg A — {arb.side_a.sportsbook}**  \n"
-                                    f"Bet Home at "
-                                    f"{_format_odds(arb.side_a.home_value)}  \n"
-                                    f"Stake: **${stake_a:.2f}**"
-                                )
-                            with lc2:
-                                st.markdown(
-                                    f"**Leg B — {arb.side_b.sportsbook}**  \n"
-                                    f"Bet Away at "
-                                    f"{_format_odds(arb.side_b.away_value)}  \n"
-                                    f"Stake: **${stake_b:.2f}**"
-                                )
-                            st.divider()
-                            pc1, pc2, pc3 = st.columns(3)
-                            pc1.metric("Total wagered", "$100.00")
-                            pc2.metric("Guaranteed profit", f"${profit:.2f}")
-                            pc3.metric("ROI", f"{roi:.2f}%")
-
-    # Near arbs table
-    if near:
-        with st.expander(
-            f"Near-arbs ({len(near)}) — not profitable yet, but close",
-        ):
-            rows = []
-            for arb in near:
-                rows.append({
-                    "Game": arb.event,
-                    "Type": BET_TYPE_LABELS.get(
-                        arb.bet_type.value, arb.bet_type.value,
-                    ),
-                    "Book A": arb.side_a.sportsbook,
-                    "Book B": arb.side_b.sportsbook,
-                    "Margin": f"{arb.margin:+.2f}%",
-                })
-            st.dataframe(
-                pd.DataFrame(rows),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-
-# ---------------------------------------------------------------------------
-# Tab: Line Movements
-# ---------------------------------------------------------------------------
-
-_TIME_WINDOWS = {
-    "All": 0,
-    "Last 15m": 15,
-    "Last 1h": 60,
-    "Last 6h": 360,
-    "Last 24h": 1440,
-}
-
-
-def _tab_movements():
-    st.subheader("Line Movements")
-    st.caption(
-        "Compares your older fetches with newer ones to spot which lines moved. "
-        "Big moves can signal sharp action or breaking news."
-    )
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        threshold = st.slider(
-            "Minimum movement size",
-            min_value=0.0,
-            max_value=50.0,
-            value=0.0,
-            step=0.5,
-            help=(
-                "For moneyline, this is the odds change "
-                "(e.g. 10 = a shift of 10 points).  \n"
-                "For spreads/totals, this is the point "
-                "change (e.g. 0.5 = half a point)."
-            ),
-        )
-    with col2:
-        time_window = st.selectbox(
-            "Time window",
-            list(_TIME_WINDOWS.keys()),
-            key="move_time_window",
-            help="Filter by how recently the new line was fetched.",
-        )
-
-    # "Juice-only" approximation: if the primary value barely changed,
-    # the movement is likely just a juice adjustment. We hide moves where
-    # abs(change) < 1 for moneyline or < 0.5 for spreads/totals.
-    hide_juice = st.toggle(
-        "Hide juice-only changes",
-        value=False,
-        key="hide_juice",
-        help=(
-            "Hides moves where the primary line barely changed "
-            "(< 1 for moneyline, < 0.5 for spreads/totals), "
-            "which are likely juice adjustments only."
-        ),
-    )
-
-    detect = st.button("Detect Movements", type="primary", key="btn_moves")
-
-    if detect:
-        with LineStore(DB_PATH) as store:
-            all_lines = store.get_lines(limit=10000)
-
-        if len(all_lines) < 2:
-            st.warning(
-                "You need at least **two snapshots** to compare.  \n"
-                "Go to **Live Odds**, fetch now, wait a while, then fetch again."
-            )
-            return
-
-        sorted_lines = sorted(all_lines, key=lambda ln: ln.timestamp)
-        mid = len(sorted_lines) // 2
-        old_snap = sorted_lines[:mid]
-        new_snap = sorted_lines[mid:]
-
-        moves = detect_moves(old_snap, new_snap, threshold=threshold)
-        mgr = AlertManager()
-        alerts = mgr.check_movements(moves)
-
-        st.session_state["last_moves"] = moves
-        st.session_state["last_move_alerts"] = alerts
-
-    moves = st.session_state.get("last_moves")
-    alerts = st.session_state.get("last_move_alerts", [])
-
-    if moves is None:
-        return
-
-    if not moves:
-        st.info("No line movements detected with the current threshold.")
-        return
-
-    # ---- post-filters applied to already-detected moves ----
-    filtered = list(moves)
-
-    # Time window filter
-    window_min = _TIME_WINDOWS.get(time_window, 0)
-    if window_min > 0:
-        now = datetime.now()
-        kept = []
-        for m in filtered:
-            ts = m.new_line.timestamp
-            ref = datetime.now(ts.tzinfo) if ts.tzinfo else now
-            if (ref - ts).total_seconds() <= window_min * 60:
-                kept.append(m)
-        filtered = kept
-
-    # Juice-only filter
-    if hide_juice:
-        kept = []
-        for m in filtered:
-            if m.bet_type == BetType.MONEYLINE and abs(m.change) < 1:
-                continue
-            if m.bet_type in (BetType.SPREAD, BetType.TOTAL) and abs(m.change) < 0.5:
-                continue
-            kept.append(m)
-        filtered = kept
-
-    if not filtered:
-        st.info("No movements match the current filters.")
-        return
-
-    # Alerts
-    for alert in alerts:
-        if alert.level.value == "critical":
-            st.error(alert.message)
-        elif alert.level.value == "warning":
-            st.warning(alert.message)
-
-    # Summary
-    up = sum(1 for m in filtered if m.direction == "up")
-    down = sum(1 for m in filtered if m.direction == "down")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Moves", len(filtered))
-    c2.metric("Moved Up", up)
-    c3.metric("Moved Down", down)
-
-    # Build table
-    max_rows = _max_display_rows()
-    display_slice = filtered[:max_rows]
-
-    rows = []
-    significant_flags: list[bool] = []
-    for m in display_slice:
-        arrow = "\u2191" if m.direction == "up" else (
-            "\u2193" if m.direction == "down" else "\u2014"
-        )
-        old_str = _format_value(m.old_line.home_value, m.bet_type)
-        new_str = _format_value(m.new_line.home_value, m.bet_type)
-
-        # Percent change (skip when baseline is zero to avoid div-by-zero)
-        if m.old_line.home_value != 0:
-            pct = (m.change / abs(m.old_line.home_value)) * 100
-            pct_str = f"{pct:+.1f}%"
-        else:
-            pct_str = "\u2014"
-
-        rows.append({
-            "Sportsbook": m.sportsbook,
-            "Game": m.event,
-            "Bet Type": BET_TYPE_LABELS.get(m.bet_type.value, m.bet_type.value),
-            "Old": old_str,
-            "": "\u2192",
-            "New": new_str,
-            "Delta": f"{arrow} {m.change:+.1f}",
-            "% Change": pct_str,
-            "When": _relative_time(m.new_line.timestamp),
-        })
-
-        # Mark "significant" if the move is large for its type
-        if m.bet_type == BetType.MONEYLINE:
-            significant_flags.append(abs(m.change) >= 10)
-        else:
-            significant_flags.append(abs(m.change) >= 1.0)
-
-    move_df = pd.DataFrame(rows)
-
-    # Apply subtle highlight to significant-movement rows
-    if not move_df.empty and len(move_df) <= max_rows:
-        sig = significant_flags  # captured from loop above
-
-        def _apply_move_styles(df: pd.DataFrame) -> pd.DataFrame:
-            styles = pd.DataFrame("", index=df.index, columns=df.columns)
-            for i, is_sig in enumerate(sig):
-                if is_sig and i < len(styles):
-                    styles.iloc[i] = "background-color: #fff3cd"
-            return styles
-
-        styled = move_df.style.apply(
-            lambda x: _apply_move_styles(move_df), axis=None,
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(move_df, use_container_width=True, hide_index=True)
-
-    if len(filtered) > max_rows:
-        st.caption(
-            f"Showing {max_rows} of {len(filtered)} movements "
-            "(adjust in sidebar)"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Tab: History
-# ---------------------------------------------------------------------------
-
-def _tab_history():
-    st.subheader("Saved History")
-    st.caption(
-        "Browse every line you've fetched. "
-        "Use the filters to narrow it down."
-    )
-
-    with LineStore(DB_PATH) as store:
-        events = store.get_events()
-
-    if not events:
-        st.info(
-            "Nothing saved yet.  \n"
-            "Go to the **Live Odds** tab and fetch some odds to get started."
-        )
-        return
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        event_pick = st.selectbox(
-            "Game", ["All games"] + events, key="hist_event",
-        )
-    with col2:
-        type_pick = st.selectbox(
-            "Bet type",
-            ["All types"] + list(BET_TYPE_LABELS.keys()),
-            format_func=lambda k: BET_TYPE_LABELS.get(k, k),
-            key="hist_type",
-        )
-    with col3:
-        limit = st.select_slider(
-            "Max rows",
-            options=[50, 100, 200, 500],
-            value=100,
-            key="hist_limit",
-        )
-
-    ev = None if event_pick == "All games" else event_pick
-    bt = None if type_pick == "All types" else BetType(type_pick)
-
-    with LineStore(DB_PATH) as store:
-        lines = store.get_lines(event=ev, bet_type=bt, limit=limit)
 
     if not lines:
-        st.info("No matching lines for these filters.")
+        st.info(f"No {sport} games available right now.")
         return
 
-    compact = _compact_mode()
-    df = _lines_to_df(lines, compact=compact)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    st.caption(f"Showing {len(lines)} of up to {limit} rows")
+    with LineStore(DB_PATH) as store:
+        count = store.save_lines(lines)
+
+    st.success(f"Got {len(lines)} lines across {sport}. Saved {count} new rows.")
+    st.session_state["last_fetch"] = lines
+
+    # Auto-scan for arbs
+    ml_arbs = find_moneyline_arbs(lines)
+    spread_arbs = find_spread_arbs(lines)
+    st.session_state["last_arbs"] = ml_arbs + spread_arbs
+
+    # Auto-detect movements from stored history
+    with LineStore(DB_PATH) as store:
+        all_lines = store.get_lines(limit=10000)
+    if len(all_lines) >= 2:
+        sorted_lines = sorted(all_lines, key=lambda ln: ln.timestamp)
+        mid = len(sorted_lines) // 2
+        moves = detect_moves(sorted_lines[:mid], sorted_lines[mid:])
+        st.session_state["last_moves"] = moves
+
+
+def _build_game_index(lines) -> dict[str, dict]:
+    """Group fetched lines into a dict keyed by event name."""
+    games: dict[str, dict] = {}
+    for ln in lines:
+        if ln.event not in games:
+            games[ln.event] = {
+                "books": set(),
+                "last_updated": ln.timestamp,
+                "home_team": ln.home_team,
+                "away_team": ln.away_team,
+                "sport": ln.sport,
+                "bet_types": set(),
+            }
+        g = games[ln.event]
+        g["books"].add(ln.sportsbook)
+        g["bet_types"].add(ln.bet_type)
+        if ln.timestamp > g["last_updated"]:
+            g["last_updated"] = ln.timestamp
+    return games
 
 
 # ---------------------------------------------------------------------------
-# Tab: Available Sports
+# PAGE 1: Dashboard — game list
 # ---------------------------------------------------------------------------
 
-def _tab_sports():
-    st.subheader("Available Sports")
+def _page_dashboard():
+    sport = _sport_name()
+    st.title("Sports Betting Line Tracker")
     st.caption(
-        "These are all the sports currently available from the API. "
-        "This is a free call — it does not count against your quota."
+        "Compare odds across sportsbooks, find arbitrage, "
+        "and track how lines move over time."
     )
 
+    if st.button(f"Fetch Latest {sport} Odds", type="primary", key="btn_fetch"):
+        _fetch_odds()
+
+    lines = st.session_state.get("last_fetch")
+    if not lines:
+        st.info(
+            f"No data loaded yet. Click above to fetch the latest {sport} odds."
+        )
+        return
+
+    games = _build_game_index(lines)
+
+    # Badge lookup
+    all_arbs = st.session_state.get("last_arbs", [])
+    arb_events = {a.event for a in all_arbs if a.profitable}
+    near_arb_events = {
+        a.event for a in all_arbs if not a.profitable and a.margin > -2
+    }
+    all_moves = st.session_state.get("last_moves", [])
+    move_events = {m.event for m in all_moves} if all_moves else set()
+
+    # Summary metrics
+    all_books = {b for g in games.values() for b in g["books"]}
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Games", len(games))
+    c2.metric("Sportsbooks", len(all_books))
+    c3.metric("Total Lines", len(lines))
+    c4.metric("Arb Alerts", len(arb_events))
+
+    st.divider()
+
+    # Sort by last_updated descending
+    sorted_games = sorted(
+        games.items(), key=lambda x: x[1]["last_updated"], reverse=True,
+    )
+
+    for event_name, info in sorted_games:
+        with st.container(border=True):
+            cols = st.columns([5, 2, 2, 1])
+            with cols[0]:
+                st.markdown(f"**{event_name}**")
+                st.caption(sport)
+            with cols[1]:
+                st.markdown(f"{len(info['books'])} books")
+                st.caption(f"Updated {_relative_time(info['last_updated'])}")
+            with cols[2]:
+                badges = []
+                if event_name in arb_events:
+                    badges.append(":red[**ARB**]")
+                elif event_name in near_arb_events:
+                    badges.append(":orange[**NEAR-ARB**]")
+                if event_name in move_events:
+                    badges.append(":blue[**MOVE**]")
+                if badges:
+                    st.markdown(" \u00a0 ".join(badges))
+            with cols[3]:
+                if st.button("View", key=f"view_{event_name}"):
+                    st.session_state["page"] = "detail"
+                    st.session_state["selected_game"] = event_name
+                    st.rerun()
+
+    # Sports list (collapsed)
+    with st.expander("Browse available sports"):
+        _sports_list()
+
+
+def _sports_list():
+    """Show all available sports from the API."""
     if st.button("Load Sports List", key="btn_sports"):
         api_key = _require_key()
         if api_key is None:
@@ -856,11 +442,10 @@ def _tab_sports():
 
     sports = st.session_state.get("sports_list")
     if sports is None:
+        st.caption("This is a free call — does not count against your quota.")
         return
 
     active = [s for s in sports if s.get("active")]
-    inactive = [s for s in sports if not s.get("active")]
-
     st.metric("Active Sports", len(active))
 
     rows = []
@@ -872,20 +457,312 @@ def _tab_sports():
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    if inactive:
-        with st.expander(f"Off-season / inactive ({len(inactive)})"):
+
+# ---------------------------------------------------------------------------
+# PAGE 2: Game Detail
+# ---------------------------------------------------------------------------
+
+def _page_detail():
+    event_name = st.session_state.get("selected_game", "")
+
+    if st.button("\u2190 Back to Dashboard", key="btn_back"):
+        st.session_state["page"] = "dashboard"
+        st.rerun()
+
+    lines = st.session_state.get("last_fetch", [])
+    game_lines = [ln for ln in lines if ln.event == event_name]
+
+    st.title(event_name)
+
+    if game_lines:
+        books = {ln.sportsbook for ln in game_lines}
+        latest_ts = max(ln.timestamp for ln in game_lines)
+        st.caption(
+            f"{_sport_name()} \u00b7 {len(books)} sportsbooks \u00b7 "
+            f"Updated {_relative_time(latest_ts)}"
+        )
+
+    tabs = st.tabs([
+        "Odds Comparison", "Arbitrage", "Line Movements", "History",
+    ])
+
+    with tabs[0]:
+        _detail_odds(event_name, game_lines)
+    with tabs[1]:
+        _detail_arbs(event_name)
+    with tabs[2]:
+        _detail_movements(event_name)
+    with tabs[3]:
+        _detail_history(event_name)
+
+
+# -- Detail tab: Odds Comparison -------------------------------------------
+
+def _detail_odds(event_name: str, game_lines):
+    """Shows all sportsbook lines for this game, grouped by bet type."""
+    if not game_lines:
+        st.info("No odds data for this game. Fetch odds from the dashboard first.")
+        return
+
+    compact = _compact_mode()
+
+    for bt in [BetType.MONEYLINE, BetType.SPREAD, BetType.TOTAL]:
+        bt_lines = [ln for ln in game_lines if ln.bet_type == bt]
+        if not bt_lines:
+            continue
+
+        label = BET_TYPE_LABELS.get(bt.value, bt.value)
+        st.subheader(label)
+
+        display_df = _lines_to_df(bt_lines, compact=compact)
+        raw_df = _lines_to_raw_df(bt_lines)
+
+        # Drop redundant Game column (all rows are the same game)
+        if "Game" in display_df.columns:
+            display_df = display_df.drop(columns=["Game"])
+
+        if not display_df.empty:
+            styled = _highlight_best(display_df, raw_df)
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        # Best-value callouts
+        if bt == BetType.MONEYLINE and len(bt_lines) >= 2:
+            best_home = max(bt_lines, key=lambda ln: ln.home_value)
+            best_away = max(bt_lines, key=lambda ln: ln.away_value)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric(
+                    f"Best Home: {best_home.sportsbook}",
+                    _format_odds(best_home.home_value),
+                )
+            with c2:
+                st.metric(
+                    f"Best Away: {best_away.sportsbook}",
+                    _format_odds(best_away.away_value),
+                )
+        elif bt == BetType.SPREAD and len(bt_lines) >= 2:
+            best_home = max(bt_lines, key=lambda ln: ln.home_value)
+            best_away = max(bt_lines, key=lambda ln: ln.away_value)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric(
+                    f"Best Home spread: {best_home.sportsbook}",
+                    f"{best_home.home_value:+.1f}",
+                )
+            with c2:
+                st.metric(
+                    f"Best Away spread: {best_away.sportsbook}",
+                    f"{best_away.away_value:+.1f}",
+                )
+
+
+# -- Detail tab: Arbitrage -------------------------------------------------
+
+def _detail_arbs(event_name: str):
+    """Shows arb opportunities for this game."""
+    all_arbs = st.session_state.get("last_arbs", [])
+    game_arbs = [a for a in all_arbs if a.event == event_name]
+
+    if not game_arbs:
+        st.info("No arbitrage opportunities detected for this game.")
+        return
+
+    profitable = [a for a in game_arbs if a.profitable]
+    near = [a for a in game_arbs if not a.profitable]
+
+    c1, c2 = st.columns(2)
+    c1.metric("Profitable", len(profitable))
+    c2.metric("Near Arbs", len(near))
+
+    if profitable:
+        st.success(f"Found {len(profitable)} profitable arb(s)!")
+        for arb in profitable:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{BET_TYPE_LABELS.get(arb.bet_type.value, arb.bet_type.value)}**"
+                )
+                c1, c2, c3 = st.columns(3)
+                c1.metric(
+                    "Side A",
+                    arb.side_a.sportsbook,
+                    help=f"Home value: {arb.side_a.home_value}",
+                )
+                c2.metric(
+                    "Side B",
+                    arb.side_b.sportsbook,
+                    help=f"Away value: {arb.side_b.away_value}",
+                )
+                c3.metric("Profit margin", f"{arb.margin:+.2f}%")
+
+                # Stake calculator for moneyline arbs
+                if arb.bet_type == BetType.MONEYLINE:
+                    result = _compute_arb_stakes(
+                        arb.side_a.home_value, arb.side_b.away_value,
+                    )
+                    if result:
+                        stake_a, stake_b, profit, roi = result
+                        with st.expander(
+                            "Stake calculator ($100 total)", expanded=True,
+                        ):
+                            lc1, lc2 = st.columns(2)
+                            with lc1:
+                                st.markdown(
+                                    f"**Leg A \u2014 {arb.side_a.sportsbook}**  \n"
+                                    f"Bet Home at "
+                                    f"{_format_odds(arb.side_a.home_value)}  \n"
+                                    f"Stake: **${stake_a:.2f}**"
+                                )
+                            with lc2:
+                                st.markdown(
+                                    f"**Leg B \u2014 {arb.side_b.sportsbook}**  \n"
+                                    f"Bet Away at "
+                                    f"{_format_odds(arb.side_b.away_value)}  \n"
+                                    f"Stake: **${stake_b:.2f}**"
+                                )
+                            st.divider()
+                            pc1, pc2, pc3 = st.columns(3)
+                            pc1.metric("Total wagered", "$100.00")
+                            pc2.metric("Guaranteed profit", f"${profit:.2f}")
+                            pc3.metric("ROI", f"{roi:.2f}%")
+
+    if near:
+        with st.expander(
+            f"Near-arbs ({len(near)}) \u2014 not profitable yet, but close",
+        ):
             rows = []
-            for s in inactive:
+            for arb in near:
                 rows.append({
-                    "Sport": s.get("title", ""),
-                    "API Key": s.get("key", ""),
-                    "Group": s.get("group", ""),
+                    "Type": BET_TYPE_LABELS.get(
+                        arb.bet_type.value, arb.bet_type.value,
+                    ),
+                    "Book A": arb.side_a.sportsbook,
+                    "Book B": arb.side_b.sportsbook,
+                    "Margin": f"{arb.margin:+.2f}%",
                 })
             st.dataframe(
                 pd.DataFrame(rows),
                 use_container_width=True,
                 hide_index=True,
             )
+
+
+# -- Detail tab: Line Movements --------------------------------------------
+
+_TIME_WINDOWS = {
+    "All": 0,
+    "Last 15m": 15,
+    "Last 1h": 60,
+    "Last 6h": 360,
+    "Last 24h": 1440,
+}
+
+
+def _detail_movements(event_name: str):
+    """Shows detected movements for this game."""
+    all_moves = st.session_state.get("last_moves", [])
+    game_moves = [m for m in all_moves if m.event == event_name]
+
+    if not game_moves:
+        st.info(
+            "No line movements detected for this game.  \n"
+            "Movements appear after multiple fetches over time."
+        )
+        return
+
+    # Filters
+    col1, col2 = st.columns(2)
+    with col1:
+        time_window = st.selectbox(
+            "Time window",
+            list(_TIME_WINDOWS.keys()),
+            key="detail_move_window",
+        )
+    with col2:
+        hide_juice = st.toggle(
+            "Hide juice-only changes",
+            value=False,
+            key="detail_hide_juice",
+        )
+
+    # Apply filters
+    filtered = list(game_moves)
+
+    window_min = _TIME_WINDOWS.get(time_window, 0)
+    if window_min > 0:
+        now = datetime.now()
+        kept = []
+        for m in filtered:
+            ts = m.new_line.timestamp
+            ref = datetime.now(ts.tzinfo) if ts.tzinfo else now
+            if (ref - ts).total_seconds() <= window_min * 60:
+                kept.append(m)
+        filtered = kept
+
+    if hide_juice:
+        kept = []
+        for m in filtered:
+            if m.bet_type == BetType.MONEYLINE and abs(m.change) < 1:
+                continue
+            if m.bet_type in (BetType.SPREAD, BetType.TOTAL) and abs(m.change) < 0.5:
+                continue
+            kept.append(m)
+        filtered = kept
+
+    if not filtered:
+        st.info("No movements match the current filters.")
+        return
+
+    # Summary
+    up = sum(1 for m in filtered if m.direction == "up")
+    down = sum(1 for m in filtered if m.direction == "down")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Moves", len(filtered))
+    c2.metric("Up", up)
+    c3.metric("Down", down)
+
+    # Movement table
+    rows = []
+    for m in filtered:
+        arrow = "\u2191" if m.direction == "up" else (
+            "\u2193" if m.direction == "down" else "\u2014"
+        )
+        old_str = _format_value(m.old_line.home_value, m.bet_type)
+        new_str = _format_value(m.new_line.home_value, m.bet_type)
+        rows.append({
+            "Sportsbook": m.sportsbook,
+            "Bet Type": BET_TYPE_LABELS.get(m.bet_type.value, m.bet_type.value),
+            "Old": old_str,
+            "": "\u2192",
+            "New": new_str,
+            "Delta": f"{arrow} {m.change:+.1f}",
+            "When": _relative_time(m.new_line.timestamp),
+        })
+
+    st.dataframe(
+        pd.DataFrame(rows), use_container_width=True, hide_index=True,
+    )
+
+
+# -- Detail tab: History ----------------------------------------------------
+
+def _detail_history(event_name: str):
+    """Shows stored line history for this game."""
+    with LineStore(DB_PATH) as store:
+        lines = store.get_lines(event=event_name, limit=_max_display_rows())
+
+    if not lines:
+        st.info("No stored history for this game yet.")
+        return
+
+    compact = _compact_mode()
+    df = _lines_to_df(lines, compact=compact)
+
+    # Drop redundant Game column
+    if "Game" in df.columns:
+        df = df.drop(columns=["Game"])
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption(f"Showing {len(lines)} rows")
 
 
 # ---------------------------------------------------------------------------
@@ -899,35 +776,13 @@ def main():
         layout="wide",
     )
 
-    st.title("Sports Betting Line Tracker")
-    st.caption(
-        "Compare odds across sportsbooks, find arbitrage, "
-        "and track how lines move over time."
-    )
-
     _sidebar()
 
-    tabs = st.tabs([
-        "Live Odds",
-        "Best Lines",
-        "Arbitrage",
-        "Line Movements",
-        "History",
-        "Sports List",
-    ])
-
-    with tabs[0]:
-        _tab_live()
-    with tabs[1]:
-        _tab_best_lines()
-    with tabs[2]:
-        _tab_arbs()
-    with tabs[3]:
-        _tab_movements()
-    with tabs[4]:
-        _tab_history()
-    with tabs[5]:
-        _tab_sports()
+    page = st.session_state.get("page", "dashboard")
+    if page == "detail" and st.session_state.get("selected_game"):
+        _page_detail()
+    else:
+        _page_dashboard()
 
 
 if __name__ == "__main__":
