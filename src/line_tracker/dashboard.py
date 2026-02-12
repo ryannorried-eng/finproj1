@@ -9,6 +9,17 @@ import pandas as pd
 import streamlit as st
 
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
+from line_tracker.bet_slip import (
+    american_profit,
+    american_total_return,
+    format_american,
+    has_conflicting_leg,
+    is_duplicate_leg,
+    parlay_payout,
+)
+from line_tracker.bet_slip import (
+    american_to_decimal as _slip_a2d,
+)
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
 from line_tracker.scraper import OddsClient
@@ -676,6 +687,9 @@ def _detail_odds(event_name: str, game_lines):
                 f"{best_under.away_value:.1f}",
             )
 
+    # --- Add to Bet Slip controls ---
+    _bet_slip_add_controls(event_name, selected_bt, bt_lines)
+
 
 # -- Detail tab: Arbitrage -------------------------------------------------
 
@@ -931,6 +945,208 @@ def _detail_history(event_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Bet Slip: add controls (inside detail odds tab)
+# ---------------------------------------------------------------------------
+
+def _bet_slip_add_controls(
+    event_name: str, selected_bt: BetType, bt_lines: list,
+):
+    """Render 'Add to Bet Slip' controls below the odds comparison table."""
+    if not bt_lines:
+        return
+
+    st.divider()
+    st.markdown("**Add to Bet Slip**")
+
+    sportsbooks = [ln.sportsbook for ln in bt_lines]
+
+    if selected_bt == BetType.TOTAL:
+        sides = ["Over", "Under"]
+    else:
+        sides = ["Home", "Away"]
+
+    market_key = selected_bt.value  # moneyline / spread / total
+
+    cols = st.columns([3, 2, 1])
+    with cols[0]:
+        selected_book = st.selectbox(
+            "Sportsbook",
+            sportsbooks,
+            key=f"slip_book_{market_key}",
+            label_visibility="collapsed",
+        )
+    with cols[1]:
+        selected_side = st.radio(
+            "Side",
+            sides,
+            horizontal=True,
+            key=f"slip_side_{market_key}",
+            label_visibility="collapsed",
+        )
+
+    ln = next(x for x in bt_lines if x.sportsbook == selected_book)
+
+    # Determine odds and line based on market + side
+    odds: float | None = None
+    line: float | None = None
+    if selected_bt == BetType.MONEYLINE:
+        odds = ln.home_value if selected_side == "Home" else ln.away_value
+        line = None
+        market_label = "ML"
+    elif selected_bt == BetType.SPREAD:
+        if selected_side == "Home":
+            odds = ln.home_price
+            line = ln.home_value
+        else:
+            odds = ln.away_price
+            line = ln.away_value
+        market_label = "Spread"
+    else:  # TOTAL
+        if selected_side == "Over":
+            odds = ln.home_price
+            line = ln.home_value
+        else:
+            odds = ln.away_price
+            line = ln.away_value
+        market_label = "Total"
+
+    if odds is None:
+        st.caption("Juice/price data not available for this selection.")
+        return
+
+    # Preview what will be added
+    if line is not None and market_label == "Spread":
+        line_str = f" {line:+.1f}"
+    elif line is not None:
+        line_str = f" {line:.1f}"
+    else:
+        line_str = ""
+    st.caption(
+        f"{selected_book} \u00b7 {market_label} \u00b7 "
+        f"{selected_side}{line_str} \u00b7 {_format_odds(odds)}"
+    )
+
+    with cols[2]:
+        if st.button(
+            "\u2795 Slip", key=f"slip_add_{market_key}", type="primary",
+        ):
+            leg = {
+                "sport": _sport_name(),
+                "event_name": event_name,
+                "sportsbook": selected_book,
+                "market": market_label,
+                "selection": selected_side,
+                "line": line,
+                "odds": odds,
+                "fetched_at": ln.timestamp.isoformat(),
+            }
+            slip = st.session_state.setdefault("bet_slip", [])
+            if is_duplicate_leg(slip, leg):
+                st.toast("Already in your bet slip!", icon="\u26a0\ufe0f")
+            else:
+                if has_conflicting_leg(slip, leg):
+                    st.toast(
+                        "Added \u2014 opposing selection exists for this event!",
+                        icon="\u26a0\ufe0f",
+                    )
+                else:
+                    st.toast("Added to bet slip!", icon="\u2705")
+                slip.append(leg)
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Bet Slip: sidebar panel
+# ---------------------------------------------------------------------------
+
+def _bet_slip_sidebar():
+    """Render the Bet Slip panel in the sidebar."""
+    with st.sidebar:
+        st.divider()
+        st.header("Bet Slip")
+
+        slip = st.session_state.get("bet_slip", [])
+
+        if not slip:
+            st.caption("No legs yet. Add selections from the Odds Comparison tab.")
+            return
+
+        # Stake input
+        stake = st.number_input(
+            "Stake ($)",
+            min_value=1.0,
+            value=100.0,
+            step=10.0,
+            key="slip_stake",
+        )
+
+        # List legs with remove buttons
+        to_remove: int | None = None
+        for i, leg in enumerate(slip):
+            with st.container(border=True):
+                # Line description
+                if leg["line"] is not None and leg["market"] == "Spread":
+                    line_str = f" {leg['line']:+.1f}"
+                elif leg["line"] is not None:
+                    line_str = f" {leg['line']:.1f}"
+                else:
+                    line_str = ""
+
+                st.markdown(
+                    f"**{leg['event_name']}**  \n"
+                    f"{leg['sportsbook']} \u00b7 {leg['market']} \u00b7 "
+                    f"{leg['selection']}{line_str}  \n"
+                    f"Odds: **{format_american(leg['odds'])}**"
+                )
+                if st.button(
+                    "\u274c Remove", key=f"slip_rm_{i}", type="secondary",
+                ):
+                    to_remove = i
+
+        # Process removal (after rendering all legs so keys are stable)
+        if to_remove is not None:
+            st.session_state["bet_slip"].pop(to_remove)
+            st.rerun()
+
+        # Clear all
+        if len(slip) > 1:
+            if st.button("Clear All", key="slip_clear"):
+                st.session_state["bet_slip"] = []
+                st.rerun()
+
+        st.divider()
+
+        # --- Payout calculation ---
+        legs_odds = [leg["odds"] for leg in slip]
+
+        if len(slip) == 1:
+            # Single leg: straight bet
+            odds = legs_odds[0]
+            profit = american_profit(stake, odds)
+            total_ret = american_total_return(stake, odds)
+            dec = _slip_a2d(odds)
+            amer = odds
+
+            st.markdown("**Straight Bet**")
+            c1, c2 = st.columns(2)
+            c1.metric("Odds", f"{format_american(amer)} ({dec:.2f})")
+            c2.metric("Profit", f"${profit:.2f}")
+            st.metric("Total Return", f"${total_ret:.2f}")
+        else:
+            # Parlay
+            result = parlay_payout(stake, legs_odds)
+            st.markdown(f"**{len(slip)}-Leg Parlay**")
+            c1, c2 = st.columns(2)
+            c1.metric(
+                "Combined Odds",
+                f"{format_american(result['combined_american'])} "
+                f"({result['combined_decimal']:.2f})",
+            )
+            c2.metric("Profit", f"${result['profit']:.2f}")
+            st.metric("Total Return", f"${result['total_return']:.2f}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -941,6 +1157,10 @@ def main():
         layout="wide",
     )
 
+    # Ensure bet slip exists in session state
+    if "bet_slip" not in st.session_state:
+        st.session_state["bet_slip"] = []
+
     _sidebar()
 
     page = st.session_state.get("page", "dashboard")
@@ -948,6 +1168,9 @@ def main():
         _page_detail()
     else:
         _page_dashboard()
+
+    # Render bet slip sidebar after page content so it has latest state
+    _bet_slip_sidebar()
 
 
 if __name__ == "__main__":
