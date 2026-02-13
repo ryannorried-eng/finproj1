@@ -744,8 +744,8 @@ def _detail_best_bet_section(game_lines):
                 )
             with c2:
                 st.markdown(
-                    f"Edge: **{fmt_pct(top.edge_pct, sign=True)}**"
-                    f"  |  **{fmt_money(top.ev_per_100, sign=True)}** per $100"
+                    f"Edge: **{fmt_pct(top.edge_pct, sign=True)}** | "
+                    f"EV: **{fmt_money(top.ev_per_100, sign=True)} per $100**"
                 )
             with c3:
                 st.markdown(
@@ -770,7 +770,7 @@ def _detail_best_bet_section(game_lines):
                     f"{format_american(r.best_odds)} "
                     f"on {r.best_sportsbook} — "
                     f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
-                    f"{fmt_money(r.ev_per_100, sign=True)} per $100"
+                    f"EV: {fmt_money(r.ev_per_100, sign=True)} per $100"
                 )
     else:
         # No bets meet the threshold — show the best one as FYI
@@ -782,7 +782,7 @@ def _detail_best_bet_section(game_lines):
             f"at {format_american(top.best_odds)} "
             f"on {top.best_sportsbook}** — "
             f"Edge {fmt_pct(top.edge_pct, sign=True)}, "
-            f"{fmt_money(top.ev_per_100, sign=True)} per $100"
+            f"EV: {fmt_money(top.ev_per_100, sign=True)} per $100"
         )
 
 
