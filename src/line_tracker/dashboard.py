@@ -704,7 +704,7 @@ def _page_detail():
 
 def _detail_best_bet_section(game_lines):
     """Show the 'Best Bet (Consensus EV)' section above tabs."""
-    recs = recommend_best_bets(game_lines, top_n=3)
+    recs = recommend_best_bets(game_lines, top_n=6)
     if not recs:
         return
 
@@ -724,7 +724,7 @@ def _detail_best_bet_section(game_lines):
         key=f"min_edge_{id(game_lines)}",
     )
 
-    qualified = [r for r in recs if r.ev > 0 and r.edge_pct >= min_edge]
+    qualified = [r for r in recs if r.edge_pct >= min_edge]
 
     if qualified:
         top = qualified[0]
@@ -767,17 +767,16 @@ def _detail_best_bet_section(game_lines):
                     f"EV: {fmt_money(r.ev_per_100, sign=True)} per $100"
                 )
     else:
-        # No bets meet the threshold — show the best one as FYI
-        top = recs[0]
-        market_label = _best_bet_market_label(top)
-        st.info(
-            f"No bets meet your min edge threshold. "
-            f"FYI — best available: **{top.selection} ({market_label}) "
-            f"at {format_american(top.best_odds)} "
-            f"on {top.best_sportsbook}** — "
-            f"Edge {fmt_pct(top.edge_pct, sign=True)}, "
-            f"EV: {fmt_money(top.ev_per_100, sign=True)} per $100"
-        )
+        st.info("No bets meet your min edge threshold. Showing closest candidates:")
+        for r in recs[:3]:
+            ml = _best_bet_market_label(r)
+            st.markdown(
+                f"- {r.selection} ({ml}) at "
+                f"{format_american(r.best_odds)} "
+                f"on {r.best_sportsbook} — "
+                f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
+                f"EV: {fmt_money(r.ev_per_100, sign=True)} per $100"
+            )
 
 
 def _render_best_bet_why(rec) -> None:
