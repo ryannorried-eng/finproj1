@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
+from line_tracker.best_bets import recommend_best_bets
 from line_tracker.bet_history import init_bet_state, settle_bet, submit_bet
 from line_tracker.bet_slip import (
     american_profit,
@@ -682,6 +683,9 @@ def _page_detail():
         # --- Summary strip: best lines at a glance ---
         _detail_summary_strip(game_lines)
 
+        # --- Best Bet (Consensus EV) ---
+        _detail_best_bet_section(game_lines)
+
     tabs = st.tabs([
         "Odds Comparison", "Arbitrage", "Line Movements", "History",
     ])
@@ -694,6 +698,77 @@ def _page_detail():
         _detail_movements(event_name)
     with tabs[3]:
         _detail_history(event_name)
+
+
+# -- Detail: Best Bet (Consensus EV) ---------------------------------------
+
+def _detail_best_bet_section(game_lines):
+    """Show the 'Best Bet (Consensus EV)' section above tabs."""
+    recs = recommend_best_bets(game_lines, top_n=3)
+    if not recs:
+        return
+
+    st.divider()
+    st.subheader("Best Bet (Consensus EV)")
+
+    pos_ev = [r for r in recs if r.ev > 0]
+
+    if pos_ev:
+        top = pos_ev[0]
+        market_label = _best_bet_market_label(top)
+        dollar_ev = top.ev * 100  # per $100 stake
+
+        with st.container(border=True):
+            st.markdown(
+                f"**Best Bet: {top.selection} ({market_label}) "
+                f"at {format_american(top.best_odds)} "
+                f"on {top.best_sportsbook}**"
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(
+                    f"Consensus win prob: "
+                    f"**{top.consensus_prob * 100:.1f}%**"
+                )
+            with c2:
+                st.markdown(
+                    f"Edge (EV): **{fmt_pct(top.edge_pct, sign=True)}**"
+                    f"  |  **{fmt_money(dollar_ev, sign=True)}** per $100"
+                )
+
+        others = pos_ev[1:]
+        if others:
+            st.markdown("**Other +EV bets:**")
+            for r in others:
+                ml = _best_bet_market_label(r)
+                dev = r.ev * 100
+                st.markdown(
+                    f"- {r.selection} ({ml}) at "
+                    f"{format_american(r.best_odds)} "
+                    f"on {r.best_sportsbook} — "
+                    f"EV {fmt_pct(r.edge_pct, sign=True)}, "
+                    f"{fmt_money(dev, sign=True)} per $100"
+                )
+    else:
+        # No +EV bets — show highest edge line as fallback
+        top = recs[0]
+        market_label = _best_bet_market_label(top)
+        st.info(
+            f"No +EV bets found based on consensus. "
+            f"Best value to shop: **{top.selection} ({market_label}) "
+            f"at {format_american(top.best_odds)} "
+            f"on {top.best_sportsbook}** — "
+            f"EV {fmt_pct(top.edge_pct, sign=True)}"
+        )
+
+
+def _best_bet_market_label(rec) -> str:
+    """Format the market name with line info for display."""
+    if rec.market == "spread" and rec.line is not None:
+        return f"Spread ({rec.line:+.1f})"
+    if rec.market == "total" and rec.line is not None:
+        return f"Total ({rec.line:.1f})"
+    return rec.market.title()
 
 
 # -- Detail: Summary strip -------------------------------------------------
