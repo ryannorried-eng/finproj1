@@ -104,3 +104,62 @@ def has_conflicting_leg(slip: list[dict], leg: dict) -> bool:
         ):
             return True
     return False
+
+
+def compute_standouts(entries: list[dict], stake: float = 100.0) -> list[dict]:
+    """Compute shopping-value standouts from odds entries.
+
+    Each entry dict must have keys:
+        event, market (ML/Spread/Total), selection, sportsbook, odds, line, sport
+
+    Groups by (event, market, selection).  For each group with >= 2 books:
+      - consensus_prob  = median implied probability across books
+      - edge            = consensus_prob - book_prob
+                          (positive ⇒ book offers better-than-consensus odds)
+      - dollar_impact   = stake * (book_decimal - median_decimal)
+                          (positive ⇒ extra payout vs median book)
+
+    Returns list of dicts sorted by edge descending (best standouts first).
+    """
+    from statistics import median as _median
+
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    for e in entries:
+        key = (e["event"], e["market"], e["selection"])
+        groups.setdefault(key, []).append(e)
+
+    results: list[dict] = []
+    for (event, market, selection), items in groups.items():
+        if len(items) < 2:
+            continue
+
+        probs = [implied_prob_from_american(it["odds"]) for it in items]
+        consensus = _median(probs)
+
+        decs = [american_to_decimal(it["odds"]) for it in items]
+        median_dec = _median(decs)
+        median_american = decimal_to_american(median_dec)
+
+        for it in items:
+            bp = implied_prob_from_american(it["odds"])
+            bd = american_to_decimal(it["odds"])
+            edge = consensus - bp
+            impact = round(stake * (bd - median_dec), 2)
+
+            results.append({
+                "event": event,
+                "market": market,
+                "selection": selection,
+                "sportsbook": it["sportsbook"],
+                "odds": it["odds"],
+                "line": it.get("line"),
+                "book_prob": round(bp, 4),
+                "consensus_prob": round(consensus, 4),
+                "edge": round(edge, 4),
+                "dollar_impact": impact,
+                "median_odds": round(median_american, 1),
+                "sport": it.get("sport", ""),
+            })
+
+    results.sort(key=lambda x: x["edge"], reverse=True)
+    return results

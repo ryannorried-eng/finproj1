@@ -9,9 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
+from line_tracker.bet_history import init_bet_state, settle_bet, submit_bet
 from line_tracker.bet_slip import (
     american_profit,
     american_total_return,
+    compute_standouts,
     format_american,
     has_conflicting_leg,
     is_duplicate_leg,
@@ -120,6 +122,87 @@ def _compact_mode() -> bool:
     return st.session_state.get("compact_mode", False)
 
 
+def fmt_money(x: float, sign: bool = False) -> str:
+    """Format currency: $1,234.56.  Use *sign=True* for +$… / -$…."""
+    if sign:
+        prefix = "+" if x >= 0 else "-"
+        return f"{prefix}${abs(x):,.2f}"
+    return f"${x:,.2f}"
+
+
+def fmt_pct(x: float, sign: bool = False) -> str:
+    """Format percentage: 12.3%.  Use *sign=True* for +12.3% / -1.2%."""
+    if sign:
+        return f"{x:+.1f}%"
+    return f"{x:.1f}%"
+
+
+def fmt_odds(x: float) -> str:
+    """Format American odds: '+120' or '-110'."""
+    return format_american(x)
+
+
+def _get_slip_book() -> str | None:
+    """Return the currently locked sportsbook, or None."""
+    return st.session_state.get("slip_book")
+
+
+def _lock_slip_book(book: str) -> None:
+    """Lock the bet slip to a sportsbook (called when first leg is added)."""
+    st.session_state["slip_book"] = book
+
+
+def _clear_slip() -> None:
+    """Clear all legs and unlock sportsbook."""
+    st.session_state["bet_slip"] = []
+    st.session_state["slip_book"] = None
+    st.session_state["slip_stake"] = 100.0
+
+
+def _lines_to_shopping_entries(lines) -> list[dict]:
+    """Convert BettingLine objects to entry dicts for compute_standouts.
+
+    Produces one entry per (book, event, market, selection) from the fetched lines.
+    """
+    entries: list[dict] = []
+    for ln in lines:
+        event = ln.event
+        sport = ln.sport
+        book = ln.sportsbook
+        if ln.bet_type == BetType.MONEYLINE:
+            for side, odds in [("Home", ln.home_value), ("Away", ln.away_value)]:
+                entries.append({
+                    "event": event, "market": "ML", "selection": side,
+                    "sportsbook": book, "odds": odds, "line": None,
+                    "sport": sport,
+                })
+        elif ln.bet_type == BetType.SPREAD:
+            for side, odds, line_val in [
+                ("Home", ln.home_price, ln.home_value),
+                ("Away", ln.away_price, ln.away_value),
+            ]:
+                if odds is None:
+                    continue
+                entries.append({
+                    "event": event, "market": "Spread", "selection": side,
+                    "sportsbook": book, "odds": odds, "line": line_val,
+                    "sport": sport,
+                })
+        elif ln.bet_type == BetType.TOTAL:
+            for side, odds, line_val in [
+                ("Over", ln.home_price, ln.home_value),
+                ("Under", ln.away_price, ln.away_value),
+            ]:
+                if odds is None:
+                    continue
+                entries.append({
+                    "event": event, "market": "Total", "selection": side,
+                    "sportsbook": book, "odds": odds, "line": line_val,
+                    "sport": sport,
+                })
+    return entries
+
+
 def _lines_to_df(lines, compact: bool = False) -> pd.DataFrame:
     """Convert BettingLine objects to a display DataFrame with formatted values."""
     labels = BET_TYPE_SHORT if compact else BET_TYPE_LABELS
@@ -210,6 +293,46 @@ def _highlight_best(
 
 def _sidebar():
     with st.sidebar:
+        # --- Bet Slip button (prominent, always visible) ---
+        slip = st.session_state.get("bet_slip", [])
+        slip_book = _get_slip_book()
+        count = len(slip)
+        label = f"Bet Slip ({count})" if count else "Bet Slip"
+
+        if st.button(
+            label, key="btn_open_slip", type="primary",
+            use_container_width=True,
+        ):
+            st.session_state["_open_slip"] = True
+
+        if count and slip_book:
+            st.caption(f"Locked to {slip_book}")
+
+        # --- Bet History button ---
+        active_count = len(st.session_state.get("active_bets", []))
+        settled_count = len(st.session_state.get("settled_bets", []))
+        total_bets = active_count + settled_count
+        hist_label = (
+            f"Bet History ({total_bets})" if total_bets else "Bet History"
+        )
+        if st.button(
+            hist_label, key="btn_open_history",
+            use_container_width=True,
+        ):
+            st.session_state["_open_history"] = True
+
+        st.divider()
+
+        # --- Page navigation ---
+        st.radio(
+            "Page",
+            ["Dashboard", "Best Lines to Shop"],
+            key="nav_page",
+            horizontal=True,
+        )
+
+        st.divider()
+
         st.header("Settings")
 
         st.text_input(
@@ -297,7 +420,7 @@ def _compute_arb_stakes(
     profit = payout - total_stake
     roi = (profit / total_stake) * 100
 
-    return round(stake_a, 2), round(stake_b, 2), round(profit, 2), round(roi, 2)
+    return stake_a, stake_b, profit, roi
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +528,8 @@ def _page_dashboard():
     c2.metric("Sportsbooks", len(all_books))
     c3.metric("Total Lines", len(lines))
     c4.metric("Arb Alerts", len(arb_events))
+
+    _render_legend()
 
     st.divider()
 
@@ -727,7 +852,7 @@ def _detail_arbs(event_name: str):
                     arb.side_b.sportsbook,
                     help=f"Away value: {arb.side_b.away_value}",
                 )
-                c3.metric("Profit margin", f"{arb.margin:+.2f}%")
+                c3.metric("Profit margin", fmt_pct(arb.margin, sign=True))
 
                 # Stake calculator for moneyline arbs
                 if arb.bet_type == BetType.MONEYLINE:
@@ -745,20 +870,20 @@ def _detail_arbs(event_name: str):
                                     f"**Leg A \u2014 {arb.side_a.sportsbook}**  \n"
                                     f"Bet Home at "
                                     f"{_format_odds(arb.side_a.home_value)}  \n"
-                                    f"Stake: **${stake_a:.2f}**"
+                                    f"Stake: **{fmt_money(stake_a)}**"
                                 )
                             with lc2:
                                 st.markdown(
                                     f"**Leg B \u2014 {arb.side_b.sportsbook}**  \n"
                                     f"Bet Away at "
                                     f"{_format_odds(arb.side_b.away_value)}  \n"
-                                    f"Stake: **${stake_b:.2f}**"
+                                    f"Stake: **{fmt_money(stake_b)}**"
                                 )
                             st.divider()
                             pc1, pc2, pc3 = st.columns(3)
-                            pc1.metric("Total wagered", "$100.00")
-                            pc2.metric("Guaranteed profit", f"${profit:.2f}")
-                            pc3.metric("ROI", f"{roi:.2f}%")
+                            pc1.metric("Total wagered", fmt_money(100))
+                            pc2.metric("Guaranteed profit", fmt_money(profit))
+                            pc3.metric("ROI", fmt_pct(roi))
 
     if near:
         with st.expander(
@@ -772,7 +897,7 @@ def _detail_arbs(event_name: str):
                     ),
                     "Book A": arb.side_a.sportsbook,
                     "Book B": arb.side_b.sportsbook,
-                    "Margin": f"{arb.margin:+.2f}%",
+                    "Margin": fmt_pct(arb.margin, sign=True),
                 })
             st.dataframe(
                 pd.DataFrame(rows),
@@ -948,6 +1073,38 @@ def _detail_history(event_name: str):
 # Bet Slip: add controls (inside detail odds tab)
 # ---------------------------------------------------------------------------
 
+def _try_add_leg(leg: dict) -> None:
+    """Validate and add a leg to the bet slip, enforcing sportsbook lock."""
+    slip = st.session_state.setdefault("bet_slip", [])
+    slip_book = _get_slip_book()
+
+    # Enforce single-book constraint
+    if slip_book and leg["sportsbook"] != slip_book:
+        st.toast(
+            f"Slip locked to {slip_book}. Clear slip to change.",
+            icon="\u26a0\ufe0f",
+        )
+        return
+
+    if is_duplicate_leg(slip, leg):
+        st.toast("Already in your bet slip!", icon="\u26a0\ufe0f")
+        return
+
+    if has_conflicting_leg(slip, leg):
+        st.toast(
+            "Added \u2014 opposing selection exists for this event!",
+            icon="\u26a0\ufe0f",
+        )
+    else:
+        st.toast("Added to bet slip!", icon="\u2705")
+
+    slip.append(leg)
+    # Lock to this book on first leg
+    if not slip_book:
+        _lock_slip_book(leg["sportsbook"])
+    st.rerun()
+
+
 def _bet_slip_add_controls(
     event_name: str, selected_bt: BetType, bt_lines: list,
 ):
@@ -958,7 +1115,8 @@ def _bet_slip_add_controls(
     st.divider()
     st.markdown("**Add to Bet Slip**")
 
-    sportsbooks = [ln.sportsbook for ln in bt_lines]
+    slip_book = _get_slip_book()
+    all_sportsbooks = [ln.sportsbook for ln in bt_lines]
 
     if selected_bt == BetType.TOTAL:
         sides = ["Over", "Under"]
@@ -967,11 +1125,24 @@ def _bet_slip_add_controls(
 
     market_key = selected_bt.value  # moneyline / spread / total
 
+    # Determine which books to show in the dropdown
+    if slip_book:
+        if slip_book in all_sportsbooks:
+            available_books = [slip_book]
+        else:
+            st.info(
+                f"Slip locked to **{slip_book}** (not available for this game).  \n"
+                "Open Bet Slip to change sportsbook."
+            )
+            return
+    else:
+        available_books = all_sportsbooks
+
     cols = st.columns([3, 2, 1])
     with cols[0]:
         selected_book = st.selectbox(
             "Sportsbook",
-            sportsbooks,
+            available_books,
             key=f"slip_book_{market_key}",
             label_visibility="collapsed",
         )
@@ -983,6 +1154,9 @@ def _bet_slip_add_controls(
             key=f"slip_side_{market_key}",
             label_visibility="collapsed",
         )
+
+    if slip_book:
+        st.caption(f"Locked to {slip_book}")
 
     ln = next(x for x in bt_lines if x.sportsbook == selected_book)
 
@@ -1040,51 +1214,43 @@ def _bet_slip_add_controls(
                 "odds": odds,
                 "fetched_at": ln.timestamp.isoformat(),
             }
-            slip = st.session_state.setdefault("bet_slip", [])
-            if is_duplicate_leg(slip, leg):
-                st.toast("Already in your bet slip!", icon="\u26a0\ufe0f")
-            else:
-                if has_conflicting_leg(slip, leg):
-                    st.toast(
-                        "Added \u2014 opposing selection exists for this event!",
-                        icon="\u26a0\ufe0f",
-                    )
-                else:
-                    st.toast("Added to bet slip!", icon="\u2705")
-                slip.append(leg)
-                st.rerun()
+            _try_add_leg(leg)
 
 
 # ---------------------------------------------------------------------------
-# Bet Slip: sidebar panel
+# Bet Slip: dialog (modal popup)
 # ---------------------------------------------------------------------------
 
-def _bet_slip_sidebar():
-    """Render the Bet Slip panel in the sidebar."""
-    with st.sidebar:
-        st.divider()
-        st.header("Bet Slip")
+@st.dialog("Bet Slip", width="large")
+def _slip_dialog():
+    """Sportsbook-style bet slip popup."""
+    slip = st.session_state.get("bet_slip", [])
+    slip_book = _get_slip_book()
 
-        slip = st.session_state.get("bet_slip", [])
+    if not slip:
+        st.info("No legs yet. Add selections from the Odds Comparison tab.")
+        if st.button("Close", key="dlg_close_empty"):
+            st.rerun()
+        return
 
-        if not slip:
-            st.caption("No legs yet. Add selections from the Odds Comparison tab.")
-            return
+    # Locked sportsbook header
+    hcols = st.columns([4, 2])
+    with hcols[0]:
+        if slip_book:
+            st.markdown(f"**Locked to {slip_book}**")
+    with hcols[1]:
+        if st.button("Change sportsbook", key="dlg_change_book"):
+            _clear_slip()
+            st.rerun()
 
-        # Stake input
-        stake = st.number_input(
-            "Stake ($)",
-            min_value=1.0,
-            value=100.0,
-            step=10.0,
-            key="slip_stake",
-        )
+    st.divider()
 
-        # List legs with remove buttons
-        to_remove: int | None = None
-        for i, leg in enumerate(slip):
-            with st.container(border=True):
-                # Line description
+    # --- Legs list ---
+    to_remove: int | None = None
+    for i, leg in enumerate(slip):
+        with st.container(border=True):
+            lcols = st.columns([5, 1])
+            with lcols[0]:
                 if leg["line"] is not None and leg["market"] == "Spread":
                     line_str = f" {leg['line']:+.1f}"
                 elif leg["line"] is not None:
@@ -1094,56 +1260,410 @@ def _bet_slip_sidebar():
 
                 st.markdown(
                     f"**{leg['event_name']}**  \n"
-                    f"{leg['sportsbook']} \u00b7 {leg['market']} \u00b7 "
-                    f"{leg['selection']}{line_str}  \n"
-                    f"Odds: **{format_american(leg['odds'])}**"
+                    f"{leg['market']} \u00b7 {leg['selection']}{line_str}  \n"
+                    f"{leg['sportsbook']} \u00b7 "
+                    f"**{format_american(leg['odds'])}**"
                 )
+            with lcols[1]:
                 if st.button(
-                    "\u274c Remove", key=f"slip_rm_{i}", type="secondary",
+                    "\u2715", key=f"dlg_rm_{i}", help="Remove leg",
                 ):
                     to_remove = i
 
-        # Process removal (after rendering all legs so keys are stable)
-        if to_remove is not None:
-            st.session_state["bet_slip"].pop(to_remove)
+    if to_remove is not None:
+        slip.pop(to_remove)
+        if not slip:
+            st.session_state["slip_book"] = None
+        st.session_state["_slip_reopen"] = True
+        st.rerun()
+
+    # Clear all
+    if len(slip) > 1:
+        if st.button("Clear All", key="dlg_clear"):
+            _clear_slip()
+            st.session_state["_slip_reopen"] = True
             st.rerun()
 
-        # Clear all
-        if len(slip) > 1:
-            if st.button("Clear All", key="slip_clear"):
-                st.session_state["bet_slip"] = []
-                st.rerun()
+    st.divider()
 
-        st.divider()
+    # --- Payout section ---
+    legs_odds = [leg["odds"] for leg in slip]
+    # Sanitize: delete invalid widget key so Streamlit can't use it.
+    _ds = st.session_state.get("dlg_stake")
+    if not isinstance(_ds, (int, float)) or _ds < 1.0:
+        st.session_state.pop("dlg_stake", None)
+    _slip = st.session_state.get("slip_stake", 100.0)
+    _default = max(1.0, float(_slip)) if isinstance(_slip, (int, float)) else 100.0
+    stake = st.number_input(
+        "Stake ($)",
+        min_value=1.0,
+        value=_default,
+        step=10.0,
+        key="dlg_stake",
+    )
+    # Sync to main slip_stake
+    st.session_state["slip_stake"] = stake
 
-        # --- Payout calculation ---
-        legs_odds = [leg["odds"] for leg in slip]
+    if len(slip) == 1:
+        odds = legs_odds[0]
+        profit = american_profit(stake, odds)
+        total_ret = american_total_return(stake, odds)
+        dec = _slip_a2d(odds)
 
-        if len(slip) == 1:
-            # Single leg: straight bet
-            odds = legs_odds[0]
-            profit = american_profit(stake, odds)
-            total_ret = american_total_return(stake, odds)
-            dec = _slip_a2d(odds)
-            amer = odds
+        st.markdown("**Straight Bet**")
+        c1, c2 = st.columns(2)
+        c1.metric("Odds", f"{format_american(odds)} ({dec:.2f})")
+        c2.metric("Profit", fmt_money(profit))
+        st.metric("Total Payout", fmt_money(total_ret))
+    else:
+        result = parlay_payout(stake, legs_odds)
+        st.markdown(f"**{len(slip)}-Leg Parlay**")
+        c1, c2 = st.columns(2)
+        c1.metric(
+            "Combined Odds",
+            f"{format_american(result['combined_american'])} "
+            f"({result['combined_decimal']:.2f})",
+        )
+        c2.metric("Profit", fmt_money(result['profit']))
+        st.metric("Total Payout", fmt_money(result['total_return']))
 
-            st.markdown("**Straight Bet**")
-            c1, c2 = st.columns(2)
-            c1.metric("Odds", f"{format_american(amer)} ({dec:.2f})")
-            c2.metric("Profit", f"${profit:.2f}")
-            st.metric("Total Return", f"${total_ret:.2f}")
+    st.divider()
+
+    # Action buttons
+    bcols = st.columns(2)
+    with bcols[0]:
+        if st.button(
+            "Mock Submit", key="dlg_submit", type="primary",
+            use_container_width=True,
+        ):
+            try:
+                submit_bet(st.session_state, stake)
+                st.session_state["_slip_submitted"] = True
+            except ValueError as exc:
+                st.error(str(exc))
+            st.rerun()
+    with bcols[1]:
+        if st.button("Close", key="dlg_close", use_container_width=True):
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# PAGE 3: Best Lines to Shop
+# ---------------------------------------------------------------------------
+
+def _page_best_lines():
+    """Rank lines by shopping value (NOT predicting winners)."""
+    st.title("Best Lines to Shop")
+    st.caption(
+        "Find where one sportsbook offers significantly better odds "
+        "than the consensus. Positive edge = better-than-median value."
+    )
+
+    _render_legend()
+
+    lines = st.session_state.get("last_fetch")
+    if not lines:
+        st.info(
+            "No data loaded yet. Fetch odds from the Dashboard first."
+        )
+        return
+
+    # Filters
+    fcols = st.columns(4)
+    with fcols[0]:
+        market_filter = st.selectbox(
+            "Market",
+            ["All", "ML", "Spread", "Total"],
+            key="bl_market",
+        )
+    with fcols[1]:
+        min_edge = st.number_input(
+            "Min edge (%)",
+            min_value=0.0,
+            value=0.5,
+            step=0.25,
+            key="bl_min_edge",
+            help="Minimum edge in percentage points vs median.",
+        )
+    with fcols[2]:
+        max_rows = st.select_slider(
+            "Max rows",
+            options=[10, 15, 20, 25, 50],
+            value=25,
+            key="bl_max_rows",
+        )
+    with fcols[3]:
+        # Sanitize: delete invalid widget key so Streamlit can't use it.
+        _bl = st.session_state.get("bl_stake")
+        if not isinstance(_bl, (int, float)) or _bl < 1.0:
+            st.session_state.pop("bl_stake", None)
+        _slip = st.session_state.get("slip_stake", 100.0)
+        _default = max(1.0, float(_slip)) if isinstance(_slip, (int, float)) else 100.0
+        stake = st.number_input(
+            "Stake ($)",
+            min_value=1.0,
+            value=_default,
+            step=10.0,
+            key="bl_stake",
+        )
+        st.session_state["slip_stake"] = stake
+
+    # Compute standouts
+    entries = _lines_to_shopping_entries(lines)
+    standouts = compute_standouts(entries, stake=stake)
+
+    # Apply filters
+    if market_filter != "All":
+        standouts = [s for s in standouts if s["market"] == market_filter]
+
+    edge_threshold = min_edge / 100.0
+    standouts = [s for s in standouts if s["edge"] >= edge_threshold]
+    standouts = standouts[:max_rows]
+
+    if not standouts:
+        st.info(
+            "No standouts match the current filters. "
+            "Try lowering the edge threshold."
+        )
+        return
+
+    st.markdown(f"**{len(standouts)} standout{'s' if len(standouts) != 1 else ''}**")
+
+    slip_book = _get_slip_book()
+
+    for rank, s in enumerate(standouts, 1):
+        with st.container(border=True):
+            rcols = st.columns([0.5, 3, 1.5, 1.5, 1.5, 1.5, 2])
+            with rcols[0]:
+                st.markdown(f"**{rank}**")
+            with rcols[1]:
+                line_str = ""
+                if s["line"] is not None and s["market"] == "Spread":
+                    line_str = f" ({s['line']:+.1f})"
+                elif s["line"] is not None:
+                    line_str = f" ({s['line']:.1f})"
+                st.markdown(
+                    f"**{s['event']}**  \n"
+                    f"{s['market']} \u00b7 {s['selection']}{line_str}"
+                )
+            with rcols[2]:
+                st.markdown(
+                    f"**{s['sportsbook']}**  \n"
+                    f"{format_american(s['odds'])}"
+                )
+            with rcols[3]:
+                st.markdown(
+                    f"Median  \n"
+                    f"{format_american(s['median_odds'])}"
+                )
+            with rcols[4]:
+                edge_pp = s["edge"] * 100
+                st.metric("Edge", fmt_pct(edge_pp, sign=True))
+            with rcols[5]:
+                st.metric(
+                    "$ Impact",
+                    fmt_money(s['dollar_impact'], sign=True),
+                )
+            with rcols[6]:
+                # View game button
+                if st.button("View", key=f"bl_view_{rank}"):
+                    st.session_state["page"] = "detail"
+                    st.session_state["selected_game"] = s["event"]
+                    st.rerun()
+
+                # Add to slip (respects lock)
+                can_add = not slip_book or s["sportsbook"] == slip_book
+                if can_add:
+                    if st.button(
+                        "\u2795 Slip", key=f"bl_add_{rank}", type="secondary",
+                    ):
+                        leg = {
+                            "sport": _sport_name(),
+                            "event_name": s["event"],
+                            "sportsbook": s["sportsbook"],
+                            "market": s["market"],
+                            "selection": s["selection"],
+                            "line": s["line"],
+                            "odds": s["odds"],
+                            "fetched_at": "",
+                        }
+                        _try_add_leg(leg)
+                elif slip_book:
+                    st.caption(f"Locked to {slip_book}")
+
+
+# ---------------------------------------------------------------------------
+# Bet History dialog
+# ---------------------------------------------------------------------------
+
+@st.dialog("Bet History", width="large")
+def _bet_history_dialog():
+    """Modal showing Active and Settled bets."""
+    init_bet_state(st.session_state)
+    active: list = st.session_state["active_bets"]
+    settled: list = st.session_state["settled_bets"]
+
+    tab_active, tab_settled = st.tabs([
+        f"Active ({len(active)})",
+        f"Settled ({len(settled)})",
+    ])
+
+    with tab_active:
+        if not active:
+            st.info("No active bets. Submit a bet from the Bet Slip.")
+        for bet in active:
+            with st.container(border=True):
+                hcols = st.columns([4, 2, 2])
+                with hcols[0]:
+                    legs_desc = ", ".join(
+                        f"{lg['market']} {lg['selection']}"
+                        for lg in bet.legs
+                    )
+                    st.markdown(
+                        f"**{bet.sportsbook}** — "
+                        f"{len(bet.legs)} leg{'s' if len(bet.legs) != 1 else ''}  \n"
+                        f"{legs_desc}"
+                    )
+                    for lg in bet.legs:
+                        line_str = ""
+                        if lg.get("line") is not None and lg["market"] == "Spread":
+                            line_str = f" {lg['line']:+.1f}"
+                        elif lg.get("line") is not None:
+                            line_str = f" {lg['line']:.1f}"
+                        st.caption(
+                            f"{lg['event_name']} · {lg['market']} · "
+                            f"{lg['selection']}{line_str} · "
+                            f"{format_american(lg['odds'])}"
+                        )
+                with hcols[1]:
+                    st.metric("Stake", fmt_money(bet.stake))
+                    st.metric(
+                        "Odds",
+                        fmt_odds(bet.combined_american),
+                    )
+                with hcols[2]:
+                    st.metric("Potential Payout", fmt_money(bet.total_payout))
+                    st.caption(f"Placed {bet.created_at[:16]}")
+
+                # Settlement controls
+                st.markdown("**Settle this bet:**")
+                scols = st.columns(3)
+                with scols[0]:
+                    if st.button(
+                        "Won", key=f"hist_won_{bet.id}",
+                        type="primary", use_container_width=True,
+                    ):
+                        settle_bet(st.session_state, bet.id, "won")
+                        st.session_state["_reopen_history"] = True
+                        st.rerun()
+                with scols[1]:
+                    if st.button(
+                        "Lost", key=f"hist_lost_{bet.id}",
+                        use_container_width=True,
+                    ):
+                        settle_bet(st.session_state, bet.id, "lost")
+                        st.session_state["_reopen_history"] = True
+                        st.rerun()
+                with scols[2]:
+                    if st.button(
+                        "Push", key=f"hist_push_{bet.id}",
+                        use_container_width=True,
+                    ):
+                        settle_bet(st.session_state, bet.id, "push")
+                        st.session_state["_reopen_history"] = True
+                        st.rerun()
+
+    with tab_settled:
+        if not settled:
+            st.info("No settled bets yet.")
         else:
-            # Parlay
-            result = parlay_payout(stake, legs_odds)
-            st.markdown(f"**{len(slip)}-Leg Parlay**")
-            c1, c2 = st.columns(2)
-            c1.metric(
-                "Combined Odds",
-                f"{format_american(result['combined_american'])} "
-                f"({result['combined_decimal']:.2f})",
+            # Summary metrics
+            total_staked = sum(b.stake for b in settled)
+            total_profit = sum(
+                b.total_payout - b.stake if b.status == "won"
+                else (0.0 if b.status == "push" else -b.stake)
+                for b in settled
             )
-            c2.metric("Profit", f"${result['profit']:.2f}")
-            st.metric("Total Return", f"${result['total_return']:.2f}")
+            wins = sum(1 for b in settled if b.status == "won")
+            losses = sum(1 for b in settled if b.status == "lost")
+            pushes = sum(1 for b in settled if b.status == "push")
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Total Staked", fmt_money(total_staked))
+            mc2.metric("Net Profit", fmt_money(total_profit, sign=True))
+            mc3.metric("Record", f"{wins}W-{losses}L-{pushes}P")
+            roi = (total_profit / total_staked * 100) if total_staked else 0
+            mc4.metric("ROI", fmt_pct(roi, sign=True))
+
+            st.divider()
+
+            for bet in reversed(settled):
+                with st.container(border=True):
+                    status_icon = {
+                        "won": ":green[**WON**]",
+                        "lost": ":red[**LOST**]",
+                        "push": ":orange[**PUSH**]",
+                    }.get(bet.status, bet.status)
+
+                    hcols = st.columns([4, 2, 2])
+                    with hcols[0]:
+                        legs_desc = ", ".join(
+                            f"{lg['market']} {lg['selection']}"
+                            for lg in bet.legs
+                        )
+                        n = len(bet.legs)
+                        sfx = "s" if n != 1 else ""
+                        st.markdown(
+                            f"{status_icon} — "
+                            f"**{bet.sportsbook}** — "
+                            f"{n} leg{sfx}  \n"
+                            f"{legs_desc}"
+                        )
+                    with hcols[1]:
+                        st.metric("Stake", fmt_money(bet.stake))
+                        st.metric(
+                            "Odds",
+                            fmt_odds(bet.combined_american),
+                        )
+                    with hcols[2]:
+                        if bet.status == "won":
+                            pnl = bet.total_payout - bet.stake
+                            st.metric("Profit", f":green[+{fmt_money(pnl)}]")
+                        elif bet.status == "push":
+                            st.metric("Profit", fmt_money(0))
+                        else:
+                            st.metric("Profit", f":red[-{fmt_money(bet.stake)}]")
+                        if bet.settled_at:
+                            st.caption(f"Settled {bet.settled_at[:16]}")
+
+    st.divider()
+    if st.button("Close", key="hist_close", use_container_width=True):
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Legend component
+# ---------------------------------------------------------------------------
+
+def _render_legend():
+    """Render an on-screen legend explaining all highlight colors and badges."""
+    with st.expander("Legend — Colors & Badges", expanded=False):
+        st.markdown(
+            "| Symbol | Meaning |\n"
+            "|---|---|\n"
+            "| :green-background[**Best Price**] | "
+            "Green cell = best odds for that side among all sportsbooks |\n"
+            "| :red[**ARB**] | "
+            "Profitable arbitrage — guaranteed profit by betting both sides |\n"
+            "| :orange[**NEAR-ARB**] | "
+            "Close to arbitrage (margin > −2%) — worth monitoring |\n"
+            "| :blue[**MOVE**] | "
+            "Significant line movement detected since last fetch |\n"
+            "| **Edge %** | "
+            "How much better a line is vs the median across books |\n"
+            "| **$ Impact** | "
+            "Extra payout vs median book for your stake (Best Lines page) |"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1160,17 +1680,41 @@ def main():
     # Ensure bet slip exists in session state
     if "bet_slip" not in st.session_state:
         st.session_state["bet_slip"] = []
+    if "slip_book" not in st.session_state:
+        st.session_state["slip_book"] = None
+    if st.session_state.get("slip_stake", 0.0) < 1.0:
+        st.session_state["slip_stake"] = 100.0
+
+    # Ensure bet history state exists
+    init_bet_state(st.session_state)
+
+    # Toast for mock submit
+    if st.session_state.pop("_slip_submitted", False):
+        st.toast("Bet submitted!", icon="\u2705")
 
     _sidebar()
+
+    # Open bet slip dialog (from button or reopen after state change)
+    if st.session_state.pop("_open_slip", False):
+        _slip_dialog()
+    elif st.session_state.pop("_slip_reopen", False):
+        _slip_dialog()
+
+    # Open bet history dialog
+    if st.session_state.pop("_open_history", False):
+        _bet_history_dialog()
+    elif st.session_state.pop("_reopen_history", False):
+        _bet_history_dialog()
 
     page = st.session_state.get("page", "dashboard")
     if page == "detail" and st.session_state.get("selected_game"):
         _page_detail()
     else:
-        _page_dashboard()
-
-    # Render bet slip sidebar after page content so it has latest state
-    _bet_slip_sidebar()
+        nav = st.session_state.get("nav_page", "Dashboard")
+        if nav == "Best Lines to Shop":
+            _page_best_lines()
+        else:
+            _page_dashboard()
 
 
 if __name__ == "__main__":
