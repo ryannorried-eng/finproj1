@@ -54,6 +54,25 @@ def implied_prob_from_american(odds: float) -> float:
     return 0.5  # EVEN
 
 
+def breakeven_prob_from_american(odds: float) -> float:
+    """Return the breakeven probability for a bet at given American odds.
+
+    This is the minimum win probability needed for the bet to be +EV.
+    Numerically identical to implied_prob_from_american, but semantically
+    represents the breakeven threshold rather than market-implied probability.
+    """
+    return implied_prob_from_american(odds)
+
+
+def ev_per_dollar(prob: float, odds: float) -> float:
+    """Expected value per $1 staked given a win probability and American odds.
+
+    EV = p * (decimal - 1) - (1 - p)
+    """
+    d = american_to_decimal(odds)
+    return prob * (d - 1) - (1 - prob)
+
+
 def parlay_payout(stake: float, legs_american: list[float]) -> dict:
     """Compute parlay payout from a list of American odds.
 

@@ -15,7 +15,9 @@ from line_tracker.bet_history import init_bet_state, settle_bet, submit_bet
 from line_tracker.bet_slip import (
     american_profit,
     american_total_return,
+    breakeven_prob_from_american,
     compute_standouts,
+    ev_per_dollar,
     format_american,
     has_conflicting_leg,
     is_duplicate_leg,
@@ -740,6 +742,8 @@ def _detail_best_bet_section(game_lines):
                     f"  |  **{fmt_money(dollar_ev, sign=True)}** per $100"
                 )
 
+            _render_best_bet_why(top)
+
         others = pos_ev[1:]
         if others:
             st.markdown("**Other +EV bets:**")
@@ -763,6 +767,26 @@ def _detail_best_bet_section(game_lines):
             f"at {format_american(top.best_odds)} "
             f"on {top.best_sportsbook}** — "
             f"EV {fmt_pct(top.edge_pct, sign=True)}"
+        )
+
+
+def _render_best_bet_why(rec) -> None:
+    """Render a compact 'Why this bet?' breakdown inside the Best Bet card."""
+    be_prob = breakeven_prob_from_american(rec.best_odds)
+    edge = rec.consensus_prob - be_prob
+    ev_dollar = ev_per_dollar(rec.consensus_prob, rec.best_odds)
+    ev_per_100 = ev_dollar * 100
+
+    with st.expander("Why this bet?", expanded=False):
+        st.markdown(
+            f"- **Consensus prob (vig-free):** {rec.consensus_prob * 100:.1f}%\n"
+            f"- **Best price:** {format_american(rec.best_odds)} "
+            f"at {rec.best_sportsbook}\n"
+            f"- **Breakeven prob (at that price):** {be_prob * 100:.1f}%\n"
+            f"- **Edge:** ({rec.consensus_prob * 100:.1f}% \u2212 "
+            f"{be_prob * 100:.1f}%) = {fmt_pct(edge * 100, sign=True)}\n"
+            f"- **EV:** {fmt_money(ev_per_100, sign=True)} per $100 "
+            f"({ev_dollar * 100:+.1f}% per $1)"
         )
 
 

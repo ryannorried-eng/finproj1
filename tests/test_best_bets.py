@@ -11,7 +11,6 @@ from line_tracker.best_bets import (
 )
 from line_tracker.models import BettingLine, BetType
 
-
 # ---------------------------------------------------------------------------
 # Helpers to build mock BettingLine objects
 # ---------------------------------------------------------------------------
