@@ -709,7 +709,11 @@ def _detail_best_bet_section(game_lines):
         return
 
     st.divider()
-    st.subheader("Best Bet (Consensus EV)")
+    st.subheader("Best Bet (Market Consensus EV)")
+    st.caption(
+        "Based on vig-free consensus probabilities from the books \u00b7 "
+        "Informational only, not financial advice"
+    )
 
     pos_ev = [r for r in recs if r.ev > 0]
 
@@ -727,7 +731,7 @@ def _detail_best_bet_section(game_lines):
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown(
-                    f"Consensus win prob: "
+                    f"Consensus implied prob: "
                     f"**{top.consensus_prob * 100:.1f}%**"
                 )
             with c2:
