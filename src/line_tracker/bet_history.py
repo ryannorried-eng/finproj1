@@ -24,7 +24,7 @@ class Bet:
     sportsbook: str
     legs: list[dict]
     combined_decimal: float
-    combined_american: float
+    combined_american: int
     stake: float
     profit: float
     total_payout: float
@@ -57,13 +57,13 @@ def create_bet(
     if len(legs) == 1:
         odds = odds_list[0]
         dec = american_to_decimal(odds)
-        combined_american = float(decimal_to_american(dec))
+        combined_american = int(decimal_to_american(dec))
         profit = american_profit(stake, odds)
         total_payout = american_total_return(stake, odds)
     else:
         info = parlay_payout(stake, odds_list)
         dec = info["combined_decimal"]
-        combined_american = info["combined_american"]
+        combined_american = int(info["combined_american"])
         profit = info["profit"]
         total_payout = info["total_return"]
 
