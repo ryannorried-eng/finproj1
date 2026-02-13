@@ -745,10 +745,8 @@ def _detail_best_bet_section(game_lines):
             st.markdown(
                 f"Market confidence: **{top.confidence}**",
                 help=(
-                    "Measures how closely sportsbooks agree on the "
-                    "de-vigged probability. High = tight consensus, "
-                    "Low = wide disagreement. This reflects book "
-                    "agreement, not certainty of outcome."
+                    "Measures sportsbook disagreement in implied "
+                    "probabilities, not certainty of outcome."
                 ),
             )
 

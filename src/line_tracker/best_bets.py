@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from statistics import median, stdev
+from statistics import median, quantiles
 
 from line_tracker.bet_slip import (
     american_to_decimal,
@@ -60,20 +60,22 @@ def _compute_ev(consensus_prob: float, american_odds: float) -> float:
 def _confidence_label(probs: list[float]) -> str:
     """Classify sportsbook agreement as High / Medium / Low.
 
-    Uses standard deviation of de-vigged probabilities across books.
-    Lower dispersion means books agree more closely on the true probability.
+    Uses IQR (inter-quartile range, p75 − p25) of de-vigged probabilities
+    across books.  Lower dispersion means books agree more closely on the
+    true probability.
 
     Thresholds (on the 0–1 probability scale):
-        stdev < 0.015  → "High"   (< 1.5 pp disagreement)
-        stdev < 0.04   → "Medium" (1.5–4 pp)
-        stdev >= 0.04  → "Low"    (> 4 pp)
+        IQR <= 0.03  → "High"   (<= 3 pp spread)
+        IQR <= 0.06  → "Medium" (3–6 pp spread)
+        IQR >  0.06  → "Low"    (> 6 pp spread)
     """
     if len(probs) < 2:
         return "Low"
-    sd = stdev(probs)
-    if sd < 0.015:
+    q1, _, q3 = quantiles(probs, n=4)
+    iqr = q3 - q1
+    if iqr <= 0.03:
         return "High"
-    if sd < 0.04:
+    if iqr <= 0.06:
         return "Medium"
     return "Low"
 

@@ -134,17 +134,17 @@ class TestModeValue:
 
 class TestConfidenceLabel:
     def test_high_confidence_tight_probs(self):
-        # Books agree closely — stdev < 0.015
+        # Books agree closely — IQR ≈ 0.003 (<= 0.03)
         probs = [0.550, 0.552, 0.548, 0.551]
         assert _confidence_label(probs) == "High"
 
     def test_medium_confidence(self):
-        # Moderate disagreement — stdev between 0.015 and 0.04
+        # Moderate disagreement — IQR ≈ 0.05 (0.03 < IQR <= 0.06)
         probs = [0.50, 0.53, 0.47, 0.52]
         assert _confidence_label(probs) == "Medium"
 
     def test_low_confidence_wide_probs(self):
-        # Wide disagreement — stdev >= 0.04
+        # Wide disagreement — IQR ≈ 0.175 (> 0.06)
         probs = [0.40, 0.55, 0.60, 0.45]
         assert _confidence_label(probs) == "Low"
 
@@ -155,12 +155,34 @@ class TestConfidenceLabel:
         assert _confidence_label([0.50, 0.50, 0.50]) == "High"
 
     def test_two_books_close(self):
-        # stdev of [0.55, 0.56] ≈ 0.0071 → High
+        # IQR of [0.55, 0.56] = 0.005 → High
         assert _confidence_label([0.55, 0.56]) == "High"
 
     def test_two_books_far_apart(self):
-        # stdev of [0.40, 0.60] ≈ 0.1414 → Low
+        # IQR of [0.40, 0.60] = 0.10 → Low
         assert _confidence_label([0.40, 0.60]) == "Low"
+
+    def test_iqr_at_high_boundary(self):
+        # [0.49, 0.50, 0.51, 0.52] → q1=0.4925, q3=0.5175, IQR=0.025 → High
+        assert _confidence_label([0.49, 0.50, 0.51, 0.52]) == "High"
+
+    def test_iqr_at_medium_boundary(self):
+        # [0.48, 0.50, 0.52, 0.54] → q1=0.485, q3=0.535, IQR=0.05 → Medium
+        assert _confidence_label([0.48, 0.50, 0.52, 0.54]) == "Medium"
+
+    def test_iqr_just_above_medium(self):
+        # [0.40, 0.50, 0.55, 0.65] → q1=0.425, q3=0.625, IQR=0.20 → Low
+        assert _confidence_label([0.40, 0.50, 0.55, 0.65]) == "Low"
+
+    def test_five_books_high(self):
+        # Five books with tight agreement
+        probs = [0.550, 0.551, 0.552, 0.553, 0.554]
+        assert _confidence_label(probs) == "High"
+
+    def test_five_books_low(self):
+        # Five books with wide disagreement
+        probs = [0.40, 0.45, 0.55, 0.60, 0.65]
+        assert _confidence_label(probs) == "Low"
 
 
 class TestConfidenceIntegration:
