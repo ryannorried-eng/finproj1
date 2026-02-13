@@ -134,6 +134,15 @@ def settle_bet(
         if bet.id == bet_id:
             bet.status = outcome
             bet.settled_at = _now_iso()
+            if outcome == "lost":
+                bet.profit = float(-bet.stake)
+                bet.total_payout = 0.0
+            elif outcome == "push":
+                bet.profit = 0.0
+                bet.total_payout = float(bet.stake)
+            else:  # won
+                bet.profit = float(bet.profit)
+                bet.total_payout = float(bet.total_payout)
             state["settled_bets"].append(active.pop(i))
             return bet
 

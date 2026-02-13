@@ -166,22 +166,37 @@ class TestSettleBet:
 
     def test_settle_won(self):
         state, bet = self._state_with_active()
+        original_profit = bet.profit
+        original_payout = bet.total_payout
         settled = settle_bet(state, bet.id, "won")
         assert settled.status == "won"
         assert settled.settled_at is not None
         assert len(state["active_bets"]) == 0
         assert len(state["settled_bets"]) == 1
         assert state["settled_bets"][0] is settled
+        # Won keeps original profit/payout as floats
+        assert settled.profit == pytest.approx(original_profit)
+        assert settled.total_payout == pytest.approx(original_payout)
+        assert isinstance(settled.profit, float)
+        assert isinstance(settled.total_payout, float)
 
     def test_settle_lost(self):
         state, bet = self._state_with_active()
         settled = settle_bet(state, bet.id, "lost")
         assert settled.status == "lost"
+        assert settled.profit == -100.0
+        assert settled.total_payout == 0.0
+        assert isinstance(settled.profit, float)
+        assert isinstance(settled.total_payout, float)
 
     def test_settle_push(self):
         state, bet = self._state_with_active()
         settled = settle_bet(state, bet.id, "push")
         assert settled.status == "push"
+        assert settled.profit == 0.0
+        assert settled.total_payout == 100.0
+        assert isinstance(settled.profit, float)
+        assert isinstance(settled.total_payout, float)
 
     def test_settle_invalid_outcome(self):
         state, bet = self._state_with_active()
