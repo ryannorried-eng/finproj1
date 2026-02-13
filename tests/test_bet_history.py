@@ -132,7 +132,7 @@ class TestSubmitBet:
         # Slip should be cleared
         assert state["bet_slip"] == []
         assert state["slip_book"] is None
-        assert state["slip_stake"] == 0.0
+        assert state["slip_stake"] == 100.0
 
     def test_empty_slip_raises(self):
         state = _slip_state(legs=[])

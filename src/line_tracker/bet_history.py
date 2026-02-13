@@ -113,7 +113,7 @@ def submit_bet(state: dict, stake: float) -> Bet:
     # Clear the slip
     state["bet_slip"] = []
     state["slip_book"] = None
-    state["slip_stake"] = 0.0
+    state["slip_stake"] = 100.0
 
     return bet
 
