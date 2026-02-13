@@ -4,6 +4,7 @@ from line_tracker.bet_slip import (
     american_profit,
     american_to_decimal,
     american_total_return,
+    compute_standouts,
     decimal_to_american,
     format_american,
     has_conflicting_leg,
@@ -184,3 +185,78 @@ def test_no_conflict_different_market():
     leg = _make_leg(market="Spread", selection="Away")
     slip = [_make_leg(market="ML", selection="Home")]
     assert not has_conflicting_leg(slip, leg)
+
+
+# --- compute_standouts ---
+
+def _make_entry(**overrides):
+    base = {
+        "event": "Bills @ Chiefs",
+        "market": "ML",
+        "selection": "Home",
+        "sportsbook": "DraftKings",
+        "odds": -150,
+        "line": None,
+        "sport": "NFL",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_standouts_best_book_ranked_first():
+    entries = [
+        _make_entry(sportsbook="BookA", odds=-150),
+        _make_entry(sportsbook="BookB", odds=-130),
+        _make_entry(sportsbook="BookC", odds=-170),
+    ]
+    results = compute_standouts(entries, stake=100)
+    # BookB at -130 has the lowest implied prob → best edge
+    assert results[0]["sportsbook"] == "BookB"
+    assert results[0]["edge"] > 0
+    assert results[0]["dollar_impact"] > 0
+
+
+def test_standouts_single_book_returns_empty():
+    entries = [_make_entry(sportsbook="BookA", odds=-150)]
+    results = compute_standouts(entries, stake=100)
+    assert len(results) == 0
+
+
+def test_standouts_edge_sign():
+    entries = [
+        _make_entry(sportsbook="Good", odds=150),
+        _make_entry(sportsbook="Bad", odds=110),
+    ]
+    results = compute_standouts(entries, stake=100)
+    good = next(r for r in results if r["sportsbook"] == "Good")
+    bad = next(r for r in results if r["sportsbook"] == "Bad")
+    assert good["edge"] > 0  # better than consensus
+    assert bad["edge"] < 0   # worse than consensus
+
+
+def test_standouts_dollar_impact():
+    entries = [
+        _make_entry(sportsbook="A", odds=-110),
+        _make_entry(sportsbook="B", odds=-110),
+    ]
+    results = compute_standouts(entries, stake=100)
+    # Both books identical → zero impact
+    for r in results:
+        assert r["dollar_impact"] == 0.0
+
+
+def test_standouts_groups_independently():
+    entries = [
+        _make_entry(sportsbook="A", odds=-150, selection="Home"),
+        _make_entry(sportsbook="B", odds=-130, selection="Home"),
+        _make_entry(sportsbook="A", odds=140, selection="Away"),
+        _make_entry(sportsbook="B", odds=120, selection="Away"),
+    ]
+    results = compute_standouts(entries, stake=100)
+    home = [r for r in results if r["selection"] == "Home"]
+    away = [r for r in results if r["selection"] == "Away"]
+    assert len(home) == 2
+    assert len(away) == 2
+    # Each group should have opposite signs
+    assert home[0]["edge"] > 0
+    assert away[0]["edge"] > 0
