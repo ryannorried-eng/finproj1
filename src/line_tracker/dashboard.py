@@ -122,6 +122,26 @@ def _compact_mode() -> bool:
     return st.session_state.get("compact_mode", False)
 
 
+def fmt_money(x: float, sign: bool = False) -> str:
+    """Format currency: $1,234.56.  Use *sign=True* for +$… / -$…."""
+    if sign:
+        prefix = "+" if x >= 0 else "-"
+        return f"{prefix}${abs(x):,.2f}"
+    return f"${x:,.2f}"
+
+
+def fmt_pct(x: float, sign: bool = False) -> str:
+    """Format percentage: 12.3%.  Use *sign=True* for +12.3% / -1.2%."""
+    if sign:
+        return f"{x:+.1f}%"
+    return f"{x:.1f}%"
+
+
+def fmt_odds(x: float) -> str:
+    """Format American odds: '+120' or '-110'."""
+    return format_american(x)
+
+
 def _get_slip_book() -> str | None:
     """Return the currently locked sportsbook, or None."""
     return st.session_state.get("slip_book")
@@ -400,7 +420,7 @@ def _compute_arb_stakes(
     profit = payout - total_stake
     roi = (profit / total_stake) * 100
 
-    return round(stake_a, 2), round(stake_b, 2), round(profit, 2), round(roi, 2)
+    return stake_a, stake_b, profit, roi
 
 
 # ---------------------------------------------------------------------------
@@ -832,7 +852,7 @@ def _detail_arbs(event_name: str):
                     arb.side_b.sportsbook,
                     help=f"Away value: {arb.side_b.away_value}",
                 )
-                c3.metric("Profit margin", f"{arb.margin:+.2f}%")
+                c3.metric("Profit margin", fmt_pct(arb.margin, sign=True))
 
                 # Stake calculator for moneyline arbs
                 if arb.bet_type == BetType.MONEYLINE:
@@ -850,20 +870,20 @@ def _detail_arbs(event_name: str):
                                     f"**Leg A \u2014 {arb.side_a.sportsbook}**  \n"
                                     f"Bet Home at "
                                     f"{_format_odds(arb.side_a.home_value)}  \n"
-                                    f"Stake: **${stake_a:.2f}**"
+                                    f"Stake: **{fmt_money(stake_a)}**"
                                 )
                             with lc2:
                                 st.markdown(
                                     f"**Leg B \u2014 {arb.side_b.sportsbook}**  \n"
                                     f"Bet Away at "
                                     f"{_format_odds(arb.side_b.away_value)}  \n"
-                                    f"Stake: **${stake_b:.2f}**"
+                                    f"Stake: **{fmt_money(stake_b)}**"
                                 )
                             st.divider()
                             pc1, pc2, pc3 = st.columns(3)
-                            pc1.metric("Total wagered", "$100.00")
-                            pc2.metric("Guaranteed profit", f"${profit:.2f}")
-                            pc3.metric("ROI", f"{roi:.2f}%")
+                            pc1.metric("Total wagered", fmt_money(100))
+                            pc2.metric("Guaranteed profit", fmt_money(profit))
+                            pc3.metric("ROI", fmt_pct(roi))
 
     if near:
         with st.expander(
@@ -877,7 +897,7 @@ def _detail_arbs(event_name: str):
                     ),
                     "Book A": arb.side_a.sportsbook,
                     "Book B": arb.side_b.sportsbook,
-                    "Margin": f"{arb.margin:+.2f}%",
+                    "Margin": fmt_pct(arb.margin, sign=True),
                 })
             st.dataframe(
                 pd.DataFrame(rows),
@@ -1293,8 +1313,8 @@ def _slip_dialog():
         st.markdown("**Straight Bet**")
         c1, c2 = st.columns(2)
         c1.metric("Odds", f"{format_american(odds)} ({dec:.2f})")
-        c2.metric("Profit", f"${profit:.2f}")
-        st.metric("Total Payout", f"${total_ret:.2f}")
+        c2.metric("Profit", fmt_money(profit))
+        st.metric("Total Payout", fmt_money(total_ret))
     else:
         result = parlay_payout(stake, legs_odds)
         st.markdown(f"**{len(slip)}-Leg Parlay**")
@@ -1304,8 +1324,8 @@ def _slip_dialog():
             f"{format_american(result['combined_american'])} "
             f"({result['combined_decimal']:.2f})",
         )
-        c2.metric("Profit", f"${result['profit']:.2f}")
-        st.metric("Total Payout", f"${result['total_return']:.2f}")
+        c2.metric("Profit", fmt_money(result['profit']))
+        st.metric("Total Payout", fmt_money(result['total_return']))
 
     st.divider()
 
@@ -1438,11 +1458,11 @@ def _page_best_lines():
                 )
             with rcols[4]:
                 edge_pp = s["edge"] * 100
-                st.metric("Edge", f"{edge_pp:+.1f}%")
+                st.metric("Edge", fmt_pct(edge_pp, sign=True))
             with rcols[5]:
                 st.metric(
                     "$ Impact",
-                    f"${s['dollar_impact']:+.2f}",
+                    fmt_money(s['dollar_impact'], sign=True),
                 )
             with rcols[6]:
                 # View game button
@@ -1516,13 +1536,13 @@ def _bet_history_dialog():
                             f"{format_american(lg['odds'])}"
                         )
                 with hcols[1]:
-                    st.metric("Stake", f"${bet.stake:.2f}")
+                    st.metric("Stake", fmt_money(bet.stake))
                     st.metric(
                         "Odds",
-                        format_american(bet.combined_american),
+                        fmt_odds(bet.combined_american),
                     )
                 with hcols[2]:
-                    st.metric("Potential Payout", f"${bet.total_payout:.2f}")
+                    st.metric("Potential Payout", fmt_money(bet.total_payout))
                     st.caption(f"Placed {bet.created_at[:16]}")
 
                 # Settlement controls
@@ -1569,12 +1589,11 @@ def _bet_history_dialog():
             pushes = sum(1 for b in settled if b.status == "push")
 
             mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Total Staked", f"${total_staked:.2f}")
-            color = "+" if total_profit >= 0 else ""
-            mc2.metric("Net Profit", f"${total_profit:{color}.2f}")
+            mc1.metric("Total Staked", fmt_money(total_staked))
+            mc2.metric("Net Profit", fmt_money(total_profit, sign=True))
             mc3.metric("Record", f"{wins}W-{losses}L-{pushes}P")
             roi = (total_profit / total_staked * 100) if total_staked else 0
-            mc4.metric("ROI", f"{roi:+.1f}%")
+            mc4.metric("ROI", fmt_pct(roi, sign=True))
 
             st.divider()
 
@@ -1601,19 +1620,19 @@ def _bet_history_dialog():
                             f"{legs_desc}"
                         )
                     with hcols[1]:
-                        st.metric("Stake", f"${bet.stake:.2f}")
+                        st.metric("Stake", fmt_money(bet.stake))
                         st.metric(
                             "Odds",
-                            format_american(bet.combined_american),
+                            fmt_odds(bet.combined_american),
                         )
                     with hcols[2]:
                         if bet.status == "won":
                             pnl = bet.total_payout - bet.stake
-                            st.metric("Profit", f":green[+${pnl:.2f}]")
+                            st.metric("Profit", f":green[+{fmt_money(pnl)}]")
                         elif bet.status == "push":
-                            st.metric("Profit", "$0.00")
+                            st.metric("Profit", fmt_money(0))
                         else:
-                            st.metric("Profit", f":red[-${bet.stake:.2f}]")
+                            st.metric("Profit", f":red[-{fmt_money(bet.stake)}]")
                         if bet.settled_at:
                             st.caption(f"Settled {bet.settled_at[:16]}")
 
