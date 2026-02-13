@@ -108,6 +108,24 @@ def _format_clock_time(dt: datetime) -> str:
     return local.strftime("%I:%M %p").lstrip("0")
 
 
+def _format_start_time(dt: datetime) -> str:
+    """Format commence_time as 'Fri 12:15 PM'."""
+    local = dt.astimezone() if dt.tzinfo else dt
+    return local.strftime("%a %I:%M %p").replace(" 0", " ")
+
+
+def _relative_date_label(dt: datetime) -> str:
+    """Return 'Today', 'Tomorrow', or short date like 'Sat Feb 15'."""
+    local = dt.astimezone() if dt.tzinfo else dt
+    local_date = local.date()
+    today = date.today()
+    if local_date == today:
+        return "Today"
+    if local_date == today + timedelta(days=1):
+        return "Tomorrow"
+    return local_date.strftime("%a %b %-d")
+
+
 def _american_to_decimal(american: float) -> float:
     """Convert American odds to decimal odds."""
     return _slip_a2d(american)
@@ -478,12 +496,16 @@ def _build_game_index(lines) -> dict[str, dict]:
                 "away_team": ln.away_team,
                 "sport": ln.sport,
                 "bet_types": set(),
+                "commence_time": getattr(ln, "commence_time", None),
             }
         g = games[ln.event]
         g["books"].add(ln.sportsbook)
         g["bet_types"].add(ln.bet_type)
         if ln.timestamp > g["last_updated"]:
             g["last_updated"] = ln.timestamp
+        # Prefer non-None commence_time
+        if g["commence_time"] is None:
+            g["commence_time"] = getattr(ln, "commence_time", None)
     return games
 
 
@@ -539,9 +561,13 @@ def _page_dashboard():
         placeholder="Search teams...",
     )
 
-    # Sort by last_updated descending (proxy for start time)
+    # Sort by commence_time ascending (soonest first); missing at bottom
+    _far_future = datetime.max.replace(tzinfo=None)
     sorted_games = sorted(
-        games.items(), key=lambda x: x[1]["last_updated"], reverse=True,
+        games.items(),
+        key=lambda x: (
+            x[1]["commence_time"].astimezone() if x[1]["commence_time"] else _far_future
+        ),
     )
 
     # Apply search filter
@@ -561,11 +587,14 @@ def _page_dashboard():
         with st.container(border=True):
             # Time-first layout: time | matchup+badges | books/updated | view
             cols = st.columns([1.2, 5, 2, 1])
+            ct = info["commence_time"]
             with cols[0]:
-                st.markdown(
-                    f"**{_format_clock_time(info['last_updated'])}**"
-                )
-                st.caption(_relative_time(info["last_updated"]))
+                if ct:
+                    st.markdown(f"**{_format_start_time(ct)}**")
+                    st.caption(_relative_date_label(ct))
+                else:
+                    st.markdown("**TBD**")
+                    st.caption(f"Updated {_relative_time(info['last_updated'])}")
             with cols[1]:
                 badges = []
                 if event_name in arb_events:
@@ -581,6 +610,7 @@ def _page_dashboard():
                 st.caption(sport)
             with cols[2]:
                 st.markdown(f"{len(info['books'])} books")
+                st.caption(f"Updated {_relative_time(info['last_updated'])}")
             with cols[3]:
                 if st.button("View", key=f"view_{event_name}"):
                     st.session_state["page"] = "detail"
@@ -1453,6 +1483,14 @@ def _page_best_lines():
             local_date = None
         groups[local_date].append((rank, s))
 
+    # Sort within each group by commence_time ascending, then edge descending
+    _far_future = datetime.max.replace(tzinfo=None)
+    for items in groups.values():
+        items.sort(key=lambda x: (
+            commence_map.get(x[1]["event"], _far_future),
+            -x[1]["edge"],
+        ))
+
     # Order: dated groups sorted ascending, None ("Unknown time") last
     dated_keys: list[date] = sorted(k for k in groups if k is not None)
     ordered_keys: list[date | None] = list(dated_keys)
@@ -1486,9 +1524,14 @@ def _page_best_lines():
                         line_str = f" ({s['line']:+.1f})"
                     elif s["line"] is not None:
                         line_str = f" ({s['line']:.1f})"
+                    ev_ct = commence_map.get(s["event"])
+                    time_str = (
+                        f" \u00b7 {_format_start_time(ev_ct)}"
+                        if ev_ct else ""
+                    )
                     st.markdown(
                         f"**{s['event']}**  \n"
-                        f"{s['market']} \u00b7 {s['selection']}{line_str}"
+                        f"{s['market']} \u00b7 {s['selection']}{line_str}{time_str}"
                     )
                 with rcols[2]:
                     st.markdown(
