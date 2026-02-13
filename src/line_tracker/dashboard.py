@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -1432,65 +1433,103 @@ def _page_best_lines():
 
     slip_book = _get_slip_book()
 
-    for rank, s in enumerate(standouts, 1):
-        with st.container(border=True):
-            rcols = st.columns([0.5, 3, 1.5, 1.5, 1.5, 1.5, 2])
-            with rcols[0]:
-                st.markdown(f"**{rank}**")
-            with rcols[1]:
-                line_str = ""
-                if s["line"] is not None and s["market"] == "Spread":
-                    line_str = f" ({s['line']:+.1f})"
-                elif s["line"] is not None:
-                    line_str = f" ({s['line']:.1f})"
-                st.markdown(
-                    f"**{s['event']}**  \n"
-                    f"{s['market']} \u00b7 {s['selection']}{line_str}"
-                )
-            with rcols[2]:
-                st.markdown(
-                    f"**{s['sportsbook']}**  \n"
-                    f"{format_american(s['odds'])}"
-                )
-            with rcols[3]:
-                st.markdown(
-                    f"Median  \n"
-                    f"{format_american(s['median_odds'])}"
-                )
-            with rcols[4]:
-                edge_pp = s["edge"] * 100
-                st.metric("Edge", fmt_pct(edge_pp, sign=True))
-            with rcols[5]:
-                st.metric(
-                    "$ Impact",
-                    fmt_money(s['dollar_impact'], sign=True),
-                )
-            with rcols[6]:
-                # View game button
-                if st.button("View", key=f"bl_view_{rank}"):
-                    st.session_state["page"] = "detail"
-                    st.session_state["selected_game"] = s["event"]
-                    st.rerun()
+    # Build event → commence_time map from fetched lines
+    commence_map: dict[str, datetime] = {}
+    for ln in lines:
+        ct = getattr(ln, "commence_time", None)
+        if ct is not None and ln.event not in commence_map:
+            commence_map[ln.event] = ct
 
-                # Add to slip (respects lock)
-                can_add = not slip_book or s["sportsbook"] == slip_book
-                if can_add:
-                    if st.button(
-                        "\u2795 Slip", key=f"bl_add_{rank}", type="secondary",
-                    ):
-                        leg = {
-                            "sport": _sport_name(),
-                            "event_name": s["event"],
-                            "sportsbook": s["sportsbook"],
-                            "market": s["market"],
-                            "selection": s["selection"],
-                            "line": s["line"],
-                            "odds": s["odds"],
-                            "fetched_at": "",
-                        }
-                        _try_add_leg(leg)
-                elif slip_book:
-                    st.caption(f"Locked to {slip_book}")
+    # Group standouts by local date
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    groups: dict[date | None, list[tuple[int, dict]]] = defaultdict(list)
+    for rank, s in enumerate(standouts, 1):
+        ct = commence_map.get(s["event"])
+        if ct is not None:
+            local_date = ct.astimezone().date()
+        else:
+            local_date = None
+        groups[local_date].append((rank, s))
+
+    # Order: dated groups sorted ascending, None ("Unknown time") last
+    dated_keys: list[date] = sorted(k for k in groups if k is not None)
+    ordered_keys: list[date | None] = list(dated_keys)
+    if None in groups:
+        ordered_keys.append(None)
+
+    for group_date in ordered_keys:
+        if group_date is None:
+            header = "Unknown time"
+        elif group_date == today:
+            header = "Today"
+        elif group_date == tomorrow:
+            header = "Tomorrow"
+        else:
+            header = group_date.strftime("%a %b %-d")
+
+        st.subheader(header)
+
+        for rank, s in groups[group_date]:
+            with st.container(border=True):
+                rcols = st.columns([0.5, 3, 1.5, 1.5, 1.5, 1.5, 2])
+                with rcols[0]:
+                    st.markdown(f"**{rank}**")
+                with rcols[1]:
+                    line_str = ""
+                    if s["line"] is not None and s["market"] == "Spread":
+                        line_str = f" ({s['line']:+.1f})"
+                    elif s["line"] is not None:
+                        line_str = f" ({s['line']:.1f})"
+                    st.markdown(
+                        f"**{s['event']}**  \n"
+                        f"{s['market']} \u00b7 {s['selection']}{line_str}"
+                    )
+                with rcols[2]:
+                    st.markdown(
+                        f"**{s['sportsbook']}**  \n"
+                        f"{format_american(s['odds'])}"
+                    )
+                with rcols[3]:
+                    st.markdown(
+                        f"Median  \n"
+                        f"{format_american(s['median_odds'])}"
+                    )
+                with rcols[4]:
+                    edge_pp = s["edge"] * 100
+                    st.metric("Edge", fmt_pct(edge_pp, sign=True))
+                with rcols[5]:
+                    st.metric(
+                        "$ Impact",
+                        fmt_money(s['dollar_impact'], sign=True),
+                    )
+                with rcols[6]:
+                    # View game button
+                    if st.button("View", key=f"bl_view_{rank}"):
+                        st.session_state["page"] = "detail"
+                        st.session_state["selected_game"] = s["event"]
+                        st.rerun()
+
+                    # Add to slip (respects lock)
+                    can_add = not slip_book or s["sportsbook"] == slip_book
+                    if can_add:
+                        if st.button(
+                            "\u2795 Slip", key=f"bl_add_{rank}", type="secondary",
+                        ):
+                            leg = {
+                                "sport": _sport_name(),
+                                "event_name": s["event"],
+                                "sportsbook": s["sportsbook"],
+                                "market": s["market"],
+                                "selection": s["selection"],
+                                "line": s["line"],
+                                "odds": s["odds"],
+                                "fetched_at": "",
+                            }
+                            _try_add_leg(leg)
+                    elif slip_book:
+                        st.caption(f"Locked to {slip_book}")
 
 
 # ---------------------------------------------------------------------------
