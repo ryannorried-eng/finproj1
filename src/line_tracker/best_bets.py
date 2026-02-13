@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from math import exp
 from statistics import median, quantiles
 
@@ -56,8 +56,16 @@ def _recency_multiplier(timestamp: datetime, now: datetime) -> float:
     Returns a value in [_RECENCY_FLOOR, 1.0].  The floor prevents float
     underflow when lines are very old (e.g. in tests with fixed timestamps).
     """
-    age_minutes = max(0.0, (now - timestamp).total_seconds() / 60.0)
+    # Normalize tz-awareness so subtraction never fails.
+    ts = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
+    n = now.replace(tzinfo=None) if now.tzinfo else now
+    age_minutes = max(0.0, (n - ts).total_seconds() / 60.0)
     return max(exp(-age_minutes / RECENCY_HALF_LIFE_MIN), _RECENCY_FLOOR)
+
+
+def _strip_tz(dt: datetime) -> datetime:
+    """Strip timezone info for safe naive subtraction."""
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
 def _line_weight(sportsbook: str, timestamp: datetime, now: datetime) -> float:
@@ -259,7 +267,7 @@ def _moneyline_recommendations(
     home_team = lines[0].home_team
     away_team = lines[0].away_team
 
-    ages = [(now - ln.timestamp).total_seconds() / 60.0 for ln in lines]
+    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in lines]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -354,7 +362,7 @@ def _spread_recommendations(
     home_team = lines[0].home_team
     away_team = lines[0].away_team
 
-    ages = [(now - ln.timestamp).total_seconds() / 60.0 for ln in matching]
+    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in matching]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -444,7 +452,7 @@ def _total_recommendations(
     best_over = max(matching, key=lambda ln: ln.home_price)
     best_under = max(matching, key=lambda ln: ln.away_price)
 
-    ages = [(now - ln.timestamp).total_seconds() / 60.0 for ln in matching]
+    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in matching]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -508,7 +516,7 @@ def recommend_best_bets(
     top_n:
         Maximum number of recommendations to return (default 3).
     now:
-        Reference time for recency weighting.  Defaults to ``datetime.utcnow()``.
+        Reference time for recency weighting.  Defaults to ``datetime.now(timezone.utc)``.
 
     Returns
     -------
@@ -516,7 +524,7 @@ def recommend_best_bets(
         Recommendations sorted by EV descending, limited to *top_n*.
     """
     if now is None:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
     ml_lines = [ln for ln in lines_for_event if ln.bet_type == BetType.MONEYLINE]
     spread_lines = [ln for ln in lines_for_event if ln.bet_type == BetType.SPREAD]
