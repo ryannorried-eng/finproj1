@@ -6,7 +6,12 @@ from collections import Counter
 from dataclasses import dataclass
 from statistics import median
 
-from line_tracker.bet_slip import american_to_decimal, implied_prob_from_american
+from line_tracker.bet_slip import (
+    american_to_decimal,
+    breakeven_prob_from_american,
+    ev_per_dollar,
+    implied_prob_from_american,
+)
 from line_tracker.models import BettingLine, BetType
 
 
@@ -21,8 +26,10 @@ class BetRecommendation:
     consensus_prob: float
     best_sportsbook: str
     best_odds: float  # American odds
+    breakeven_prob: float  # implied prob at best_odds (breakeven threshold)
     ev: float  # expected value per $1 stake
-    edge_pct: float  # ev * 100
+    edge_pct: float  # (consensus_prob - breakeven_prob) * 100
+    ev_per_100: float  # ev * 100 — dollar EV per $100 stake
 
 
 def _remove_vig(odds_a: float, odds_b: float) -> tuple[float, float]:
@@ -47,6 +54,35 @@ def _compute_ev(consensus_prob: float, american_odds: float) -> float:
     """
     d = american_to_decimal(american_odds)
     return consensus_prob * (d - 1) - (1 - consensus_prob)
+
+
+def _build_rec(
+    *,
+    market: str,
+    selection: str,
+    side: str,
+    line: float | None,
+    consensus_prob: float,
+    best_sportsbook: str,
+    best_odds: float,
+) -> BetRecommendation:
+    """Build a fully-populated BetRecommendation from core inputs."""
+    be_prob = breakeven_prob_from_american(best_odds)
+    ev = ev_per_dollar(consensus_prob, best_odds)
+    edge = consensus_prob - be_prob
+    return BetRecommendation(
+        market=market,
+        selection=selection,
+        side=side,
+        line=line,
+        consensus_prob=round(consensus_prob, 4),
+        best_sportsbook=best_sportsbook,
+        best_odds=best_odds,
+        breakeven_prob=round(be_prob, 4),
+        ev=round(ev, 4),
+        edge_pct=round(edge * 100, 2),
+        ev_per_100=round(ev * 100, 2),
+    )
 
 
 def _mode_value(values: list[float]) -> float:
@@ -81,33 +117,27 @@ def _moneyline_recommendations(
 
     results: list[BetRecommendation] = []
 
-    ev_home = _compute_ev(consensus_home, best_home_line.home_value)
     results.append(
-        BetRecommendation(
+        _build_rec(
             market="moneyline",
             selection=home_team,
             side="home",
             line=None,
-            consensus_prob=round(consensus_home, 4),
+            consensus_prob=consensus_home,
             best_sportsbook=best_home_line.sportsbook,
             best_odds=best_home_line.home_value,
-            ev=round(ev_home, 4),
-            edge_pct=round(ev_home * 100, 2),
         )
     )
 
-    ev_away = _compute_ev(consensus_away, best_away_line.away_value)
     results.append(
-        BetRecommendation(
+        _build_rec(
             market="moneyline",
             selection=away_team,
             side="away",
             line=None,
-            consensus_prob=round(consensus_away, 4),
+            consensus_prob=consensus_away,
             best_sportsbook=best_away_line.sportsbook,
             best_odds=best_away_line.away_value,
-            ev=round(ev_away, 4),
-            edge_pct=round(ev_away * 100, 2),
         )
     )
 
@@ -155,34 +185,28 @@ def _spread_recommendations(
 
     results: list[BetRecommendation] = []
 
-    ev_home = _compute_ev(consensus_home, best_home.home_price)
     results.append(
-        BetRecommendation(
+        _build_rec(
             market="spread",
             selection=home_team,
             side="home",
             line=mode_spread,
-            consensus_prob=round(consensus_home, 4),
+            consensus_prob=consensus_home,
             best_sportsbook=best_home.sportsbook,
             best_odds=best_home.home_price,
-            ev=round(ev_home, 4),
-            edge_pct=round(ev_home * 100, 2),
         )
     )
 
-    ev_away = _compute_ev(consensus_away, best_away.away_price)
     away_spread = matching[0].away_value
     results.append(
-        BetRecommendation(
+        _build_rec(
             market="spread",
             selection=away_team,
             side="away",
             line=away_spread,
-            consensus_prob=round(consensus_away, 4),
+            consensus_prob=consensus_away,
             best_sportsbook=best_away.sportsbook,
             best_odds=best_away.away_price,
-            ev=round(ev_away, 4),
-            edge_pct=round(ev_away * 100, 2),
         )
     )
 
@@ -226,33 +250,27 @@ def _total_recommendations(
 
     results: list[BetRecommendation] = []
 
-    ev_over = _compute_ev(consensus_over, best_over.home_price)
     results.append(
-        BetRecommendation(
+        _build_rec(
             market="total",
             selection="Over",
             side="over",
             line=mode_total,
-            consensus_prob=round(consensus_over, 4),
+            consensus_prob=consensus_over,
             best_sportsbook=best_over.sportsbook,
             best_odds=best_over.home_price,
-            ev=round(ev_over, 4),
-            edge_pct=round(ev_over * 100, 2),
         )
     )
 
-    ev_under = _compute_ev(consensus_under, best_under.away_price)
     results.append(
-        BetRecommendation(
+        _build_rec(
             market="total",
             selection="Under",
             side="under",
             line=mode_total,
-            consensus_prob=round(consensus_under, 4),
+            consensus_prob=consensus_under,
             best_sportsbook=best_under.sportsbook,
             best_odds=best_under.away_price,
-            ev=round(ev_under, 4),
-            edge_pct=round(ev_under * 100, 2),
         )
     )
 

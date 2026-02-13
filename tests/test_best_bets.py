@@ -308,14 +308,33 @@ class TestRecommendBestBets:
         lines = [_ml_line("DraftKings", -150, 130)]
         assert recommend_best_bets(lines) == []
 
-    def test_edge_pct_matches_ev(self):
+    def test_edge_pct_is_consensus_minus_breakeven(self):
         lines = [
             _ml_line("A", -150, 130),
             _ml_line("B", -140, 120),
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            assert abs(r.edge_pct - r.ev * 100) < 0.01
+            expected_edge = (r.consensus_prob - r.breakeven_prob) * 100
+            assert abs(r.edge_pct - expected_edge) < 0.01
+
+    def test_ev_per_100_matches_ev(self):
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert abs(r.ev_per_100 - r.ev * 100) < 0.01
+
+    def test_breakeven_prob_populated(self):
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert 0 < r.breakeven_prob < 1
 
     def test_line_is_none_for_moneyline(self):
         lines = [

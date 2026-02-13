@@ -15,9 +15,7 @@ from line_tracker.bet_history import init_bet_state, settle_bet, submit_bet
 from line_tracker.bet_slip import (
     american_profit,
     american_total_return,
-    breakeven_prob_from_american,
     compute_standouts,
-    ev_per_dollar,
     format_american,
     has_conflicting_leg,
     is_duplicate_leg,
@@ -717,12 +715,20 @@ def _detail_best_bet_section(game_lines):
         "Informational only, not financial advice"
     )
 
-    pos_ev = [r for r in recs if r.ev > 0]
+    min_edge = st.slider(
+        "Min edge (%)",
+        min_value=0.0,
+        max_value=5.0,
+        value=0.5,
+        step=0.1,
+        key=f"min_edge_{id(game_lines)}",
+    )
 
-    if pos_ev:
-        top = pos_ev[0]
+    qualified = [r for r in recs if r.ev > 0 and r.edge_pct >= min_edge]
+
+    if qualified:
+        top = qualified[0]
         market_label = _best_bet_market_label(top)
-        dollar_ev = top.ev * 100  # per $100 stake
 
         with st.container(border=True):
             st.markdown(
@@ -738,55 +744,52 @@ def _detail_best_bet_section(game_lines):
                 )
             with c2:
                 st.markdown(
-                    f"Edge (EV): **{fmt_pct(top.edge_pct, sign=True)}**"
-                    f"  |  **{fmt_money(dollar_ev, sign=True)}** per $100"
+                    f"Edge: **{fmt_pct(top.edge_pct, sign=True)}**"
+                    f"  |  **{fmt_money(top.ev_per_100, sign=True)}** per $100"
                 )
 
             _render_best_bet_why(top)
 
-        others = pos_ev[1:]
+        others = qualified[1:3]
         if others:
             st.markdown("**Other +EV bets:**")
             for r in others:
                 ml = _best_bet_market_label(r)
-                dev = r.ev * 100
                 st.markdown(
                     f"- {r.selection} ({ml}) at "
                     f"{format_american(r.best_odds)} "
                     f"on {r.best_sportsbook} — "
-                    f"EV {fmt_pct(r.edge_pct, sign=True)}, "
-                    f"{fmt_money(dev, sign=True)} per $100"
+                    f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
+                    f"{fmt_money(r.ev_per_100, sign=True)} per $100"
                 )
     else:
-        # No +EV bets — show highest edge line as fallback
+        # No bets meet the threshold — show the best one as FYI
         top = recs[0]
         market_label = _best_bet_market_label(top)
         st.info(
-            f"No +EV bets found based on consensus. "
-            f"Best value to shop: **{top.selection} ({market_label}) "
+            f"No bets meet your min edge threshold. "
+            f"FYI — best available: **{top.selection} ({market_label}) "
             f"at {format_american(top.best_odds)} "
             f"on {top.best_sportsbook}** — "
-            f"EV {fmt_pct(top.edge_pct, sign=True)}"
+            f"Edge {fmt_pct(top.edge_pct, sign=True)}, "
+            f"{fmt_money(top.ev_per_100, sign=True)} per $100"
         )
 
 
 def _render_best_bet_why(rec) -> None:
     """Render a compact 'Why this bet?' breakdown inside the Best Bet card."""
-    be_prob = breakeven_prob_from_american(rec.best_odds)
-    edge = rec.consensus_prob - be_prob
-    ev_dollar = ev_per_dollar(rec.consensus_prob, rec.best_odds)
-    ev_per_100 = ev_dollar * 100
-
     with st.expander("Why this bet?", expanded=False):
         st.markdown(
             f"- **Consensus prob (vig-free):** {rec.consensus_prob * 100:.1f}%\n"
             f"- **Best price:** {format_american(rec.best_odds)} "
             f"at {rec.best_sportsbook}\n"
-            f"- **Breakeven prob (at that price):** {be_prob * 100:.1f}%\n"
+            f"- **Breakeven prob (at that price):** "
+            f"{rec.breakeven_prob * 100:.1f}%\n"
             f"- **Edge:** ({rec.consensus_prob * 100:.1f}% \u2212 "
-            f"{be_prob * 100:.1f}%) = {fmt_pct(edge * 100, sign=True)}\n"
-            f"- **EV:** {fmt_money(ev_per_100, sign=True)} per $100 "
-            f"({ev_dollar * 100:+.1f}% per $1)"
+            f"{rec.breakeven_prob * 100:.1f}%) = "
+            f"{fmt_pct(rec.edge_pct, sign=True)}\n"
+            f"- **EV:** {fmt_money(rec.ev_per_100, sign=True)} per $100 "
+            f"({rec.ev * 100:+.1f}% per $1)"
         )
 
 
