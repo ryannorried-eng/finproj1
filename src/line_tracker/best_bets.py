@@ -109,6 +109,8 @@ class BetRecommendation:
     unweighted_consensus_prob: float = 0.0  # plain median for debugging
     newest_update_age_min: float = 0.0  # minutes since most recent book update
     oldest_update_age_min: float = 0.0  # minutes since oldest book update
+    books_used_count: int = 0  # books in the chosen line group
+    total_books_count: int = 0  # total priced books for this market
 
 
 def _remove_vig(odds_a: float, odds_b: float) -> tuple[float, float]:
@@ -171,6 +173,8 @@ def _build_rec(
     side_probs: list[float],
     newest_update_age_min: float = 0.0,
     oldest_update_age_min: float = 0.0,
+    books_used_count: int = 0,
+    total_books_count: int = 0,
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs."""
     be_prob = breakeven_prob_from_american(best_odds)
@@ -192,6 +196,8 @@ def _build_rec(
         unweighted_consensus_prob=round(unweighted_consensus_prob, 4),
         newest_update_age_min=round(newest_update_age_min, 1),
         oldest_update_age_min=round(oldest_update_age_min, 1),
+        books_used_count=books_used_count,
+        total_books_count=total_books_count,
     )
 
 
@@ -199,6 +205,26 @@ def _mode_value(values: list[float]) -> float:
     """Return the most common value (mode).  Ties broken by Counter ordering."""
     counter = Counter(values)
     return counter.most_common(1)[0][0]
+
+
+def _best_line_group(values: list[float]) -> float:
+    """Choose the best line value for consensus.
+
+    Selection criteria (in order):
+      1. Most books offering that line value.
+      2. Tie-break: closest to the median of *all* line values.
+
+    Returns the chosen line value.
+    """
+    counter = Counter(values)
+    max_count = counter.most_common(1)[0][1]
+    # All line values that are tied for the highest count
+    tied = [val for val, cnt in counter.items() if cnt == max_count]
+    if len(tied) == 1:
+        return tied[0]
+    # Break tie: pick the value closest to the overall median
+    med = median(values)
+    return min(tied, key=lambda v: abs(v - med))
 
 
 def _moneyline_recommendations(
@@ -239,6 +265,8 @@ def _moneyline_recommendations(
 
     results: list[BetRecommendation] = []
 
+    n_books = len(lines)
+
     results.append(
         _build_rec(
             market="moneyline",
@@ -252,6 +280,8 @@ def _moneyline_recommendations(
             side_probs=home_no_vig,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
+            books_used_count=n_books,
+            total_books_count=n_books,
         )
     )
 
@@ -268,6 +298,8 @@ def _moneyline_recommendations(
             side_probs=away_no_vig,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
+            books_used_count=n_books,
+            total_books_count=n_books,
         )
     )
 
@@ -291,11 +323,14 @@ def _spread_recommendations(
     if len(priced) < 2:
         return []
 
-    mode_spread = _mode_value([ln.home_value for ln in priced])
-    matching = [ln for ln in priced if ln.home_value == mode_spread]
+    chosen_spread = _best_line_group([ln.home_value for ln in priced])
+    matching = [ln for ln in priced if ln.home_value == chosen_spread]
 
     if len(matching) < 2:
         return []
+
+    total_books = len(priced)
+    books_used = len(matching)
 
     home_no_vig: list[float] = []
     away_no_vig: list[float] = []
@@ -330,7 +365,7 @@ def _spread_recommendations(
             market="spread",
             selection=home_team,
             side="home",
-            line=mode_spread,
+            line=chosen_spread,
             consensus_prob=consensus_home,
             unweighted_consensus_prob=unweighted_home,
             best_sportsbook=best_home.sportsbook,
@@ -338,6 +373,8 @@ def _spread_recommendations(
             side_probs=home_no_vig,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
+            books_used_count=books_used,
+            total_books_count=total_books,
         )
     )
 
@@ -355,6 +392,8 @@ def _spread_recommendations(
             side_probs=away_no_vig,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
+            books_used_count=books_used,
+            total_books_count=total_books,
         )
     )
 
@@ -377,11 +416,14 @@ def _total_recommendations(
     if len(priced) < 2:
         return []
 
-    mode_total = _mode_value([ln.home_value for ln in priced])
-    matching = [ln for ln in priced if ln.home_value == mode_total]
+    chosen_total = _best_line_group([ln.home_value for ln in priced])
+    matching = [ln for ln in priced if ln.home_value == chosen_total]
 
     if len(matching) < 2:
         return []
+
+    total_books = len(priced)
+    books_used = len(matching)
 
     over_no_vig: list[float] = []
     under_no_vig: list[float] = []
@@ -413,7 +455,7 @@ def _total_recommendations(
             market="total",
             selection="Over",
             side="over",
-            line=mode_total,
+            line=chosen_total,
             consensus_prob=consensus_over,
             unweighted_consensus_prob=unweighted_over,
             best_sportsbook=best_over.sportsbook,
@@ -421,6 +463,8 @@ def _total_recommendations(
             side_probs=over_no_vig,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
+            books_used_count=books_used,
+            total_books_count=total_books,
         )
     )
 
@@ -429,7 +473,7 @@ def _total_recommendations(
             market="total",
             selection="Under",
             side="under",
-            line=mode_total,
+            line=chosen_total,
             consensus_prob=consensus_under,
             unweighted_consensus_prob=unweighted_under,
             best_sportsbook=best_under.sportsbook,
@@ -437,6 +481,8 @@ def _total_recommendations(
             side_probs=under_no_vig,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
+            books_used_count=books_used,
+            total_books_count=total_books,
         )
     )
 

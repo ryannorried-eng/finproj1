@@ -781,7 +781,18 @@ def _detail_best_bet_section(game_lines):
 def _render_best_bet_why(rec) -> None:
     """Render a compact 'Why this bet?' breakdown inside the Best Bet card."""
     with st.expander("Why this bet?", expanded=False):
+        books_line = ""
+        if rec.books_used_count and rec.total_books_count:
+            line_label = ""
+            if rec.line is not None:
+                line_label = f" at line {rec.line:g}"
+            books_line = (
+                f"- **Consensus built from** "
+                f"{rec.books_used_count} / {rec.total_books_count} "
+                f"books{line_label}\n"
+            )
         st.markdown(
+            f"{books_line}"
             f"- **Weighted consensus (vig-free):** "
             f"{rec.consensus_prob * 100:.1f}%\n"
             f"- **Unweighted consensus (vig-free):** "

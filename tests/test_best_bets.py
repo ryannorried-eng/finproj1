@@ -6,6 +6,7 @@ from line_tracker.best_bets import (
     BOOK_WEIGHTS,
     RECENCY_HALF_LIFE_MIN,
     BetRecommendation,
+    _best_line_group,
     _compute_ev,
     _confidence_label,
     _line_weight,
@@ -830,3 +831,153 @@ class TestRecencyConsensusIntegration:
         # DK is fresh (weight ≈ 1.0), FD is 4h stale (weight ≈ 0.018)
         # Weighted median should pick DK's value
         assert abs(home_rec.consensus_prob - dk_h) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# _best_line_group helper
+# ---------------------------------------------------------------------------
+
+
+class TestBestLineGroup:
+    def test_clear_majority(self):
+        """When one line has more books, pick it."""
+        assert _best_line_group([-3.5, -3.5, -3.0]) == -3.5
+
+    def test_all_same(self):
+        assert _best_line_group([7.0, 7.0, 7.0]) == 7.0
+
+    def test_tie_picks_closest_to_median(self):
+        """Two lines with equal count — pick the one closest to median.
+
+        Values: [-3.5, -3.0] → median = -3.25.
+        Both are equidistant (0.25), so either is acceptable.
+        """
+        result = _best_line_group([-3.5, -3.0])
+        assert result in (-3.5, -3.0)
+
+    def test_tie_three_way_picks_closest_to_median(self):
+        """Three distinct lines, each with 1 book.
+
+        Values: [220.0, 220.5, 221.0] → median = 220.5.
+        220.5 is the median itself, so it wins.
+        """
+        result = _best_line_group([220.0, 220.5, 221.0])
+        assert result == 220.5
+
+    def test_tie_two_groups_equal_count(self):
+        """Two groups of 2 books each, pick line closest to median.
+
+        Values: [-2.5, -2.5, -3.5, -3.5] → median = -3.0.
+        |-2.5 - (-3.0)| = 0.5, |-3.5 - (-3.0)| = 0.5 → true tie.
+        min() with key will pick the first (sorted order); either is valid.
+        """
+        result = _best_line_group([-2.5, -2.5, -3.5, -3.5])
+        assert result in (-2.5, -3.5)
+
+    def test_still_returns_mode_when_no_tie(self):
+        """Backward compat: same behaviour as _mode_value when clear winner."""
+        vals = [-3.5, -3.5, -3.5, -3.0, -4.0]
+        assert _best_line_group(vals) == -3.5
+        assert _mode_value(vals) == -3.5
+
+
+# ---------------------------------------------------------------------------
+# Line group selection integration — spread/total with split books
+# ---------------------------------------------------------------------------
+
+
+class TestLineGroupIntegration:
+    def test_spread_tie_uses_median_tiebreak(self):
+        """2 books at -3.5, 2 books at -3.0 → pick closer to median spread."""
+        lines = [
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -110, -110),
+            _spread_line("C", -3.0, 3.0, -110, -110),
+            _spread_line("D", -3.0, 3.0, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        # median of [-3.5, -3.5, -3.0, -3.0] = -3.25
+        # |-3.0 - (-3.25)| = 0.25, |-3.5 - (-3.25)| = 0.25
+        # True tie — either is acceptable
+        home_spread = next(r for r in spread_recs if r.side == "home")
+        assert home_spread.line in (-3.5, -3.0)
+
+    def test_spread_clear_majority_wins(self):
+        """3 books at -3.5, 1 at -3.0 → -3.5 group wins."""
+        lines = [
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -108, -112),
+            _spread_line("C", -3.5, 3.5, -105, -115),
+            _spread_line("D", -3.0, 3.0, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        home_spread = next(r for r in spread_recs if r.side == "home")
+        assert home_spread.line == -3.5
+
+    def test_total_tie_uses_median_tiebreak(self):
+        """2 books at 220.5, 2 books at 221.0 → pick closest to median."""
+        lines = [
+            _total_line("A", 220.5, -110, -110),
+            _total_line("B", 220.5, -110, -110),
+            _total_line("C", 221.0, -110, -110),
+            _total_line("D", 221.0, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        total_recs = [r for r in recs if r.market == "total"]
+        over_rec = next(r for r in total_recs if r.side == "over")
+        # median of [220.5, 220.5, 221.0, 221.0] = 220.75
+        # |220.5 - 220.75| = 0.25, |221.0 - 220.75| = 0.25  → either ok
+        assert over_rec.line in (220.5, 221.0)
+
+    def test_books_used_count_and_total_books_count_spread(self):
+        """Verify books_used_count and total_books_count on spread recs."""
+        lines = [
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -105, -115),
+            _spread_line("C", -3.0, 3.0, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        for r in spread_recs:
+            assert r.books_used_count == 2  # A and B at -3.5
+            assert r.total_books_count == 3
+
+    def test_books_used_count_and_total_books_count_total(self):
+        """Verify books_used_count and total_books_count on total recs."""
+        lines = [
+            _total_line("A", 220.5, -110, -110),
+            _total_line("B", 220.5, -112, -108),
+            _total_line("C", 221.0, -105, -115),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        total_recs = [r for r in recs if r.market == "total"]
+        for r in total_recs:
+            assert r.books_used_count == 2  # A and B at 220.5
+            assert r.total_books_count == 3
+
+    def test_moneyline_books_count_all_used(self):
+        """Moneyline uses all books (no line grouping)."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+            _ml_line("C", -160, 140),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert r.books_used_count == 3
+            assert r.total_books_count == 3
+
+    def test_all_books_same_line_counts_match(self):
+        """When all books agree on the line, used == total."""
+        lines = [
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -105, -115),
+            _spread_line("C", -3.5, 3.5, -108, -112),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        for r in spread_recs:
+            assert r.books_used_count == 3
+            assert r.total_books_count == 3
