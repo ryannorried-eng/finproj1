@@ -58,6 +58,19 @@ class LineStore:
             ON lines (event, bet_type, sportsbook)
         """)
         self._conn.commit()
+        self._migrate_commence_time()
+
+    def _migrate_commence_time(self) -> None:
+        """Add commence_time column if it doesn't exist yet."""
+        cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(lines)").fetchall()
+        }
+        if "commence_time" not in cols:
+            self._conn.execute(
+                "ALTER TABLE lines ADD COLUMN commence_time TEXT"
+            )
+            self._conn.commit()
 
     def save_lines(self, lines: list[BettingLine]) -> int:
         """Save a batch of lines. Returns number of rows inserted."""
@@ -74,14 +87,16 @@ class LineStore:
                 ln.home_price,
                 ln.away_price,
                 ln.timestamp.isoformat(),
+                ln.commence_time.isoformat() if ln.commence_time else None,
             )
             for ln in lines
         ]
         cursor = self._conn.executemany(
             """INSERT INTO lines
                (sportsbook, sport, event, bet_type, home_team, away_team,
-                home_value, away_value, home_price, away_price, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                home_value, away_value, home_price, away_price, timestamp,
+                commence_time)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         self._conn.commit()
@@ -147,6 +162,12 @@ class LineStore:
 
 
 def _row_to_line(row: sqlite3.Row) -> BettingLine:
+    ct_raw = row["commence_time"]
+    commence_time = (
+        datetime.fromisoformat(ct_raw).replace(tzinfo=timezone.utc)
+        if ct_raw
+        else None
+    )
     return BettingLine(
         sportsbook=row["sportsbook"],
         sport=row["sport"],
@@ -161,4 +182,5 @@ def _row_to_line(row: sqlite3.Row) -> BettingLine:
         timestamp=datetime.fromisoformat(row["timestamp"]).replace(
             tzinfo=timezone.utc
         ),
+        commence_time=commence_time,
     )
