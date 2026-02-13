@@ -136,6 +136,7 @@ def _clear_slip() -> None:
     """Clear all legs and unlock sportsbook."""
     st.session_state["bet_slip"] = []
     st.session_state["slip_book"] = None
+    st.session_state["slip_stake"] = 100.0
 
 
 def _lines_to_shopping_entries(lines) -> list[dict]:
@@ -1267,10 +1268,14 @@ def _slip_dialog():
 
     # --- Payout section ---
     legs_odds = [leg["odds"] for leg in slip]
+    _raw_stake = st.session_state.get("slip_stake", 100.0)
+    _safe_stake = float(_raw_stake) if isinstance(_raw_stake, (int, float)) else 100.0
+    if _safe_stake < 1.0:
+        _safe_stake = 100.0
     stake = st.number_input(
         "Stake ($)",
         min_value=1.0,
-        value=max(1.0, st.session_state.get("slip_stake", 100.0)),
+        value=_safe_stake,
         step=10.0,
         key="dlg_stake",
     )
@@ -1366,10 +1371,14 @@ def _page_best_lines():
             key="bl_max_rows",
         )
     with fcols[3]:
+        _raw_stake = st.session_state.get("slip_stake", 100.0)
+        _safe_stake = float(_raw_stake) if isinstance(_raw_stake, (int, float)) else 100.0
+        if _safe_stake < 1.0:
+            _safe_stake = 100.0
         stake = st.number_input(
             "Stake ($)",
             min_value=1.0,
-            value=max(1.0, st.session_state.get("slip_stake", 100.0)),
+            value=_safe_stake,
             step=10.0,
             key="bl_stake",
         )
@@ -1650,6 +1659,8 @@ def main():
         st.session_state["bet_slip"] = []
     if "slip_book" not in st.session_state:
         st.session_state["slip_book"] = None
+    if st.session_state.get("slip_stake", 0.0) < 1.0:
+        st.session_state["slip_stake"] = 100.0
 
     # Ensure bet history state exists
     init_bet_state(st.session_state)
