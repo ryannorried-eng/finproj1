@@ -1460,14 +1460,18 @@ def _page_best_lines():
         ordered_keys.append(None)
 
     for group_date in ordered_keys:
+        count = len(groups[group_date])
+        date_str = (
+            group_date.strftime("%a %b %-d") if group_date is not None else ""
+        )
         if group_date is None:
-            header = "Unknown time"
+            header = f"Unknown time ({count})"
         elif group_date == today:
-            header = "Today"
+            header = f"Today \u2014 {date_str} ({count})"
         elif group_date == tomorrow:
-            header = "Tomorrow"
+            header = f"Tomorrow \u2014 {date_str} ({count})"
         else:
-            header = group_date.strftime("%a %b %-d")
+            header = f"{date_str} ({count})"
 
         st.subheader(header)
 
