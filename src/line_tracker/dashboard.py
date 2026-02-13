@@ -1270,7 +1270,7 @@ def _slip_dialog():
     stake = st.number_input(
         "Stake ($)",
         min_value=1.0,
-        value=st.session_state.get("slip_stake", 100.0),
+        value=max(1.0, st.session_state.get("slip_stake", 100.0)),
         step=10.0,
         key="dlg_stake",
     )
@@ -1369,7 +1369,7 @@ def _page_best_lines():
         stake = st.number_input(
             "Stake ($)",
             min_value=1.0,
-            value=st.session_state.get("slip_stake", 100.0),
+            value=max(1.0, st.session_state.get("slip_stake", 100.0)),
             step=10.0,
             key="bl_stake",
         )
