@@ -4,10 +4,13 @@ from datetime import datetime
 
 from line_tracker.best_bets import (
     BOOK_WEIGHTS,
+    RECENCY_HALF_LIFE_MIN,
     BetRecommendation,
     _compute_ev,
     _confidence_label,
+    _line_weight,
     _mode_value,
+    _recency_multiplier,
     _remove_vig,
     _weight_for_book,
     _weighted_median,
@@ -625,3 +628,205 @@ class TestWeightedConsensusIntegration:
 
         pin_over, _ = _remove_vig(-105, -115)
         assert abs(over_rec.consensus_prob - pin_over) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# Recency multiplier
+# ---------------------------------------------------------------------------
+
+
+class TestRecencyMultiplier:
+    def test_fresh_line_returns_one(self):
+        """A line fetched right now should have recency ≈ 1.0."""
+        now = datetime(2025, 6, 1, 12, 0)
+        assert abs(_recency_multiplier(now, now) - 1.0) < 0.001
+
+    def test_one_half_life_old(self):
+        """After exactly RECENCY_HALF_LIFE_MIN, recency ≈ exp(-1) ≈ 0.368."""
+        from math import exp
+
+        now = datetime(2025, 6, 1, 13, 0)  # 60 min later
+        ts = datetime(2025, 6, 1, 12, 0)
+        expected = exp(-1.0)
+        assert abs(_recency_multiplier(ts, now) - expected) < 0.001
+
+    def test_very_old_line_hits_floor(self):
+        """Extremely old timestamps should clamp to the floor (0.01)."""
+        now = datetime(2025, 6, 1, 12, 0)
+        ts = datetime(2020, 1, 1, 0, 0)  # years ago
+        assert _recency_multiplier(ts, now) == 0.01
+
+    def test_future_timestamp_returns_one(self):
+        """If timestamp is somehow in the future, treat as fresh."""
+        now = datetime(2025, 6, 1, 12, 0)
+        future = datetime(2025, 6, 1, 13, 0)
+        assert abs(_recency_multiplier(future, now) - 1.0) < 0.001
+
+    def test_monotonically_decreasing(self):
+        """Older lines should have lower recency than newer lines."""
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh = _recency_multiplier(datetime(2025, 6, 1, 11, 50), now)  # 10m
+        stale = _recency_multiplier(datetime(2025, 6, 1, 10, 0), now)  # 120m
+        assert fresh > stale
+
+
+# ---------------------------------------------------------------------------
+# Combined line weight
+# ---------------------------------------------------------------------------
+
+
+class TestLineWeight:
+    def test_fresh_sharp_book_highest(self):
+        """Pinnacle fetched now should have highest weight."""
+        now = datetime(2025, 6, 1, 12, 0)
+        w = _line_weight("Pinnacle", now, now)
+        assert abs(w - 3.0) < 0.01  # 3.0 * 1.0
+
+    def test_stale_sharp_book_reduced(self):
+        """Pinnacle fetched 60 min ago gets decayed."""
+        from math import exp
+
+        now = datetime(2025, 6, 1, 13, 0)
+        ts = datetime(2025, 6, 1, 12, 0)
+        expected = 3.0 * exp(-1.0)
+        assert abs(_line_weight("Pinnacle", ts, now) - expected) < 0.01
+
+    def test_stale_vs_fresh_same_book(self):
+        """Fresh line from same book should outweigh stale line."""
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh = _line_weight("DraftKings", datetime(2025, 6, 1, 11, 55), now)
+        stale = _line_weight("DraftKings", datetime(2025, 6, 1, 10, 0), now)
+        assert fresh > stale
+
+
+# ---------------------------------------------------------------------------
+# Recency-weighted consensus integration
+# ---------------------------------------------------------------------------
+
+def _ml_line_ts(
+    sportsbook: str, home_odds: float, away_odds: float, ts: datetime,
+) -> BettingLine:
+    """Moneyline line helper with configurable timestamp."""
+    return BettingLine(
+        sportsbook=sportsbook,
+        sport="basketball_nba",
+        event="Lakers @ Celtics",
+        bet_type=BetType.MONEYLINE,
+        home_team="Celtics",
+        away_team="Lakers",
+        home_value=home_odds,
+        away_value=away_odds,
+        timestamp=ts,
+    )
+
+
+class TestRecencyConsensusIntegration:
+    def test_stale_outlier_influences_less(self):
+        """A stale book with an outlier line should be down-weighted.
+
+        Setup: two fresh books agree at -150/+130, one stale book posts
+        an outlier at -200/+180.  Without recency weighting, the outlier
+        would pull consensus toward its value.  With recency, it should
+        contribute much less.
+        """
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh_ts = datetime(2025, 6, 1, 11, 55)  # 5 min ago
+        stale_ts = datetime(2025, 6, 1, 8, 0)  # 4 hours ago
+
+        lines = [
+            _ml_line_ts("DraftKings", -150, 130, fresh_ts),
+            _ml_line_ts("FanDuel", -150, 130, fresh_ts),
+            _ml_line_ts("BetMGM", -200, 180, stale_ts),  # outlier, stale
+        ]
+
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        # Fresh books' de-vigged home prob
+        fresh_h, _ = _remove_vig(-150, 130)
+        # Stale outlier's de-vigged home prob
+        stale_h, _ = _remove_vig(-200, 180)
+
+        # Consensus should be much closer to the fresh books' value
+        # because the stale outlier is down-weighted by recency decay
+        dist_to_fresh = abs(home_rec.consensus_prob - fresh_h)
+        dist_to_stale = abs(home_rec.consensus_prob - stale_h)
+        assert dist_to_fresh < dist_to_stale
+
+    def test_fresh_outlier_influences_more(self):
+        """The opposite: a fresh outlier should pull consensus toward it."""
+        now = datetime(2025, 6, 1, 12, 0)
+        stale_ts = datetime(2025, 6, 1, 8, 0)  # 4 hours ago
+        fresh_ts = datetime(2025, 6, 1, 11, 58)  # 2 min ago
+
+        lines = [
+            _ml_line_ts("DraftKings", -150, 130, stale_ts),
+            _ml_line_ts("FanDuel", -150, 130, stale_ts),
+            _ml_line_ts("BetMGM", -200, 180, fresh_ts),  # outlier, fresh
+        ]
+
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        stale_h, _ = _remove_vig(-150, 130)
+        fresh_h, _ = _remove_vig(-200, 180)
+
+        # Now the fresh outlier has high recency, stale books are down-weighted
+        # Consensus should be closer to the fresh outlier
+        dist_to_fresh = abs(home_rec.consensus_prob - fresh_h)
+        dist_to_stale = abs(home_rec.consensus_prob - stale_h)
+        assert dist_to_fresh < dist_to_stale
+
+    def test_all_same_timestamp_preserves_book_weights(self):
+        """When all lines are the same age, only book weights matter."""
+        now = datetime(2025, 6, 1, 12, 0)
+        ts = datetime(2025, 6, 1, 11, 50)  # all 10 min old
+
+        lines = [
+            _ml_line_ts("Pinnacle", -200, 180, ts),   # book weight 3.0
+            _ml_line_ts("DraftKings", -140, 120, ts),  # book weight 1.0
+        ]
+
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        pin_h, _ = _remove_vig(-200, 180)
+        # Equal recency → only book weight matters → Pinnacle dominates
+        assert abs(home_rec.consensus_prob - pin_h) < 0.001
+
+    def test_age_fields_populated(self):
+        """newest_update_age_min and oldest_update_age_min should be set."""
+        now = datetime(2025, 6, 1, 12, 0)
+        ts1 = datetime(2025, 6, 1, 11, 50)  # 10 min ago
+        ts2 = datetime(2025, 6, 1, 11, 30)  # 30 min ago
+
+        lines = [
+            _ml_line_ts("DraftKings", -150, 130, ts1),
+            _ml_line_ts("FanDuel", -140, 120, ts2),
+        ]
+
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        for r in recs:
+            assert abs(r.newest_update_age_min - 10.0) < 0.1
+            assert abs(r.oldest_update_age_min - 30.0) < 0.1
+
+    def test_recency_weakens_stale_equal_weight_books(self):
+        """Two equal-weight books, but one is stale — consensus shifts to fresh."""
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh_ts = datetime(2025, 6, 1, 11, 58)
+        stale_ts = datetime(2025, 6, 1, 8, 0)
+
+        lines = [
+            _ml_line_ts("DraftKings", -150, 130, fresh_ts),
+            _ml_line_ts("FanDuel", -200, 180, stale_ts),
+        ]
+
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        dk_h, _ = _remove_vig(-150, 130)
+        fd_h, _ = _remove_vig(-200, 180)
+
+        # DK is fresh (weight ≈ 1.0), FD is 4h stale (weight ≈ 0.018)
+        # Weighted median should pick DK's value
+        assert abs(home_rec.consensus_prob - dk_h) < 0.001

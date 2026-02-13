@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
+from math import exp
 from statistics import median, quantiles
 
 from line_tracker.bet_slip import (
@@ -39,6 +41,28 @@ _DEFAULT_WEIGHT = 1.0
 def _weight_for_book(sportsbook: str) -> float:
     """Return the weight for a sportsbook, falling back to the default."""
     return BOOK_WEIGHTS.get(sportsbook, _DEFAULT_WEIGHT)
+
+
+# ---------------------------------------------------------------------------
+# Recency weighting — fresher lines carry more influence.
+# ---------------------------------------------------------------------------
+RECENCY_HALF_LIFE_MIN = 60.0
+_RECENCY_FLOOR = 0.01  # prevent underflow for very old timestamps
+
+
+def _recency_multiplier(timestamp: datetime, now: datetime) -> float:
+    """Exponential decay: exp(-age_minutes / RECENCY_HALF_LIFE_MIN).
+
+    Returns a value in [_RECENCY_FLOOR, 1.0].  The floor prevents float
+    underflow when lines are very old (e.g. in tests with fixed timestamps).
+    """
+    age_minutes = max(0.0, (now - timestamp).total_seconds() / 60.0)
+    return max(exp(-age_minutes / RECENCY_HALF_LIFE_MIN), _RECENCY_FLOOR)
+
+
+def _line_weight(sportsbook: str, timestamp: datetime, now: datetime) -> float:
+    """Combined weight = book_weight * recency_multiplier."""
+    return _weight_for_book(sportsbook) * _recency_multiplier(timestamp, now)
 
 
 def _weighted_median(values: list[float], weights: list[float]) -> float:
@@ -83,6 +107,8 @@ class BetRecommendation:
     ev_per_100: float  # ev * 100 — dollar EV per $100 stake
     confidence: str  # "High", "Medium", or "Low" — book agreement level
     unweighted_consensus_prob: float = 0.0  # plain median for debugging
+    newest_update_age_min: float = 0.0  # minutes since most recent book update
+    oldest_update_age_min: float = 0.0  # minutes since oldest book update
 
 
 def _remove_vig(odds_a: float, odds_b: float) -> tuple[float, float]:
@@ -143,6 +169,8 @@ def _build_rec(
     best_sportsbook: str,
     best_odds: float,
     side_probs: list[float],
+    newest_update_age_min: float = 0.0,
+    oldest_update_age_min: float = 0.0,
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs."""
     be_prob = breakeven_prob_from_american(best_odds)
@@ -162,6 +190,8 @@ def _build_rec(
         ev_per_100=round(ev * 100, 2),
         confidence=_confidence_label(side_probs),
         unweighted_consensus_prob=round(unweighted_consensus_prob, 4),
+        newest_update_age_min=round(newest_update_age_min, 1),
+        oldest_update_age_min=round(oldest_update_age_min, 1),
     )
 
 
@@ -173,6 +203,7 @@ def _mode_value(values: list[float]) -> float:
 
 def _moneyline_recommendations(
     lines: list[BettingLine],
+    now: datetime,
 ) -> list[BetRecommendation]:
     """Build moneyline best-bet recommendations for one event."""
     if len(lines) < 2:
@@ -186,7 +217,7 @@ def _moneyline_recommendations(
         ph, pa = _remove_vig(ln.home_value, ln.away_value)
         home_no_vig.append(ph)
         away_no_vig.append(pa)
-        weights.append(_weight_for_book(ln.sportsbook))
+        weights.append(_line_weight(ln.sportsbook, ln.timestamp, now))
 
     # Unweighted (plain median) — kept for debugging
     unweighted_home = median(home_no_vig)
@@ -202,6 +233,10 @@ def _moneyline_recommendations(
     home_team = lines[0].home_team
     away_team = lines[0].away_team
 
+    ages = [(now - ln.timestamp).total_seconds() / 60.0 for ln in lines]
+    newest_age = max(0.0, min(ages))
+    oldest_age = max(0.0, max(ages))
+
     results: list[BetRecommendation] = []
 
     results.append(
@@ -215,6 +250,8 @@ def _moneyline_recommendations(
             best_sportsbook=best_home_line.sportsbook,
             best_odds=best_home_line.home_value,
             side_probs=home_no_vig,
+            newest_update_age_min=newest_age,
+            oldest_update_age_min=oldest_age,
         )
     )
 
@@ -229,6 +266,8 @@ def _moneyline_recommendations(
             best_sportsbook=best_away_line.sportsbook,
             best_odds=best_away_line.away_value,
             side_probs=away_no_vig,
+            newest_update_age_min=newest_age,
+            oldest_update_age_min=oldest_age,
         )
     )
 
@@ -237,6 +276,7 @@ def _moneyline_recommendations(
 
 def _spread_recommendations(
     lines: list[BettingLine],
+    now: datetime,
 ) -> list[BetRecommendation]:
     """Build spread best-bet recommendations for one event.
 
@@ -265,7 +305,7 @@ def _spread_recommendations(
         ph, pa = _remove_vig(ln.home_price, ln.away_price)
         home_no_vig.append(ph)
         away_no_vig.append(pa)
-        weights.append(_weight_for_book(ln.sportsbook))
+        weights.append(_line_weight(ln.sportsbook, ln.timestamp, now))
 
     unweighted_home = median(home_no_vig)
     unweighted_away = median(away_no_vig)
@@ -278,6 +318,10 @@ def _spread_recommendations(
 
     home_team = lines[0].home_team
     away_team = lines[0].away_team
+
+    ages = [(now - ln.timestamp).total_seconds() / 60.0 for ln in matching]
+    newest_age = max(0.0, min(ages))
+    oldest_age = max(0.0, max(ages))
 
     results: list[BetRecommendation] = []
 
@@ -292,6 +336,8 @@ def _spread_recommendations(
             best_sportsbook=best_home.sportsbook,
             best_odds=best_home.home_price,
             side_probs=home_no_vig,
+            newest_update_age_min=newest_age,
+            oldest_update_age_min=oldest_age,
         )
     )
 
@@ -307,6 +353,8 @@ def _spread_recommendations(
             best_sportsbook=best_away.sportsbook,
             best_odds=best_away.away_price,
             side_probs=away_no_vig,
+            newest_update_age_min=newest_age,
+            oldest_update_age_min=oldest_age,
         )
     )
 
@@ -315,6 +363,7 @@ def _spread_recommendations(
 
 def _total_recommendations(
     lines: list[BettingLine],
+    now: datetime,
 ) -> list[BetRecommendation]:
     """Build total (over/under) best-bet recommendations for one event.
 
@@ -342,7 +391,7 @@ def _total_recommendations(
         po, pu = _remove_vig(ln.home_price, ln.away_price)
         over_no_vig.append(po)
         under_no_vig.append(pu)
-        weights.append(_weight_for_book(ln.sportsbook))
+        weights.append(_line_weight(ln.sportsbook, ln.timestamp, now))
 
     unweighted_over = median(over_no_vig)
     unweighted_under = median(under_no_vig)
@@ -352,6 +401,10 @@ def _total_recommendations(
 
     best_over = max(matching, key=lambda ln: ln.home_price)
     best_under = max(matching, key=lambda ln: ln.away_price)
+
+    ages = [(now - ln.timestamp).total_seconds() / 60.0 for ln in matching]
+    newest_age = max(0.0, min(ages))
+    oldest_age = max(0.0, max(ages))
 
     results: list[BetRecommendation] = []
 
@@ -366,6 +419,8 @@ def _total_recommendations(
             best_sportsbook=best_over.sportsbook,
             best_odds=best_over.home_price,
             side_probs=over_no_vig,
+            newest_update_age_min=newest_age,
+            oldest_update_age_min=oldest_age,
         )
     )
 
@@ -380,6 +435,8 @@ def _total_recommendations(
             best_sportsbook=best_under.sportsbook,
             best_odds=best_under.away_price,
             side_probs=under_no_vig,
+            newest_update_age_min=newest_age,
+            oldest_update_age_min=oldest_age,
         )
     )
 
@@ -389,13 +446,14 @@ def _total_recommendations(
 def recommend_best_bets(
     lines_for_event: list[BettingLine],
     top_n: int = 3,
+    now: datetime | None = None,
 ) -> list[BetRecommendation]:
     """Return ranked best-bet recommendations (highest EV first).
 
     Analyzes moneyline, spread, and total markets for a single event,
     computes consensus (vig-free) probabilities via weighted median across
-    sportsbooks (sharper books weigh more), and ranks candidate bets by
-    expected value at the best available price.
+    sportsbooks (sharper books weigh more, fresher lines weigh more), and
+    ranks candidate bets by expected value at the best available price.
 
     Parameters
     ----------
@@ -403,20 +461,25 @@ def recommend_best_bets(
         All betting lines for a single event across sportsbooks and markets.
     top_n:
         Maximum number of recommendations to return (default 3).
+    now:
+        Reference time for recency weighting.  Defaults to ``datetime.utcnow()``.
 
     Returns
     -------
     list[BetRecommendation]
         Recommendations sorted by EV descending, limited to *top_n*.
     """
+    if now is None:
+        now = datetime.utcnow()
+
     ml_lines = [ln for ln in lines_for_event if ln.bet_type == BetType.MONEYLINE]
     spread_lines = [ln for ln in lines_for_event if ln.bet_type == BetType.SPREAD]
     total_lines = [ln for ln in lines_for_event if ln.bet_type == BetType.TOTAL]
 
     recs: list[BetRecommendation] = []
-    recs.extend(_moneyline_recommendations(ml_lines))
-    recs.extend(_spread_recommendations(spread_lines))
-    recs.extend(_total_recommendations(total_lines))
+    recs.extend(_moneyline_recommendations(ml_lines, now))
+    recs.extend(_spread_recommendations(spread_lines, now))
+    recs.extend(_total_recommendations(total_lines, now))
 
     recs.sort(key=lambda r: r.ev, reverse=True)
     return recs[:top_n]

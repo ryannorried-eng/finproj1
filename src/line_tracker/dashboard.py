@@ -786,6 +786,8 @@ def _render_best_bet_why(rec) -> None:
             f"{rec.consensus_prob * 100:.1f}%\n"
             f"- **Unweighted consensus (vig-free):** "
             f"{rec.unweighted_consensus_prob * 100:.1f}%\n"
+            f"- **Newest book update:** {rec.newest_update_age_min:.0f}m ago\n"
+            f"- **Oldest book update:** {rec.oldest_update_age_min:.0f}m ago\n"
             f"- **Best price:** {format_american(rec.best_odds)} "
             f"at {rec.best_sportsbook}\n"
             f"- **Breakeven prob (at that price):** "
