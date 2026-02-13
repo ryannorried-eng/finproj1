@@ -1268,15 +1268,16 @@ def _slip_dialog():
 
     # --- Payout section ---
     legs_odds = [leg["odds"] for leg in slip]
-    # Sanitize the widget key so Streamlit never sees a value < min.
-    if not isinstance(st.session_state.get("dlg_stake"), (int, float)) \
-            or st.session_state["dlg_stake"] < 1.0:
-        _fallback = st.session_state.get("slip_stake", 100.0)
-        st.session_state["dlg_stake"] = max(1.0, float(_fallback)) \
-            if isinstance(_fallback, (int, float)) else 100.0
+    # Sanitize: delete invalid widget key so Streamlit can't use it.
+    _ds = st.session_state.get("dlg_stake")
+    if not isinstance(_ds, (int, float)) or _ds < 1.0:
+        st.session_state.pop("dlg_stake", None)
+    _slip = st.session_state.get("slip_stake", 100.0)
+    _default = max(1.0, float(_slip)) if isinstance(_slip, (int, float)) else 100.0
     stake = st.number_input(
         "Stake ($)",
         min_value=1.0,
+        value=_default,
         step=10.0,
         key="dlg_stake",
     )
@@ -1372,15 +1373,16 @@ def _page_best_lines():
             key="bl_max_rows",
         )
     with fcols[3]:
-        # Sanitize the widget key so Streamlit never sees a value < min.
-        if not isinstance(st.session_state.get("bl_stake"), (int, float)) \
-                or st.session_state["bl_stake"] < 1.0:
-            _fallback = st.session_state.get("slip_stake", 100.0)
-            st.session_state["bl_stake"] = max(1.0, float(_fallback)) \
-                if isinstance(_fallback, (int, float)) else 100.0
+        # Sanitize: delete invalid widget key so Streamlit can't use it.
+        _bl = st.session_state.get("bl_stake")
+        if not isinstance(_bl, (int, float)) or _bl < 1.0:
+            st.session_state.pop("bl_stake", None)
+        _slip = st.session_state.get("slip_stake", 100.0)
+        _default = max(1.0, float(_slip)) if isinstance(_slip, (int, float)) else 100.0
         stake = st.number_input(
             "Stake ($)",
             min_value=1.0,
+            value=_default,
             step=10.0,
             key="bl_stake",
         )
