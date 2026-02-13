@@ -5,6 +5,7 @@ from datetime import datetime
 from line_tracker.best_bets import (
     BetRecommendation,
     _compute_ev,
+    _confidence_label,
     _mode_value,
     _remove_vig,
     recommend_best_bets,
@@ -129,6 +130,72 @@ class TestModeValue:
     def test_tie_returns_one_of_them(self):
         result = _mode_value([3.5, 4.0])
         assert result in (3.5, 4.0)
+
+
+class TestConfidenceLabel:
+    def test_high_confidence_tight_probs(self):
+        # Books agree closely — stdev < 0.015
+        probs = [0.550, 0.552, 0.548, 0.551]
+        assert _confidence_label(probs) == "High"
+
+    def test_medium_confidence(self):
+        # Moderate disagreement — stdev between 0.015 and 0.04
+        probs = [0.50, 0.53, 0.47, 0.52]
+        assert _confidence_label(probs) == "Medium"
+
+    def test_low_confidence_wide_probs(self):
+        # Wide disagreement — stdev >= 0.04
+        probs = [0.40, 0.55, 0.60, 0.45]
+        assert _confidence_label(probs) == "Low"
+
+    def test_single_book_returns_low(self):
+        assert _confidence_label([0.55]) == "Low"
+
+    def test_identical_probs_returns_high(self):
+        assert _confidence_label([0.50, 0.50, 0.50]) == "High"
+
+    def test_two_books_close(self):
+        # stdev of [0.55, 0.56] ≈ 0.0071 → High
+        assert _confidence_label([0.55, 0.56]) == "High"
+
+    def test_two_books_far_apart(self):
+        # stdev of [0.40, 0.60] ≈ 0.1414 → Low
+        assert _confidence_label([0.40, 0.60]) == "Low"
+
+
+class TestConfidenceIntegration:
+    def test_tight_moneylines_high_confidence(self):
+        """All books post nearly identical odds → High confidence."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -150, 130),
+            _ml_line("C", -150, 130),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert r.confidence == "High"
+
+    def test_wide_moneylines_lower_confidence(self):
+        """Books disagree significantly → Medium or Low confidence."""
+        lines = [
+            _ml_line("A", -200, 180),
+            _ml_line("B", -120, 100),
+            _ml_line("C", -300, 260),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert r.confidence in ("Medium", "Low")
+
+    def test_confidence_field_always_present(self):
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -105, -115),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert r.confidence in ("High", "Medium", "Low")
 
 
 # ---------------------------------------------------------------------------

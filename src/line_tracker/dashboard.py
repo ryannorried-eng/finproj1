@@ -736,7 +736,7 @@ def _detail_best_bet_section(game_lines):
                 f"at {format_american(top.best_odds)} "
                 f"on {top.best_sportsbook}**"
             )
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns([2, 2, 1])
             with c1:
                 st.markdown(
                     f"Consensus implied prob: "
@@ -746,6 +746,16 @@ def _detail_best_bet_section(game_lines):
                 st.markdown(
                     f"Edge: **{fmt_pct(top.edge_pct, sign=True)}**"
                     f"  |  **{fmt_money(top.ev_per_100, sign=True)}** per $100"
+                )
+            with c3:
+                st.markdown(
+                    f"Market confidence: **{top.confidence}**",
+                    help=(
+                        "Measures how closely sportsbooks agree on the "
+                        "de-vigged probability. High = tight consensus, "
+                        "Low = wide disagreement. This reflects book "
+                        "agreement, not certainty of outcome."
+                    ),
                 )
 
             _render_best_bet_why(top)

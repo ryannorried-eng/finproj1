@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from statistics import median
+from statistics import median, stdev
 
 from line_tracker.bet_slip import (
     american_to_decimal,
@@ -30,6 +30,7 @@ class BetRecommendation:
     ev: float  # expected value per $1 stake
     edge_pct: float  # (consensus_prob - breakeven_prob) * 100
     ev_per_100: float  # ev * 100 — dollar EV per $100 stake
+    confidence: str  # "High", "Medium", or "Low" — book agreement level
 
 
 def _remove_vig(odds_a: float, odds_b: float) -> tuple[float, float]:
@@ -56,6 +57,27 @@ def _compute_ev(consensus_prob: float, american_odds: float) -> float:
     return consensus_prob * (d - 1) - (1 - consensus_prob)
 
 
+def _confidence_label(probs: list[float]) -> str:
+    """Classify sportsbook agreement as High / Medium / Low.
+
+    Uses standard deviation of de-vigged probabilities across books.
+    Lower dispersion means books agree more closely on the true probability.
+
+    Thresholds (on the 0–1 probability scale):
+        stdev < 0.015  → "High"   (< 1.5 pp disagreement)
+        stdev < 0.04   → "Medium" (1.5–4 pp)
+        stdev >= 0.04  → "Low"    (> 4 pp)
+    """
+    if len(probs) < 2:
+        return "Low"
+    sd = stdev(probs)
+    if sd < 0.015:
+        return "High"
+    if sd < 0.04:
+        return "Medium"
+    return "Low"
+
+
 def _build_rec(
     *,
     market: str,
@@ -65,6 +87,7 @@ def _build_rec(
     consensus_prob: float,
     best_sportsbook: str,
     best_odds: float,
+    side_probs: list[float],
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs."""
     be_prob = breakeven_prob_from_american(best_odds)
@@ -82,6 +105,7 @@ def _build_rec(
         ev=round(ev, 4),
         edge_pct=round(edge * 100, 2),
         ev_per_100=round(ev * 100, 2),
+        confidence=_confidence_label(side_probs),
     )
 
 
@@ -126,6 +150,7 @@ def _moneyline_recommendations(
             consensus_prob=consensus_home,
             best_sportsbook=best_home_line.sportsbook,
             best_odds=best_home_line.home_value,
+            side_probs=home_no_vig,
         )
     )
 
@@ -138,6 +163,7 @@ def _moneyline_recommendations(
             consensus_prob=consensus_away,
             best_sportsbook=best_away_line.sportsbook,
             best_odds=best_away_line.away_value,
+            side_probs=away_no_vig,
         )
     )
 
@@ -194,6 +220,7 @@ def _spread_recommendations(
             consensus_prob=consensus_home,
             best_sportsbook=best_home.sportsbook,
             best_odds=best_home.home_price,
+            side_probs=home_no_vig,
         )
     )
 
@@ -207,6 +234,7 @@ def _spread_recommendations(
             consensus_prob=consensus_away,
             best_sportsbook=best_away.sportsbook,
             best_odds=best_away.away_price,
+            side_probs=away_no_vig,
         )
     )
 
@@ -259,6 +287,7 @@ def _total_recommendations(
             consensus_prob=consensus_over,
             best_sportsbook=best_over.sportsbook,
             best_odds=best_over.home_price,
+            side_probs=over_no_vig,
         )
     )
 
@@ -271,6 +300,7 @@ def _total_recommendations(
             consensus_prob=consensus_under,
             best_sportsbook=best_under.sportsbook,
             best_odds=best_under.away_price,
+            side_probs=under_no_vig,
         )
     )
 
