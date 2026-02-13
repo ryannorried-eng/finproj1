@@ -1268,14 +1268,15 @@ def _slip_dialog():
 
     # --- Payout section ---
     legs_odds = [leg["odds"] for leg in slip]
-    _raw_stake = st.session_state.get("slip_stake", 100.0)
-    _safe_stake = float(_raw_stake) if isinstance(_raw_stake, (int, float)) else 100.0
-    if _safe_stake < 1.0:
-        _safe_stake = 100.0
+    # Sanitize the widget key so Streamlit never sees a value < min.
+    if not isinstance(st.session_state.get("dlg_stake"), (int, float)) \
+            or st.session_state["dlg_stake"] < 1.0:
+        _fallback = st.session_state.get("slip_stake", 100.0)
+        st.session_state["dlg_stake"] = max(1.0, float(_fallback)) \
+            if isinstance(_fallback, (int, float)) else 100.0
     stake = st.number_input(
         "Stake ($)",
         min_value=1.0,
-        value=_safe_stake,
         step=10.0,
         key="dlg_stake",
     )
@@ -1371,14 +1372,15 @@ def _page_best_lines():
             key="bl_max_rows",
         )
     with fcols[3]:
-        _raw_stake = st.session_state.get("slip_stake", 100.0)
-        _safe_stake = float(_raw_stake) if isinstance(_raw_stake, (int, float)) else 100.0
-        if _safe_stake < 1.0:
-            _safe_stake = 100.0
+        # Sanitize the widget key so Streamlit never sees a value < min.
+        if not isinstance(st.session_state.get("bl_stake"), (int, float)) \
+                or st.session_state["bl_stake"] < 1.0:
+            _fallback = st.session_state.get("slip_stake", 100.0)
+            st.session_state["bl_stake"] = max(1.0, float(_fallback)) \
+                if isinstance(_fallback, (int, float)) else 100.0
         stake = st.number_input(
             "Stake ($)",
             min_value=1.0,
-            value=_safe_stake,
             step=10.0,
             key="bl_stake",
         )
