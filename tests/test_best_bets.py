@@ -3,11 +3,14 @@
 from datetime import datetime
 
 from line_tracker.best_bets import (
+    BOOK_WEIGHTS,
     BetRecommendation,
     _compute_ev,
     _confidence_label,
     _mode_value,
     _remove_vig,
+    _weight_for_book,
+    _weighted_median,
     recommend_best_bets,
 )
 from line_tracker.models import BettingLine, BetType
@@ -445,3 +448,180 @@ class TestRecommendBestBets:
         ]
         recs = recommend_best_bets(lines)
         assert len(recs) == 3
+
+
+# ---------------------------------------------------------------------------
+# Weighted median helper
+# ---------------------------------------------------------------------------
+
+
+class TestWeightedMedian:
+    def test_equal_weights_matches_median(self):
+        """With equal weights, weighted median should equal plain median."""
+        vals = [0.50, 0.55, 0.60]
+        wts = [1.0, 1.0, 1.0]
+        assert abs(_weighted_median(vals, wts) - 0.55) < 0.001
+
+    def test_single_value(self):
+        assert _weighted_median([0.42], [2.0]) == 0.42
+
+    def test_heavy_weight_shifts_toward_that_value(self):
+        """If one value has much higher weight it should become the median."""
+        vals = [0.40, 0.60]
+        wts = [10.0, 1.0]
+        result = _weighted_median(vals, wts)
+        # Heavily weighted toward 0.40
+        assert result == 0.40
+
+    def test_heavy_weight_other_direction(self):
+        vals = [0.40, 0.60]
+        wts = [1.0, 10.0]
+        result = _weighted_median(vals, wts)
+        assert result == 0.60
+
+    def test_three_values_weighted(self):
+        """Middle value with low weight — median shifts to heavy side."""
+        vals = [0.45, 0.50, 0.55]
+        wts = [5.0, 0.1, 1.0]
+        result = _weighted_median(vals, wts)
+        # Heavy weight on 0.45 → cumulative passes 50% at 0.45
+        assert result == 0.45
+
+    def test_exact_midpoint_averages(self):
+        """When cumulative weight hits exactly 50%, average current and next."""
+        vals = [0.40, 0.60]
+        wts = [1.0, 1.0]
+        result = _weighted_median(vals, wts)
+        assert abs(result - 0.50) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# Book weights
+# ---------------------------------------------------------------------------
+
+
+class TestBookWeights:
+    def test_known_book_returns_configured_weight(self):
+        assert _weight_for_book("Pinnacle") == 3.0
+        assert _weight_for_book("DraftKings") == 1.0
+
+    def test_unknown_book_returns_default(self):
+        assert _weight_for_book("SomeObscureBook") == 1.0
+
+    def test_book_weights_dict_is_not_empty(self):
+        assert len(BOOK_WEIGHTS) > 0
+
+
+# ---------------------------------------------------------------------------
+# Weighted consensus integration — shifts toward higher-weight book
+# ---------------------------------------------------------------------------
+
+
+class TestWeightedConsensusIntegration:
+    def test_weighted_consensus_shifts_toward_sharp_book(self):
+        """Pinnacle (weight 3.0) should pull consensus toward its probability.
+
+        Pinnacle posts -200/+180 → de-vigged home ≈ 0.6410
+        DraftKings posts -140/+120 → de-vigged home ≈ 0.5588
+
+        Plain median of those two = ~0.60.
+        Weighted median should equal the Pinnacle value since it has 3x weight.
+        """
+        lines = [
+            _ml_line("Pinnacle", -200, 180),
+            _ml_line("DraftKings", -140, 120),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        # Pinnacle's de-vigged home prob
+        pinnacle_prob = home_rec.unweighted_consensus_prob  # plain median of 2
+        # Weighted consensus should be closer to Pinnacle's value
+        # because Pinnacle has weight 3.0 vs DraftKings 1.0
+        # With 2 values and weights 3:1, weighted median = Pinnacle's value
+        from line_tracker.best_bets import _remove_vig
+
+        pin_h, _ = _remove_vig(-200, 180)
+        dk_h, _ = _remove_vig(-140, 120)
+
+        # Weighted median with weights [3.0, 1.0] → should be Pinnacle's value
+        assert abs(home_rec.consensus_prob - pin_h) < 0.001
+
+    def test_unweighted_consensus_is_plain_median(self):
+        """unweighted_consensus_prob should be the simple median."""
+        lines = [
+            _ml_line("Pinnacle", -200, 180),
+            _ml_line("DraftKings", -140, 120),
+            _ml_line("FanDuel", -170, 150),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        from statistics import median as std_median
+
+        from line_tracker.best_bets import _remove_vig
+
+        probs = []
+        for ln in lines:
+            ph, _ = _remove_vig(ln.home_value, ln.away_value)
+            probs.append(ph)
+        expected = std_median(probs)
+        assert abs(home_rec.unweighted_consensus_prob - round(expected, 4)) < 0.001
+
+    def test_weighted_differs_from_unweighted(self):
+        """When books have unequal weights, the two consensus values should differ."""
+        lines = [
+            _ml_line("Pinnacle", -200, 180),   # weight 3.0
+            _ml_line("DraftKings", -140, 120),  # weight 1.0
+            _ml_line("FanDuel", -140, 120),     # weight 1.0
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        home_rec = next(r for r in recs if r.side == "home")
+        # Unweighted median of 3 values — middle is DK or FD (both same)
+        # Weighted median should be pulled toward Pinnacle
+        assert home_rec.consensus_prob != home_rec.unweighted_consensus_prob
+
+    def test_equal_weight_books_match_unweighted(self):
+        """If all books have equal weight, weighted == unweighted."""
+        lines = [
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -140, 120),
+            _ml_line("Caesars", -145, 125),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert abs(r.consensus_prob - r.unweighted_consensus_prob) < 0.001
+
+    def test_spread_weighted_consensus(self):
+        """Weighted consensus also works for spread markets."""
+        lines = [
+            _spread_line("Pinnacle", -3.5, 3.5, -105, -115),  # weight 3.0
+            _spread_line("DraftKings", -3.5, 3.5, -115, -105),  # weight 1.0
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        assert len(spread_recs) == 2
+
+        home_spread = next(r for r in spread_recs if r.side == "home")
+        # Pinnacle has -105 juice → higher de-vigged home prob
+        # With weight 3:1, consensus should match Pinnacle's prob
+        from line_tracker.best_bets import _remove_vig
+
+        pin_h, _ = _remove_vig(-105, -115)
+        assert abs(home_spread.consensus_prob - pin_h) < 0.001
+
+    def test_total_weighted_consensus(self):
+        """Weighted consensus also works for total markets."""
+        lines = [
+            _total_line("Pinnacle", 220.5, -105, -115),  # weight 3.0
+            _total_line("DraftKings", 220.5, -115, -105),  # weight 1.0
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        total_recs = [r for r in recs if r.market == "total"]
+        assert len(total_recs) == 2
+
+        over_rec = next(r for r in total_recs if r.side == "over")
+        from line_tracker.best_bets import _remove_vig
+
+        pin_over, _ = _remove_vig(-105, -115)
+        assert abs(over_rec.consensus_prob - pin_over) < 0.001

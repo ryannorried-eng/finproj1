@@ -737,7 +737,8 @@ def _detail_best_bet_section(game_lines):
                 f"on {top.best_sportsbook}**"
             )
             st.markdown(
-                f"Consensus: **{top.consensus_prob * 100:.1f}%** | "
+                f"Consensus (weighted, vig-free): "
+                f"**{top.consensus_prob * 100:.1f}%** | "
                 f"Breakeven: **{top.breakeven_prob * 100:.1f}%** | "
                 f"Edge: **{fmt_pct(top.edge_pct, sign=True)}** | "
                 f"EV: **{fmt_money(top.ev_per_100, sign=True)} per $100**"
@@ -781,7 +782,10 @@ def _render_best_bet_why(rec) -> None:
     """Render a compact 'Why this bet?' breakdown inside the Best Bet card."""
     with st.expander("Why this bet?", expanded=False):
         st.markdown(
-            f"- **Consensus prob (vig-free):** {rec.consensus_prob * 100:.1f}%\n"
+            f"- **Weighted consensus (vig-free):** "
+            f"{rec.consensus_prob * 100:.1f}%\n"
+            f"- **Unweighted consensus (vig-free):** "
+            f"{rec.unweighted_consensus_prob * 100:.1f}%\n"
             f"- **Best price:** {format_american(rec.best_odds)} "
             f"at {rec.best_sportsbook}\n"
             f"- **Breakeven prob (at that price):** "
