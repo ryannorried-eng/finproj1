@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from line_tracker.arbitrage import ArbOpportunity
+from line_tracker.models import BetType
 from line_tracker.movements import LineMove
 
 
@@ -87,8 +88,6 @@ class AlertManager:
         return alerts
 
     def _threshold_for(self, move: LineMove) -> float:
-        from line_tracker.models import BetType
-
         if move.bet_type == BetType.SPREAD:
             return self.spread_threshold
         if move.bet_type == BetType.TOTAL:

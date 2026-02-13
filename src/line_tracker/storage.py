@@ -49,6 +49,14 @@ class LineStore:
             CREATE INDEX IF NOT EXISTS idx_timestamp
             ON lines (timestamp)
         """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sportsbook
+            ON lines (sportsbook)
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_event_type_book
+            ON lines (event, bet_type, sportsbook)
+        """)
         self._conn.commit()
 
     def save_lines(self, lines: list[BettingLine]) -> int:
@@ -69,7 +77,7 @@ class LineStore:
             )
             for ln in lines
         ]
-        self._conn.executemany(
+        cursor = self._conn.executemany(
             """INSERT INTO lines
                (sportsbook, sport, event, bet_type, home_team, away_team,
                 home_value, away_value, home_price, away_price, timestamp)
@@ -77,7 +85,7 @@ class LineStore:
             rows,
         )
         self._conn.commit()
-        return len(rows)
+        return cursor.rowcount
 
     def get_lines(
         self,

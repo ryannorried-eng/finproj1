@@ -52,7 +52,9 @@ def detect_moves(
             continue
 
         change = _compute_change(prev, ln)
-        if abs(change) > threshold:
+        if change == 0:
+            continue
+        if abs(change) >= threshold:
             moves.append(
                 LineMove(
                     event=ln.event,
@@ -85,10 +87,6 @@ def _index_lines(
 
 def _compute_change(old: BettingLine, new: BettingLine) -> float:
     """Compute the primary value change based on bet type."""
-    if old.bet_type == BetType.MONEYLINE:
-        return new.home_value - old.home_value
-    elif old.bet_type == BetType.SPREAD:
-        return new.home_value - old.home_value
-    elif old.bet_type == BetType.TOTAL:
+    if old.bet_type in (BetType.MONEYLINE, BetType.SPREAD, BetType.TOTAL):
         return new.home_value - old.home_value
     return 0.0

@@ -109,9 +109,7 @@ def _format_clock_time(dt: datetime) -> str:
 
 def _american_to_decimal(american: float) -> float:
     """Convert American odds to decimal odds."""
-    if american >= 0:
-        return american / 100 + 1
-    return 100 / abs(american) + 1
+    return _slip_a2d(american)
 
 
 def _max_display_rows() -> int:
@@ -1158,7 +1156,10 @@ def _bet_slip_add_controls(
     if slip_book:
         st.caption(f"Locked to {slip_book}")
 
-    ln = next(x for x in bt_lines if x.sportsbook == selected_book)
+    ln = next((x for x in bt_lines if x.sportsbook == selected_book), None)
+    if ln is None:
+        st.warning(f"No line found for {selected_book}")
+        return
 
     # Determine odds and line based on market + side
     odds: float | None = None
