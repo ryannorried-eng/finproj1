@@ -15,6 +15,7 @@ from line_tracker.best_bets import (
     _edge_score,
     _filter_outliers,
     _freshness_score,
+    _is_three_way_market,
     _line_weight,
     _mode_value,
     _quality_score,
@@ -1742,3 +1743,140 @@ class TestCapWeightsIntegration:
         dist_to_stale = abs(home_rec.consensus_prob - stale_h)
         dist_to_pin = abs(home_rec.consensus_prob - pin_h)
         assert dist_to_stale < dist_to_pin
+
+
+# ---------------------------------------------------------------------------
+# Three-way market guard — unit and integration tests
+# ---------------------------------------------------------------------------
+
+
+def _soccer_ml_line(sportsbook: str, home_odds: float, away_odds: float) -> BettingLine:
+    """Soccer moneyline — 3-way sport (draw outcome exists)."""
+    return BettingLine(
+        sportsbook=sportsbook,
+        sport="soccer_epl",
+        event="Arsenal vs Chelsea",
+        bet_type=BetType.MONEYLINE,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        home_value=home_odds,
+        away_value=away_odds,
+        timestamp=datetime(2025, 1, 1, 12, 0),
+    )
+
+
+def _soccer_spread_line(
+    sportsbook: str,
+    home_spread: float,
+    away_spread: float,
+    home_price: float,
+    away_price: float,
+) -> BettingLine:
+    """Soccer spread — still 2-outcome, should NOT be flagged as 3-way."""
+    return BettingLine(
+        sportsbook=sportsbook,
+        sport="soccer_epl",
+        event="Arsenal vs Chelsea",
+        bet_type=BetType.SPREAD,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        home_value=home_spread,
+        away_value=away_spread,
+        timestamp=datetime(2025, 1, 1, 12, 0),
+        home_price=home_price,
+        away_price=away_price,
+    )
+
+
+class TestIsThreeWayMarket:
+    def test_soccer_moneyline_is_three_way(self):
+        lines = [_soccer_ml_line("DraftKings", -120, 145)]
+        assert _is_three_way_market(lines) is True
+
+    def test_soccer_spread_is_not_three_way(self):
+        lines = [_soccer_spread_line("DraftKings", -0.5, 0.5, -110, -110)]
+        assert _is_three_way_market(lines) is False
+
+    def test_nba_moneyline_is_not_three_way(self):
+        lines = [_ml_line("DraftKings", -150, 130)]
+        assert _is_three_way_market(lines) is False
+
+    def test_empty_list(self):
+        assert _is_three_way_market([]) is False
+
+    def test_soccer_variant_sport_key(self):
+        """Other soccer leagues (e.g. soccer_spain_la_liga) also 3-way."""
+        line = BettingLine(
+            sportsbook="Bet365",
+            sport="soccer_spain_la_liga",
+            event="Real Madrid vs Barcelona",
+            bet_type=BetType.MONEYLINE,
+            home_team="Real Madrid",
+            away_team="Barcelona",
+            home_value=-110,
+            away_value=130,
+            timestamp=datetime(2025, 1, 1, 12, 0),
+        )
+        assert _is_three_way_market([line]) is True
+
+
+class TestThreeWayMarketIntegration:
+    def test_soccer_moneyline_skipped_in_recommend(self):
+        """Soccer moneyline lines should be skipped with a reason."""
+        lines = [
+            _soccer_ml_line("DraftKings", -120, 145),
+            _soccer_ml_line("FanDuel", -125, 150),
+            _soccer_ml_line("BetMGM", -118, 140),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        # Should get exactly 1 skipped rec, no real consensus recs
+        ml_recs = [r for r in recs if r.market == "moneyline"]
+        assert len(ml_recs) == 1
+        assert ml_recs[0].skipped_reason != ""
+        assert "3-way" in ml_recs[0].skipped_reason
+        assert ml_recs[0].ev == 0.0
+
+    def test_soccer_spread_not_skipped(self):
+        """Soccer spread lines are 2-outcome and should produce real recs."""
+        lines = [
+            _soccer_spread_line("DraftKings", -0.5, 0.5, -110, -110),
+            _soccer_spread_line("FanDuel", -0.5, 0.5, -108, -112),
+            _soccer_spread_line("BetMGM", -0.5, 0.5, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        assert len(spread_recs) == 2
+        for r in spread_recs:
+            assert r.skipped_reason == ""
+
+    def test_soccer_mixed_markets_only_ml_skipped(self):
+        """When soccer event has ML + spread, only ML is skipped."""
+        lines = [
+            _soccer_ml_line("DraftKings", -120, 145),
+            _soccer_ml_line("FanDuel", -125, 150),
+            _soccer_spread_line("DraftKings", -0.5, 0.5, -110, -110),
+            _soccer_spread_line("FanDuel", -0.5, 0.5, -108, -112),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        ml_recs = [r for r in recs if r.market == "moneyline"]
+        spread_recs = [r for r in recs if r.market == "spread"]
+        # ML skipped
+        assert len(ml_recs) == 1
+        assert ml_recs[0].skipped_reason != ""
+        # Spread computed normally
+        assert len(spread_recs) == 2
+        for r in spread_recs:
+            assert r.skipped_reason == ""
+
+    def test_nba_moneyline_not_skipped(self):
+        """NBA (2-outcome) moneylines should still produce real recs."""
+        lines = [
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -145, 125),
+            _ml_line("BetMGM", -148, 128),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        ml_recs = [r for r in recs if r.market == "moneyline"]
+        assert len(ml_recs) == 2  # home + away
+        for r in ml_recs:
+            assert r.skipped_reason == ""

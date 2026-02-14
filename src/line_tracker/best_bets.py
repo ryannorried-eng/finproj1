@@ -190,6 +190,30 @@ class BetRecommendation:
     freshness_score: float = 0.0  # 0–100 subscore for data freshness
     outlier_filtered: bool = False  # True if outlier books were removed
     market_unstable: bool = False  # True if too many books were filtered out
+    skipped_reason: str = ""  # non-empty if this rec was skipped (unsupported)
+
+
+# ---------------------------------------------------------------------------
+# Three-way market guard — sports whose moneylines have a draw outcome.
+# ---------------------------------------------------------------------------
+_THREE_WAY_SPORT_PREFIXES = ("soccer",)
+
+
+def _is_three_way_market(lines: list[BettingLine]) -> bool:
+    """Return True if *lines* belong to a 3-outcome moneyline market.
+
+    Detection: the sport key starts with a known 3-way prefix (e.g.
+    ``"soccer_epl"``) **and** the bet type is ``MONEYLINE``.  Spread and
+    total markets remain 2-outcome even in soccer, so they are not
+    affected.
+    """
+    if not lines:
+        return False
+    first = lines[0]
+    if first.bet_type != BetType.MONEYLINE:
+        return False
+    sport = first.sport.lower()
+    return any(sport.startswith(prefix) for prefix in _THREE_WAY_SPORT_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -895,7 +919,30 @@ def recommend_best_bets(
     total_lines = [ln for ln in lines_for_event if ln.bet_type == BetType.TOTAL]
 
     recs: list[BetRecommendation] = []
-    recs.extend(_moneyline_recommendations(ml_lines, now))
+
+    # Guard: skip 3-way moneylines (e.g. soccer with draw outcome).
+    # Two-way normalization is invalid when a third outcome exists.
+    if _is_three_way_market(ml_lines):
+        recs.append(
+            BetRecommendation(
+                market="moneyline",
+                selection="",
+                side="",
+                line=None,
+                consensus_prob=0.0,
+                best_sportsbook="",
+                best_odds=0.0,
+                breakeven_prob=0.0,
+                ev=0.0,
+                edge_pct=0.0,
+                ev_per_100=0.0,
+                confidence="Low",
+                skipped_reason="3-way market (draw outcome); 2-way model unsupported",
+            )
+        )
+    else:
+        recs.extend(_moneyline_recommendations(ml_lines, now))
+
     recs.extend(_spread_recommendations(spread_lines, now))
     recs.extend(_total_recommendations(total_lines, now))
 
