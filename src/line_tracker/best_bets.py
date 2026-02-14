@@ -73,6 +73,69 @@ def _line_weight(sportsbook: str, timestamp: datetime, now: datetime) -> float:
     return _weight_for_book(sportsbook) * _recency_multiplier(timestamp, now)
 
 
+# ---------------------------------------------------------------------------
+# Weight capping — prevent any single book from dominating consensus.
+# ---------------------------------------------------------------------------
+_MAX_BOOK_WEIGHT_SHARE = 0.40  # no book may exceed 40% of total weight
+
+
+def _cap_weights(weights: list[float]) -> list[float]:
+    """Normalize *weights* to sum to 1, cap each at _MAX_BOOK_WEIGHT_SHARE.
+
+    Uses iterative redistribution: freeze any weight that exceeds the cap,
+    then redistribute the remaining budget proportionally among unfrozen
+    weights.  Repeats until no weight exceeds the cap.
+
+    The cap is only applied when there are 3+ books — with fewer books,
+    equal distribution already exceeds the cap (e.g., 50% each with 2 books),
+    so capping would be counterproductive.
+
+    This prevents a single very-sharp or very-fresh book from contributing
+    more than 40 % of the total influence on consensus probability.
+    """
+    n = len(weights)
+    if n == 0:
+        return []
+    total = sum(weights)
+    if total == 0:
+        return [1.0 / n] * n
+
+    normed = [w / total for w in weights]
+
+    # Cap is only meaningful when n >= ceil(1/cap).  With cap=0.40 that
+    # means n >= 3.  With fewer books, just return normalized weights.
+    if n < 3:
+        return normed
+
+    cap = _MAX_BOOK_WEIGHT_SHARE
+    frozen = [False] * n
+
+    # Iterate until no unfrozen weight exceeds the cap
+    for _ in range(n):
+        changed = False
+        for i in range(n):
+            if frozen[i]:
+                continue
+            if normed[i] > cap:
+                normed[i] = cap
+                frozen[i] = True
+                changed = True
+
+        if not changed:
+            break
+
+        # Redistribute: unfrozen weights share the remaining budget
+        frozen_sum = sum(normed[i] for i in range(n) if frozen[i])
+        remaining = 1.0 - frozen_sum
+        unfrozen_raw = sum(weights[i] for i in range(n) if not frozen[i])
+        if unfrozen_raw > 0:
+            for i in range(n):
+                if not frozen[i]:
+                    normed[i] = (weights[i] / unfrozen_raw) * remaining
+
+    return normed
+
+
 def _weighted_median(values: list[float], weights: list[float]) -> float:
     """Compute a weighted median of *values* using *weights*.
 
@@ -465,7 +528,7 @@ def _moneyline_recommendations(
     # Apply filter to both sides consistently
     f_home = [home_no_vig[i] for i in keep_idx]
     f_away = [away_no_vig[i] for i in keep_idx]
-    f_weights = [weights[i] for i in keep_idx]
+    f_weights = _cap_weights([weights[i] for i in keep_idx])
 
     # Weighted median — used for EV calculation (on filtered set)
     consensus_home = _weighted_median(f_home, f_weights)
@@ -576,7 +639,7 @@ def _spread_recommendations(
 
     f_home = [home_no_vig[i] for i in keep_idx]
     f_away = [away_no_vig[i] for i in keep_idx]
-    f_weights = [weights[i] for i in keep_idx]
+    f_weights = _cap_weights([weights[i] for i in keep_idx])
     f_matching = [matching[i] for i in keep_idx]
 
     books_used = len(keep_idx)
@@ -685,7 +748,7 @@ def _total_recommendations(
 
     f_over = [over_no_vig[i] for i in keep_idx]
     f_under = [under_no_vig[i] for i in keep_idx]
-    f_weights = [weights[i] for i in keep_idx]
+    f_weights = _cap_weights([weights[i] for i in keep_idx])
     f_matching = [matching[i] for i in keep_idx]
 
     books_used = len(keep_idx)

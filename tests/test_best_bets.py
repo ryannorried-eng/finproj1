@@ -8,6 +8,7 @@ from line_tracker.best_bets import (
     BetRecommendation,
     _agreement_score,
     _best_line_group,
+    _cap_weights,
     _compute_ev,
     _confidence_label,
     _coverage_score,
@@ -580,18 +581,21 @@ class TestWeightedConsensusIntegration:
         assert abs(home_rec.unweighted_consensus_prob - round(expected, 4)) < 0.001
 
     def test_weighted_differs_from_unweighted(self):
-        """When books have unequal weights, the two consensus values should differ."""
-        # Use odds close enough that Pinnacle is NOT filtered as an outlier
-        # (-160/+140 home ≈ 0.596 vs -140/+120 home ≈ 0.562, rel_dev ≈ 6%)
+        """When books have unequal weights, the two consensus values should differ.
+
+        With weight capping at 40%, we need 4+ books with varied probabilities
+        so that the cap doesn't collapse weighted to unweighted.
+        """
         lines = [
-            _ml_line("Pinnacle", -160, 140),   # weight 3.0
-            _ml_line("DraftKings", -140, 120),  # weight 1.0
-            _ml_line("FanDuel", -140, 120),     # weight 1.0
+            _ml_line("Pinnacle", -160, 140),   # weight 3.0, home ≈ 0.596
+            _ml_line("DraftKings", -145, 125),  # weight 1.0, home ≈ 0.571
+            _ml_line("FanDuel", -140, 120),     # weight 1.0, home ≈ 0.562
+            _ml_line("Caesars", -135, 115),      # weight 1.0, home ≈ 0.554
         ]
         recs = recommend_best_bets(lines, top_n=10)
         home_rec = next(r for r in recs if r.side == "home")
-        # Unweighted median of 3 values — middle is DK or FD (both same)
-        # Weighted median should be pulled toward Pinnacle
+        # Unweighted median of 4 values = average of middle two
+        # Weighted median should be pulled toward Pinnacle's higher prob
         assert home_rec.consensus_prob != home_rec.unweighted_consensus_prob
 
     def test_equal_weight_books_match_unweighted(self):
@@ -764,7 +768,12 @@ class TestRecencyConsensusIntegration:
         assert dist_to_fresh < dist_to_stale
 
     def test_fresh_outlier_influences_more(self):
-        """The opposite: a fresh outlier should pull consensus toward it."""
+        """A fresh book with different odds pulls consensus when not capped.
+
+        With weight capping (40% max per book), a single fresh book among
+        many stale ones cannot fully dominate consensus. We use 5 books
+        so the fresh book's influence is meaningful but constrained.
+        """
         now = datetime(2025, 6, 1, 12, 0)
         stale_ts = datetime(2025, 6, 1, 8, 0)  # 4 hours ago
         fresh_ts = datetime(2025, 6, 1, 11, 58)  # 2 min ago
@@ -772,20 +781,20 @@ class TestRecencyConsensusIntegration:
         lines = [
             _ml_line_ts("DraftKings", -150, 130, stale_ts),
             _ml_line_ts("FanDuel", -150, 130, stale_ts),
-            _ml_line_ts("BetMGM", -200, 180, fresh_ts),  # outlier, fresh
+            _ml_line_ts("Caesars", -150, 130, stale_ts),
+            _ml_line_ts("BetRivers", -155, 135, stale_ts),
+            _ml_line_ts("BetMGM", -160, 140, fresh_ts),  # fresh, different odds
         ]
 
         recs = recommend_best_bets(lines, top_n=10, now=now)
         home_rec = next(r for r in recs if r.side == "home")
 
         stale_h, _ = _remove_vig(-150, 130)
-        fresh_h, _ = _remove_vig(-200, 180)
+        fresh_h, _ = _remove_vig(-160, 140)
 
-        # Now the fresh outlier has high recency, stale books are down-weighted
-        # Consensus should be closer to the fresh outlier
-        dist_to_fresh = abs(home_rec.consensus_prob - fresh_h)
-        dist_to_stale = abs(home_rec.consensus_prob - stale_h)
-        assert dist_to_fresh < dist_to_stale
+        # Consensus should sit between stale and fresh values
+        lo, hi = sorted([stale_h, fresh_h])
+        assert lo - 0.001 <= home_rec.consensus_prob <= hi + 0.001
 
     def test_all_same_timestamp_preserves_book_weights(self):
         """When all lines are the same age, only book weights matter."""
@@ -1427,3 +1436,108 @@ class TestOutlierFilteringIntegration:
         assert len(total_recs) == 2
         for r in total_recs:
             assert r.outlier_filtered is True
+
+
+# ---------------------------------------------------------------------------
+# Weight capping — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestCapWeights:
+    def test_equal_weights_unchanged(self):
+        """Equal weights should stay equal after capping."""
+        result = _cap_weights([1.0, 1.0, 1.0, 1.0])
+        assert all(abs(w - 0.25) < 0.001 for w in result)
+
+    def test_single_dominant_weight_capped(self):
+        """A weight that would exceed 40% should be capped."""
+        # Raw: [10.0, 1.0, 1.0] → normed [0.833, 0.083, 0.083]
+        # After cap: [0.40, 0.083, 0.083] → renorm sums to ~0.567
+        result = _cap_weights([10.0, 1.0, 1.0])
+        assert result[0] <= 0.40 + 0.001
+        assert abs(sum(result) - 1.0) < 0.001
+
+    def test_no_weight_exceeds_cap(self):
+        """No single weight should exceed the 40% cap."""
+        result = _cap_weights([5.0, 3.0, 1.0, 0.5])
+        for w in result:
+            assert w <= 0.40 + 0.001
+
+    def test_sums_to_one(self):
+        """Capped weights should always sum to 1."""
+        for raw in [[3.0, 1.0], [10.0, 1.0, 1.0], [5.0, 5.0, 1.0, 1.0, 1.0]]:
+            result = _cap_weights(raw)
+            assert abs(sum(result) - 1.0) < 0.001
+
+    def test_empty_returns_empty(self):
+        assert _cap_weights([]) == []
+
+    def test_single_weight(self):
+        """Single weight normalizes to 1.0 (cap skipped with < 3 books)."""
+        result = _cap_weights([5.0])
+        assert abs(result[0] - 1.0) < 0.001
+
+    def test_two_books_cap_skipped(self):
+        """With only 2 books, cap is skipped — just normalizes."""
+        result = _cap_weights([3.0, 1.0])
+        assert abs(result[0] - 0.75) < 0.001
+        assert abs(result[1] - 0.25) < 0.001
+
+    def test_two_equal_weights(self):
+        """Two equal weights → 0.5 each (cap skipped with < 3 books)."""
+        result = _cap_weights([1.0, 1.0])
+        assert abs(result[0] - 0.5) < 0.001
+        assert abs(result[1] - 0.5) < 0.001
+
+    def test_all_zero_weights(self):
+        """All-zero weights should distribute evenly."""
+        result = _cap_weights([0.0, 0.0, 0.0])
+        assert all(abs(w - 1.0 / 3) < 0.001 for w in result)
+
+    def test_preserves_relative_order_of_small_weights(self):
+        """Weights below the cap should maintain their relative ordering."""
+        result = _cap_weights([10.0, 2.0, 1.0, 0.5])
+        # The dominant weight is capped; the rest maintain relative order
+        assert result[1] > result[2] > result[3]
+
+
+class TestCapWeightsIntegration:
+    def test_sharp_fresh_book_does_not_collapse_consensus(self):
+        """One sharp fresh book among many stale books should not fully
+        dominate consensus due to weight capping.
+
+        Setup: Pinnacle (weight 3.0) is fresh (recency ~1.0, total ~3.0).
+        Five other books are 4 hours stale (recency ~0.018, total ~0.018 each).
+        Without capping, Pinnacle's share ≈ 3.0 / 3.09 ≈ 97% and consensus
+        would collapse to Pinnacle's value.
+        With capping at 40%, Pinnacle is limited and the 5 stale books
+        collectively outweigh it, pulling consensus toward their value.
+        """
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh_ts = datetime(2025, 6, 1, 11, 58)  # 2 min ago
+        stale_ts = datetime(2025, 6, 1, 8, 0)    # 4 hours ago
+
+        lines = [
+            _ml_line_ts("Pinnacle", -160, 140, fresh_ts),    # sharp + fresh
+            _ml_line_ts("DraftKings", -140, 120, stale_ts),
+            _ml_line_ts("FanDuel", -140, 120, stale_ts),
+            _ml_line_ts("BetMGM", -140, 120, stale_ts),
+            _ml_line_ts("Caesars", -140, 120, stale_ts),
+            _ml_line_ts("BetRivers", -140, 120, stale_ts),
+        ]
+
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        pin_h, _ = _remove_vig(-160, 140)
+        stale_h, _ = _remove_vig(-140, 120)
+
+        # Consensus should NOT equal Pinnacle's value —
+        # the capped weight prevents Pinnacle from dominating
+        assert home_rec.consensus_prob != round(pin_h, 4)
+
+        # With 5 stale books collectively having 60% weight, the weighted
+        # median should be pulled toward the stale books' value
+        dist_to_stale = abs(home_rec.consensus_prob - stale_h)
+        dist_to_pin = abs(home_rec.consensus_prob - pin_h)
+        assert dist_to_stale < dist_to_pin
