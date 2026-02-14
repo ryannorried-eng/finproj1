@@ -898,6 +898,46 @@ class TestBestLineGroup:
         assert _best_line_group(vals) == -3.5
         assert _mode_value(vals) == -3.5
 
+    def test_near_tie_4v3_picks_median_close(self):
+        """4 vs 3 split (within 1 book) should pick the median-closer group.
+
+        4 books at -3.5, 3 books at -2.5.
+        Median of all values = -3.5 (middle of 7 sorted values).
+        -3.5 is closer to that median → -3.5 wins despite only 1 more book.
+        """
+        vals = [-3.5, -3.5, -3.5, -3.5, -2.5, -2.5, -2.5]
+        assert _best_line_group(vals) == -3.5
+
+    def test_near_tie_4v3_median_favours_smaller_group(self):
+        """4 vs 3 split where the 3-book group wins via weighted median.
+
+        4 retail books (weight 0.8) at -4.0, 3 sharp books (weight 3.0) at -3.0.
+        Plain median = -4.0, but weighted median crosses 50% at -3.0.
+        The near-tie tiebreak picks the group closest to weighted median → -3.0.
+        """
+        # Use weighted median: if the 3 sharp books (Pinnacle-like) are weighted
+        # higher, the weighted median shifts toward -3.0
+        vals = [-4.0, -4.0, -4.0, -4.0, -3.0, -3.0, -3.0]
+        # Sharp books (weight 3.0 each) at -3.0 vs retail (weight 0.8 each) at -4.0
+        weights = [0.8, 0.8, 0.8, 0.8, 3.0, 3.0, 3.0]
+        # Weighted median: total_w = 3*3 + 4*0.8 = 12.2, half=6.1
+        # Sorted by value: [(-4,0.8),(-4,0.8),(-4,0.8),(-4,0.8),(-3,3),(-3,3),(-3,3)]
+        # Cumulative: 0.8, 1.6, 2.4, 3.2, 6.2 → crosses at -3.0
+        result = _best_line_group(vals, weights)
+        assert result == -3.0  # 3-book group wins because weighted median favours it
+
+    def test_near_tie_without_weights_uses_plain_median(self):
+        """Near-tie without weights should fall back to plain median."""
+        # 4 at -3.5, 3 at -3.0
+        vals = [-3.5, -3.5, -3.5, -3.5, -3.0, -3.0, -3.0]
+        # plain median of 7 values sorted [-3.5,-3.5,-3.5,-3.5,-3,-3,-3] = -3.5
+        assert _best_line_group(vals) == -3.5
+
+    def test_clear_majority_by_2_no_near_tie(self):
+        """5 vs 3 (diff of 2) is NOT a near-tie — the 5-book group wins outright."""
+        vals = [-3.5, -3.5, -3.5, -3.5, -3.5, -3.0, -3.0, -3.0]
+        assert _best_line_group(vals) == -3.5
+
 
 # ---------------------------------------------------------------------------
 # Line group selection integration — spread/total with split books
@@ -999,6 +1039,63 @@ class TestLineGroupIntegration:
         for r in spread_recs:
             assert r.books_used_count == 3
             assert r.total_books_count == 3
+
+    def test_spread_near_tie_4v3_picks_median_close(self):
+        """4 books at -3.5 vs 3 at -3.0 (near-tie).
+
+        Tiebreak uses weighted median of all line values. With equal-weight
+        books the plain median of 7 values [-3.5,-3.5,-3.5,-3.5,-3,-3,-3]
+        = -3.5, so -3.5 is chosen.
+        """
+        lines = [
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -108, -112),
+            _spread_line("C", -3.5, 3.5, -112, -108),
+            _spread_line("D", -3.5, 3.5, -110, -110),
+            _spread_line("E", -3.0, 3.0, -110, -110),
+            _spread_line("F", -3.0, 3.0, -108, -112),
+            _spread_line("G", -3.0, 3.0, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        home_spread = next(r for r in spread_recs if r.side == "home")
+        assert home_spread.line == -3.5
+        assert home_spread.books_used_count <= 4  # from the -3.5 group
+        assert home_spread.total_books_count == 7
+
+    def test_total_near_tie_4v3_picks_median_close(self):
+        """4 books at 220.5 vs 3 at 221.0 (near-tie), median favours 220.5."""
+        lines = [
+            _total_line("A", 220.5, -110, -110),
+            _total_line("B", 220.5, -108, -112),
+            _total_line("C", 220.5, -112, -108),
+            _total_line("D", 220.5, -110, -110),
+            _total_line("E", 221.0, -110, -110),
+            _total_line("F", 221.0, -108, -112),
+            _total_line("G", 221.0, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        total_recs = [r for r in recs if r.market == "total"]
+        over_rec = next(r for r in total_recs if r.side == "over")
+        assert over_rec.line == 220.5
+        assert over_rec.total_books_count == 7
+
+    def test_spread_clear_majority_by_2_no_near_tie(self):
+        """5 vs 3 (diff of 2) is not a near-tie — 5-book group wins outright."""
+        lines = [
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -108, -112),
+            _spread_line("C", -3.5, 3.5, -112, -108),
+            _spread_line("D", -3.5, 3.5, -110, -110),
+            _spread_line("E", -3.5, 3.5, -106, -114),
+            _spread_line("F", -3.0, 3.0, -110, -110),
+            _spread_line("G", -3.0, 3.0, -108, -112),
+            _spread_line("H", -3.0, 3.0, -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        home_spread = next(r for r in spread_recs if r.side == "home")
+        assert home_spread.line == -3.5
 
 
 # ---------------------------------------------------------------------------

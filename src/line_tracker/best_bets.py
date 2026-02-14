@@ -477,24 +477,40 @@ def _mode_value(values: list[float]) -> float:
     return counter.most_common(1)[0][0]
 
 
-def _best_line_group(values: list[float]) -> float:
+def _best_line_group(
+    values: list[float],
+    weights: list[float] | None = None,
+) -> float:
     """Choose the best line value for consensus.
 
     Selection criteria (in order):
       1. Most books offering that line value.
-      2. Tie-break: closest to the median of *all* line values.
+      2. If the top two groups are within 1 book of each other (near-tie),
+         pick the line closest to the weighted median of *all* line values
+         (or plain median when *weights* is ``None``).
 
     Returns the chosen line value.
     """
     counter = Counter(values)
-    max_count = counter.most_common(1)[0][1]
-    # All line values that are tied for the highest count
-    tied = [val for val, cnt in counter.items() if cnt == max_count]
-    if len(tied) == 1:
-        return tied[0]
-    # Break tie: pick the value closest to the overall median
-    med = median(values)
-    return min(tied, key=lambda v: abs(v - med))
+    ranked = counter.most_common()         # [(value, count), ...] desc by count
+    top_count = ranked[0][1]
+
+    # Near-tie: top-2 groups differ by at most 1 book
+    if len(ranked) >= 2 and top_count - ranked[1][1] <= 1:
+        near_tie_threshold = top_count - 1
+        candidates = [val for val, cnt in ranked if cnt >= near_tie_threshold]
+    else:
+        candidates = [ranked[0][0]]
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Tie-break: closest to the (weighted) median of all line values
+    if weights is not None and len(weights) == len(values):
+        med = _weighted_median(values, weights)
+    else:
+        med = median(values)
+    return min(candidates, key=lambda v: abs(v - med))
 
 
 def _moneyline_recommendations(
@@ -600,9 +616,9 @@ def _spread_recommendations(
     """Build spread best-bet recommendations for one event.
 
     When spread lines differ between books (e.g., -3 at one book vs -3.5 at
-    another), only the most common line (mode) is used for consensus probability
-    calculation.  This ensures we compare apples-to-apples — probabilities are
-    only meaningful at the same spread number.
+    another), only the most common line (or near-tie best) is used for consensus
+    probability calculation.  This ensures we compare apples-to-apples —
+    probabilities are only meaningful at the same spread number.
     """
     priced = [
         ln for ln in lines if ln.home_price is not None and ln.away_price is not None
@@ -610,7 +626,9 @@ def _spread_recommendations(
     if len(priced) < 2:
         return []
 
-    chosen_spread = _best_line_group([ln.home_value for ln in priced])
+    line_values = [ln.home_value for ln in priced]
+    line_weights = [_line_weight(ln.sportsbook, ln.timestamp, now) for ln in priced]
+    chosen_spread = _best_line_group(line_values, line_weights)
     matching = [ln for ln in priced if ln.home_value == chosen_spread]
 
     if len(matching) < 2:
@@ -710,8 +728,8 @@ def _total_recommendations(
     """Build total (over/under) best-bet recommendations for one event.
 
     When total lines differ between books (e.g., 45.5 at one book vs 46 at
-    another), only the most common line (mode) is used for consensus probability
-    calculation.
+    another), only the most common line (or near-tie best) is used for consensus
+    probability calculation.
     """
     priced = [
         ln for ln in lines if ln.home_price is not None and ln.away_price is not None
@@ -719,7 +737,9 @@ def _total_recommendations(
     if len(priced) < 2:
         return []
 
-    chosen_total = _best_line_group([ln.home_value for ln in priced])
+    line_values = [ln.home_value for ln in priced]
+    line_weights = [_line_weight(ln.sportsbook, ln.timestamp, now) for ln in priced]
+    chosen_total = _best_line_group(line_values, line_weights)
     matching = [ln for ln in priced if ln.home_value == chosen_total]
 
     if len(matching) < 2:
