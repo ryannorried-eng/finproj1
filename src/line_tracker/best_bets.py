@@ -125,6 +125,56 @@ class BetRecommendation:
     agreement_score: float = 0.0  # 0–100 subscore for book agreement
     coverage_score: float = 0.0  # 0–100 subscore for market coverage
     freshness_score: float = 0.0  # 0–100 subscore for data freshness
+    outlier_filtered: bool = False  # True if outlier books were removed
+    market_unstable: bool = False  # True if too many books were filtered out
+
+
+# ---------------------------------------------------------------------------
+# Outlier filtering — remove books whose de-vigged probability deviates
+# too far from the median before computing consensus.
+# ---------------------------------------------------------------------------
+_OUTLIER_REL_THRESHOLD = 0.15  # relative deviation threshold
+_OUTLIER_ABS_FLOOR = 0.01  # minimum allowable probability
+_OUTLIER_ABS_CEIL = 0.99  # maximum allowable probability
+_OUTLIER_DROP_RATIO = 0.30  # if > 30% of books filtered → market_unstable
+_OUTLIER_MIN_BOOKS = 4  # if books_after < 4 → market_unstable
+
+
+def _filter_outliers(
+    probs: list[float],
+) -> tuple[list[int], bool]:
+    """Identify outlier indices in a list of de-vigged probabilities.
+
+    Returns a tuple of (keep_indices, market_unstable).
+    keep_indices: indices of probabilities that passed filtering.
+    market_unstable: True if too many books were removed or too few remain.
+    """
+    n = len(probs)
+    if n < 2:
+        return list(range(n)), False
+
+    p_med = median(probs)
+
+    keep: list[int] = []
+    for i, p in enumerate(probs):
+        # Filter if outside absolute bounds
+        if p < _OUTLIER_ABS_FLOOR or p > _OUTLIER_ABS_CEIL:
+            continue
+        # Filter if relative deviation from median is too large
+        rel_dev = abs(p - p_med) / max(p_med, 1e-6)
+        if rel_dev > _OUTLIER_REL_THRESHOLD:
+            continue
+        keep.append(i)
+
+    # If filtering removed everything, fall back to all indices
+    if not keep:
+        return list(range(n)), True
+
+    removed_count = n - len(keep)
+    removed_ratio = removed_count / n
+    unstable = removed_ratio > _OUTLIER_DROP_RATIO or len(keep) < _OUTLIER_MIN_BOOKS
+
+    return keep, unstable
 
 
 def _remove_vig(odds_a: float, odds_b: float) -> tuple[float, float]:
@@ -298,6 +348,8 @@ def _build_rec(
     oldest_update_age_min: float = 0.0,
     books_used_count: int = 0,
     total_books_count: int = 0,
+    outlier_filtered: bool = False,
+    market_unstable: bool = False,
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs."""
     be_prob = breakeven_prob_from_american(best_odds)
@@ -314,8 +366,18 @@ def _build_rec(
     f_score = round(
         _freshness_score(newest_update_age_min, oldest_update_age_min), 1
     )
+
+    # If market is unstable, cap agreement_score and downgrade tier
+    if market_unstable:
+        a_score = min(a_score, 60.0)
+
     q_score = _quality_score(e_score, a_score, c_score, f_score)
     q_tier = _quality_tier(q_score)
+
+    # Downgrade tier by one level when market is unstable
+    if market_unstable:
+        _TIER_DOWNGRADE = {"Elite": "Strong", "Strong": "Moderate", "Moderate": "Thin"}
+        q_tier = _TIER_DOWNGRADE.get(q_tier, q_tier)
 
     return BetRecommendation(
         market=market,
@@ -341,6 +403,8 @@ def _build_rec(
         agreement_score=a_score,
         coverage_score=c_score,
         freshness_score=f_score,
+        outlier_filtered=outlier_filtered,
+        market_unstable=market_unstable,
     )
 
 
@@ -388,13 +452,24 @@ def _moneyline_recommendations(
         away_no_vig.append(pa)
         weights.append(_line_weight(ln.sportsbook, ln.timestamp, now))
 
-    # Unweighted (plain median) — kept for debugging
+    # Unweighted (plain median) — kept for debugging (computed before filtering)
     unweighted_home = median(home_no_vig)
     unweighted_away = median(away_no_vig)
 
-    # Weighted median — used for EV calculation
-    consensus_home = _weighted_median(home_no_vig, weights)
-    consensus_away = _weighted_median(away_no_vig, weights)
+    # Outlier filtering — use home side to determine which books to keep
+    keep_idx, unstable_home = _filter_outliers(home_no_vig)
+    _, unstable_away = _filter_outliers(away_no_vig)
+    market_unstable = unstable_home or unstable_away
+    outlier_filtered = len(keep_idx) < len(home_no_vig)
+
+    # Apply filter to both sides consistently
+    f_home = [home_no_vig[i] for i in keep_idx]
+    f_away = [away_no_vig[i] for i in keep_idx]
+    f_weights = [weights[i] for i in keep_idx]
+
+    # Weighted median — used for EV calculation (on filtered set)
+    consensus_home = _weighted_median(f_home, f_weights)
+    consensus_away = _weighted_median(f_away, f_weights)
 
     best_home_line = max(lines, key=lambda ln: ln.home_value)
     best_away_line = max(lines, key=lambda ln: ln.away_value)
@@ -402,13 +477,15 @@ def _moneyline_recommendations(
     home_team = lines[0].home_team
     away_team = lines[0].away_team
 
-    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in lines]
+    f_lines = [lines[i] for i in keep_idx]
+    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in f_lines]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
     results: list[BetRecommendation] = []
 
-    n_books = len(lines)
+    n_total = len(lines)
+    n_used = len(keep_idx)
 
     results.append(
         _build_rec(
@@ -420,11 +497,13 @@ def _moneyline_recommendations(
             unweighted_consensus_prob=unweighted_home,
             best_sportsbook=best_home_line.sportsbook,
             best_odds=best_home_line.home_value,
-            side_probs=home_no_vig,
+            side_probs=f_home,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
-            books_used_count=n_books,
-            total_books_count=n_books,
+            books_used_count=n_used,
+            total_books_count=n_total,
+            outlier_filtered=outlier_filtered,
+            market_unstable=market_unstable,
         )
     )
 
@@ -438,11 +517,13 @@ def _moneyline_recommendations(
             unweighted_consensus_prob=unweighted_away,
             best_sportsbook=best_away_line.sportsbook,
             best_odds=best_away_line.away_value,
-            side_probs=away_no_vig,
+            side_probs=f_away,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
-            books_used_count=n_books,
-            total_books_count=n_books,
+            books_used_count=n_used,
+            total_books_count=n_total,
+            outlier_filtered=outlier_filtered,
+            market_unstable=market_unstable,
         )
     )
 
@@ -473,7 +554,6 @@ def _spread_recommendations(
         return []
 
     total_books = len(priced)
-    books_used = len(matching)
 
     home_no_vig: list[float] = []
     away_no_vig: list[float] = []
@@ -488,16 +568,29 @@ def _spread_recommendations(
     unweighted_home = median(home_no_vig)
     unweighted_away = median(away_no_vig)
 
-    consensus_home = _weighted_median(home_no_vig, weights)
-    consensus_away = _weighted_median(away_no_vig, weights)
+    # Outlier filtering
+    keep_idx, unstable_home = _filter_outliers(home_no_vig)
+    _, unstable_away = _filter_outliers(away_no_vig)
+    market_unstable = unstable_home or unstable_away
+    outlier_filtered = len(keep_idx) < len(home_no_vig)
 
-    best_home = max(matching, key=lambda ln: ln.home_price)
-    best_away = max(matching, key=lambda ln: ln.away_price)
+    f_home = [home_no_vig[i] for i in keep_idx]
+    f_away = [away_no_vig[i] for i in keep_idx]
+    f_weights = [weights[i] for i in keep_idx]
+    f_matching = [matching[i] for i in keep_idx]
+
+    books_used = len(keep_idx)
+
+    consensus_home = _weighted_median(f_home, f_weights)
+    consensus_away = _weighted_median(f_away, f_weights)
+
+    best_home = max(f_matching, key=lambda ln: ln.home_price)
+    best_away = max(f_matching, key=lambda ln: ln.away_price)
 
     home_team = lines[0].home_team
     away_team = lines[0].away_team
 
-    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in matching]
+    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in f_matching]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -513,15 +606,17 @@ def _spread_recommendations(
             unweighted_consensus_prob=unweighted_home,
             best_sportsbook=best_home.sportsbook,
             best_odds=best_home.home_price,
-            side_probs=home_no_vig,
+            side_probs=f_home,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,
             total_books_count=total_books,
+            outlier_filtered=outlier_filtered,
+            market_unstable=market_unstable,
         )
     )
 
-    away_spread = matching[0].away_value
+    away_spread = f_matching[0].away_value
     results.append(
         _build_rec(
             market="spread",
@@ -532,11 +627,13 @@ def _spread_recommendations(
             unweighted_consensus_prob=unweighted_away,
             best_sportsbook=best_away.sportsbook,
             best_odds=best_away.away_price,
-            side_probs=away_no_vig,
+            side_probs=f_away,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,
             total_books_count=total_books,
+            outlier_filtered=outlier_filtered,
+            market_unstable=market_unstable,
         )
     )
 
@@ -566,7 +663,6 @@ def _total_recommendations(
         return []
 
     total_books = len(priced)
-    books_used = len(matching)
 
     over_no_vig: list[float] = []
     under_no_vig: list[float] = []
@@ -581,13 +677,26 @@ def _total_recommendations(
     unweighted_over = median(over_no_vig)
     unweighted_under = median(under_no_vig)
 
-    consensus_over = _weighted_median(over_no_vig, weights)
-    consensus_under = _weighted_median(under_no_vig, weights)
+    # Outlier filtering
+    keep_idx, unstable_over = _filter_outliers(over_no_vig)
+    _, unstable_under = _filter_outliers(under_no_vig)
+    market_unstable = unstable_over or unstable_under
+    outlier_filtered = len(keep_idx) < len(over_no_vig)
 
-    best_over = max(matching, key=lambda ln: ln.home_price)
-    best_under = max(matching, key=lambda ln: ln.away_price)
+    f_over = [over_no_vig[i] for i in keep_idx]
+    f_under = [under_no_vig[i] for i in keep_idx]
+    f_weights = [weights[i] for i in keep_idx]
+    f_matching = [matching[i] for i in keep_idx]
 
-    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in matching]
+    books_used = len(keep_idx)
+
+    consensus_over = _weighted_median(f_over, f_weights)
+    consensus_under = _weighted_median(f_under, f_weights)
+
+    best_over = max(f_matching, key=lambda ln: ln.home_price)
+    best_under = max(f_matching, key=lambda ln: ln.away_price)
+
+    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in f_matching]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -603,11 +712,13 @@ def _total_recommendations(
             unweighted_consensus_prob=unweighted_over,
             best_sportsbook=best_over.sportsbook,
             best_odds=best_over.home_price,
-            side_probs=over_no_vig,
+            side_probs=f_over,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,
             total_books_count=total_books,
+            outlier_filtered=outlier_filtered,
+            market_unstable=market_unstable,
         )
     )
 
@@ -621,11 +732,13 @@ def _total_recommendations(
             unweighted_consensus_prob=unweighted_under,
             best_sportsbook=best_under.sportsbook,
             best_odds=best_under.away_price,
-            side_probs=under_no_vig,
+            side_probs=f_under,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,
             total_books_count=total_books,
+            outlier_filtered=outlier_filtered,
+            market_unstable=market_unstable,
         )
     )
 

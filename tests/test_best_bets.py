@@ -12,6 +12,7 @@ from line_tracker.best_bets import (
     _confidence_label,
     _coverage_score,
     _edge_score,
+    _filter_outliers,
     _freshness_score,
     _line_weight,
     _mode_value,
@@ -580,8 +581,10 @@ class TestWeightedConsensusIntegration:
 
     def test_weighted_differs_from_unweighted(self):
         """When books have unequal weights, the two consensus values should differ."""
+        # Use odds close enough that Pinnacle is NOT filtered as an outlier
+        # (-160/+140 home ≈ 0.596 vs -140/+120 home ≈ 0.562, rel_dev ≈ 6%)
         lines = [
-            _ml_line("Pinnacle", -200, 180),   # weight 3.0
+            _ml_line("Pinnacle", -160, 140),   # weight 3.0
             _ml_line("DraftKings", -140, 120),  # weight 1.0
             _ml_line("FanDuel", -140, 120),     # weight 1.0
         ]
@@ -1202,6 +1205,8 @@ class TestQualityScoreIntegration:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
+            if r.market_unstable:
+                continue  # tier may be downgraded
             if r.quality_score >= 85:
                 assert r.quality_tier == "Elite"
             elif r.quality_score >= 70:
@@ -1210,3 +1215,215 @@ class TestQualityScoreIntegration:
                 assert r.quality_tier == "Moderate"
             else:
                 assert r.quality_tier == "Thin"
+
+
+# ---------------------------------------------------------------------------
+# Outlier filtering — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestFilterOutliers:
+    def test_no_outliers_keeps_all(self):
+        """Books with similar probs should all be kept."""
+        probs = [0.50, 0.51, 0.52, 0.49, 0.50]
+        keep, unstable = _filter_outliers(probs)
+        assert keep == [0, 1, 2, 3, 4]
+        assert not unstable
+
+    def test_single_outlier_removed(self):
+        """One extreme value should be filtered out."""
+        # median ≈ 0.50; 0.80 has rel_dev = |0.80-0.50|/0.50 = 0.60 > 0.15
+        probs = [0.50, 0.51, 0.49, 0.50, 0.80]
+        keep, unstable = _filter_outliers(probs)
+        assert 4 not in keep  # the 0.80 outlier
+        assert len(keep) == 4
+        assert not unstable  # only 1 of 5 removed (20% < 30%), 4 books remain
+
+    def test_prob_below_floor_filtered(self):
+        """Probability below 0.01 should be filtered."""
+        probs = [0.50, 0.51, 0.49, 0.50, 0.005]
+        keep, unstable = _filter_outliers(probs)
+        assert 4 not in keep
+
+    def test_prob_above_ceiling_filtered(self):
+        """Probability above 0.99 should be filtered."""
+        probs = [0.50, 0.51, 0.49, 0.50, 0.995]
+        keep, unstable = _filter_outliers(probs)
+        assert 4 not in keep
+
+    def test_market_unstable_when_too_many_filtered(self):
+        """If >30% of books are filtered, market_unstable should be True."""
+        # 3 of 5 are outliers → 60% filtered → unstable
+        probs = [0.50, 0.51, 0.80, 0.85, 0.90]
+        keep, unstable = _filter_outliers(probs)
+        assert unstable
+
+    def test_market_unstable_when_fewer_than_4_remain(self):
+        """If fewer than 4 books remain after filtering, market_unstable."""
+        # Only 3 books total, all kept → 3 < 4 → unstable
+        probs = [0.50, 0.51, 0.52]
+        keep, unstable = _filter_outliers(probs)
+        assert len(keep) == 3
+        assert unstable  # books_after < 4
+
+    def test_single_value_returns_it(self):
+        """Single value should be kept without error."""
+        keep, unstable = _filter_outliers([0.55])
+        assert keep == [0]
+        assert not unstable
+
+    def test_empty_list(self):
+        """Empty list should return empty without error."""
+        keep, unstable = _filter_outliers([])
+        assert keep == []
+        assert not unstable
+
+    def test_all_identical_probs_no_filtering(self):
+        """Identical probabilities → no outliers."""
+        probs = [0.55, 0.55, 0.55, 0.55, 0.55]
+        keep, unstable = _filter_outliers(probs)
+        assert len(keep) == 5
+        assert not unstable
+
+
+class TestOutlierFilteringIntegration:
+    def test_extreme_outlier_excluded_from_consensus(self):
+        """One extreme outlier book should be removed and not dominate EV.
+
+        Setup: 5 books agree around -150/+130 (home ≈ 0.58), one book posts
+        an extreme -500/+400 (home ≈ 0.77). Without filtering the outlier
+        would pull consensus higher. With filtering it should be excluded.
+        """
+        lines = [
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -150, 130),
+            _ml_line("BetMGM", -148, 128),
+            _ml_line("Caesars", -152, 132),
+            _ml_line("Pinnacle", -150, 130),
+            _ml_line("Outlier", -500, 400),  # extreme outlier
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        # The consensus should reflect the 5 agreeing books, not the outlier
+        normal_prob, _ = _remove_vig(-150, 130)
+        outlier_prob, _ = _remove_vig(-500, 400)
+
+        # Consensus should be close to normal_prob, far from outlier_prob
+        dist_to_normal = abs(home_rec.consensus_prob - normal_prob)
+        dist_to_outlier = abs(home_rec.consensus_prob - outlier_prob)
+        assert dist_to_normal < dist_to_outlier
+
+        # Outlier flag should be set
+        assert home_rec.outlier_filtered is True
+        # 5 of 6 books kept → books_used_count == 5
+        assert home_rec.books_used_count == 5
+
+    def test_market_unstable_triggers_on_too_many_outliers(self):
+        """If too many books are filtered, market_unstable should be True
+        and the quality tier should be downgraded.
+        """
+        # 3 of 5 books are extreme outliers → >30% filtered → unstable
+        lines = [
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -150, 130),
+            _ml_line("OutlierA", -500, 400),
+            _ml_line("OutlierB", -600, 500),
+            _ml_line("OutlierC", -700, 600),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        home_rec = next(r for r in recs if r.side == "home")
+
+        assert home_rec.market_unstable is True
+        assert home_rec.outlier_filtered is True
+        # Agreement score capped at 60 for unstable markets
+        assert home_rec.agreement_score <= 60.0
+
+    def test_no_outliers_flags_false(self):
+        """When all books agree, no outlier flags should be set."""
+        lines = [
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -150, 130),
+            _ml_line("BetMGM", -150, 130),
+            _ml_line("Caesars", -150, 130),
+            _ml_line("Pinnacle", -150, 130),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert r.outlier_filtered is False
+            assert r.market_unstable is False
+
+    def test_outlier_not_used_for_ev(self):
+        """The outlier book's probability should not inflate EV.
+
+        An outlier posting very high home prob would inflate consensus_prob,
+        making the home side look like a better bet than it is. After
+        filtering, EV should be lower (closer to the true market).
+        """
+        normal_lines = [
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -150, 130),
+            _ml_line("BetMGM", -148, 128),
+            _ml_line("Caesars", -152, 132),
+            _ml_line("Pinnacle", -150, 130),
+        ]
+        # Same lines + extreme outlier
+        outlier_lines = normal_lines + [_ml_line("Outlier", -500, 400)]
+
+        recs_normal = recommend_best_bets(normal_lines, top_n=10)
+        recs_outlier = recommend_best_bets(outlier_lines, top_n=10)
+
+        home_normal = next(r for r in recs_normal if r.side == "home")
+        home_outlier = next(r for r in recs_outlier if r.side == "home")
+
+        # With filtering, adding an outlier should NOT significantly change
+        # the consensus probability (the outlier is removed)
+        assert abs(home_normal.consensus_prob - home_outlier.consensus_prob) < 0.02
+
+    def test_unstable_market_tier_downgraded(self):
+        """Unstable markets should have their quality tier downgraded."""
+        # Only 2 books remain after filtering → market_unstable
+        lines = [
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -150, 130),
+            _ml_line("OutlierA", -500, 400),
+            _ml_line("OutlierB", -600, 500),
+            _ml_line("OutlierC", -700, 600),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            if r.market_unstable:
+                # Tier should never be Elite when market is unstable
+                assert r.quality_tier != "Elite"
+
+    def test_spread_outlier_filtered(self):
+        """Outlier filtering should also apply to spread markets."""
+        lines = [
+            _spread_line("DraftKings", -3.5, 3.5, -110, -110),
+            _spread_line("FanDuel", -3.5, 3.5, -108, -112),
+            _spread_line("BetMGM", -3.5, 3.5, -110, -110),
+            _spread_line("Caesars", -3.5, 3.5, -110, -110),
+            _spread_line("Pinnacle", -3.5, 3.5, -110, -110),
+            _spread_line("Outlier", -3.5, 3.5, -300, 250),  # extreme juice
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        assert len(spread_recs) == 2
+        for r in spread_recs:
+            assert r.outlier_filtered is True
+
+    def test_total_outlier_filtered(self):
+        """Outlier filtering should also apply to total markets."""
+        lines = [
+            _total_line("DraftKings", 220.5, -110, -110),
+            _total_line("FanDuel", 220.5, -108, -112),
+            _total_line("BetMGM", 220.5, -110, -110),
+            _total_line("Caesars", 220.5, -110, -110),
+            _total_line("Pinnacle", 220.5, -110, -110),
+            _total_line("Outlier", 220.5, -300, 250),  # extreme juice
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        total_recs = [r for r in recs if r.market == "total"]
+        assert len(total_recs) == 2
+        for r in total_recs:
+            assert r.outlier_filtered is True
