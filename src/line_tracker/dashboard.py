@@ -715,16 +715,30 @@ def _detail_best_bet_section(game_lines):
         "Informational only, not financial advice"
     )
 
-    min_edge = st.slider(
-        "Min edge (%)",
-        min_value=0.0,
-        max_value=5.0,
-        value=0.5,
-        step=0.1,
-        key=f"min_edge_{id(game_lines)}",
-    )
+    slider_cols = st.columns(2)
+    with slider_cols[0]:
+        min_edge = st.slider(
+            "Min edge (%)",
+            min_value=0.0,
+            max_value=5.0,
+            value=0.5,
+            step=0.1,
+            key=f"min_edge_{id(game_lines)}",
+        )
+    with slider_cols[1]:
+        min_quality = st.slider(
+            "Min quality",
+            min_value=0,
+            max_value=100,
+            value=60,
+            step=5,
+            key=f"min_quality_{id(game_lines)}",
+        )
 
-    qualified = [r for r in recs if r.edge_pct >= min_edge]
+    qualified = [
+        r for r in recs
+        if r.edge_pct >= min_edge and r.quality_score >= min_quality
+    ]
 
     if qualified:
         top = qualified[0]
@@ -771,7 +785,7 @@ def _detail_best_bet_section(game_lines):
                     f"Quality: {r.quality_score} ({r.quality_tier})"
                 )
     else:
-        st.info("No bets meet your min edge threshold. Showing closest candidates:")
+        st.info("No bets meet your edge + quality thresholds. Showing closest candidates:")
         for r in recs[:3]:
             ml = _best_bet_market_label(r)
             ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
