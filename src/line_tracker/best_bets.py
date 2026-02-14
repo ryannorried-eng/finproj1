@@ -37,6 +37,9 @@ BOOK_WEIGHTS: dict[str, float] = {
 }
 _DEFAULT_WEIGHT = 1.0
 
+# Tier downgrade map when a market is flagged as unstable.
+_TIER_DOWNGRADE = {"Elite": "Strong", "Strong": "Moderate", "Moderate": "Thin"}
+
 
 def _weight_for_book(sportsbook: str) -> float:
     """Return the weight for a sportsbook, falling back to the default."""
@@ -490,7 +493,6 @@ def _build_rec(
 
     # Downgrade tier by one level when market is unstable
     if market_unstable:
-        _TIER_DOWNGRADE = {"Elite": "Strong", "Strong": "Moderate", "Moderate": "Thin"}
         q_tier = _TIER_DOWNGRADE.get(q_tier, q_tier)
 
     # Thin book usage: fewer than 4 books used → cap score and tier

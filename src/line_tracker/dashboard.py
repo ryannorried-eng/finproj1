@@ -14,15 +14,13 @@ from line_tracker.best_bets import recommend_best_bets
 from line_tracker.bet_history import init_bet_state, settle_bet, submit_bet
 from line_tracker.bet_slip import (
     american_profit,
+    american_to_decimal as _slip_a2d,
     american_total_return,
     compute_standouts,
     format_american,
     has_conflicting_leg,
     is_duplicate_leg,
     parlay_payout,
-)
-from line_tracker.bet_slip import (
-    american_to_decimal as _slip_a2d,
 )
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
@@ -55,6 +53,9 @@ BET_TYPE_SHORT = {
 
 # Mapping from label back to bet_type value for filters
 _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
+
+# Sentinel used to sort games with missing commence_time to the bottom.
+_FAR_FUTURE = datetime.max.replace(tzinfo=None)
 
 DB_PATH = "lines.db"
 
@@ -564,11 +565,10 @@ def _page_dashboard():
     )
 
     # Sort by commence_time ascending (soonest first); missing at bottom
-    _far_future = datetime.max.replace(tzinfo=None)
     sorted_games = sorted(
         games.items(),
         key=lambda x: (
-            x[1]["commence_time"].astimezone() if x[1]["commence_time"] else _far_future
+            x[1]["commence_time"].astimezone() if x[1]["commence_time"] else _FAR_FUTURE
         ),
     )
 
@@ -1638,10 +1638,9 @@ def _page_best_lines():
         groups[local_date].append((rank, s))
 
     # Sort within each group by commence_time ascending, then edge descending
-    _far_future = datetime.max.replace(tzinfo=None)
     for items in groups.values():
         items.sort(key=lambda x: (
-            commence_map.get(x[1]["event"], _far_future),
+            commence_map.get(x[1]["event"], _FAR_FUTURE),
             -x[1]["edge"],
         ))
 
