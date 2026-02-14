@@ -1826,15 +1826,16 @@ def _page_daily_slate():
         st.info("Nothing flagged to avoid.")
     else:
         for entry in avoid:
-            reasons = ", ".join(entry["avoid_reasons"])
             market_label = _slate_market_label(entry)
             ct = entry.get("commence_time")
             time_str = f" \u00b7 {_format_start_time(ct)}" if ct else ""
-            st.markdown(
-                f"- **{entry['event']}** \u2014 "
-                f"{entry['selection']} ({market_label}){time_str} \u2014 "
-                f":red[{reasons}]"
-            )
+            with st.container(border=True):
+                st.markdown(
+                    f"**{entry['event']}** \u2014 "
+                    f"{entry['selection']} ({market_label}){time_str}"
+                )
+                for reason in entry["avoid_reasons"]:
+                    st.markdown(f"- :red[{reason}]")
 
 
 def _slate_market_label(entry: dict) -> str:

@@ -11,6 +11,9 @@ _TIER1_QUALITY = 70
 _TIER1_EDGE = 2.0
 _TIER2_QUALITY = 40
 _TIER2_EDGE = 1.0
+_MIN_BOOKS = 4
+_STALE_THRESHOLD_MIN = 120.0
+_EDGE_OUTLIER_THRESHOLD = 4.0
 
 
 def _slate_score(quality_score: float, edge_pct: float) -> float:
@@ -23,6 +26,8 @@ def _assign_tier(
     rec_edge: float,
     rec_confidence: str,
     rec_market_unstable: bool,
+    rec_books_used: int = 0,
+    rec_oldest_age_min: float = 0.0,
 ) -> tuple[str, list[str]]:
     """Return (tier, avoid_reasons).
 
@@ -33,13 +38,21 @@ def _assign_tier(
     reasons: list[str] = []
 
     if rec_market_unstable:
-        reasons.append("market_unstable")
+        reasons.append("Unstable market (too many outlier books filtered)")
     if rec_edge < _TIER2_EDGE:
-        reasons.append(f"edge_pct {rec_edge:.2f} < {_TIER2_EDGE}")
+        reasons.append(f"Edge too small ({rec_edge:.2f}% < {_TIER2_EDGE}%)")
     if rec_quality < _TIER2_QUALITY:
-        reasons.append(f"quality_score {rec_quality} < {_TIER2_QUALITY}")
+        reasons.append(f"Low quality score ({rec_quality} < {_TIER2_QUALITY})")
     if rec_confidence == "Low":
-        reasons.append("low_confidence")
+        reasons.append("Low confidence (books disagree)")
+    if rec_books_used and rec_books_used < _MIN_BOOKS:
+        reasons.append(f"Too few books (<{_MIN_BOOKS})")
+    if rec_oldest_age_min > _STALE_THRESHOLD_MIN:
+        reasons.append(
+            f"Stale lines (oldest update > {_STALE_THRESHOLD_MIN:.0f} min)"
+        )
+    if rec_edge >= _EDGE_OUTLIER_THRESHOLD and rec_confidence == "Low":
+        reasons.append("Edge outlier with low confidence (possible bad data)")
 
     if reasons:
         return "avoid", reasons
@@ -118,6 +131,8 @@ def build_daily_slate(
                 rec.edge_pct,
                 rec.confidence,
                 rec.market_unstable,
+                rec_books_used=rec.books_used_count,
+                rec_oldest_age_min=rec.oldest_update_age_min,
             )
 
             entry: dict = {
@@ -135,6 +150,7 @@ def build_daily_slate(
                 "slate_score": score,
                 "books_used": rec.books_used_count,
                 "updated_age_min": rec.newest_update_age_min,
+                "oldest_update_age_min": rec.oldest_update_age_min,
                 "tier": tier,
                 "avoid_reasons": avoid_reasons,
             }

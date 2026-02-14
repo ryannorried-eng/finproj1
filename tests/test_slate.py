@@ -6,6 +6,9 @@ from unittest.mock import patch
 from line_tracker.best_bets import BetRecommendation
 from line_tracker.models import BettingLine, BetType
 from line_tracker.slate import (
+    _EDGE_OUTLIER_THRESHOLD,
+    _MIN_BOOKS,
+    _STALE_THRESHOLD_MIN,
     _assign_tier,
     _passes_filters,
     _slate_score,
@@ -49,6 +52,7 @@ def _make_rec(
     confidence: str = "High",
     books_used_count: int = 5,
     newest_update_age_min: float = 10.0,
+    oldest_update_age_min: float = 15.0,
     market_unstable: bool = False,
     ev: float = 0.05,
     best_sportsbook: str = "FanDuel",
@@ -71,6 +75,7 @@ def _make_rec(
         quality_score=quality_score,
         books_used_count=books_used_count,
         newest_update_age_min=newest_update_age_min,
+        oldest_update_age_min=oldest_update_age_min,
         market_unstable=market_unstable,
     )
 
@@ -113,49 +118,99 @@ class TestSlateScore:
 
 class TestAssignTier:
     def test_tier1(self):
-        tier, reasons = _assign_tier(80, 3.0, "High", False)
+        tier, reasons = _assign_tier(80, 3.0, "High", False, rec_books_used=6)
         assert tier == "tier1"
         assert reasons == []
 
     def test_tier2_moderate_quality(self):
-        tier, reasons = _assign_tier(55, 1.5, "Medium", False)
+        tier, reasons = _assign_tier(55, 1.5, "Medium", False, rec_books_used=5)
         assert tier == "tier2"
         assert reasons == []
 
     def test_avoid_low_edge(self):
-        tier, reasons = _assign_tier(80, 0.5, "High", False)
+        tier, reasons = _assign_tier(80, 0.5, "High", False, rec_books_used=6)
         assert tier == "avoid"
-        assert any("edge_pct" in r for r in reasons)
+        assert any("Edge too small" in r for r in reasons)
 
     def test_avoid_low_quality(self):
-        tier, reasons = _assign_tier(20, 3.0, "High", False)
+        tier, reasons = _assign_tier(20, 3.0, "High", False, rec_books_used=6)
         assert tier == "avoid"
-        assert any("quality_score" in r for r in reasons)
+        assert any("Low quality score" in r for r in reasons)
 
     def test_avoid_low_confidence(self):
-        tier, reasons = _assign_tier(80, 3.0, "Low", False)
+        tier, reasons = _assign_tier(80, 3.0, "Low", False, rec_books_used=6)
         assert tier == "avoid"
-        assert "low_confidence" in reasons
+        assert any("Low confidence (books disagree)" in r for r in reasons)
 
     def test_avoid_unstable_market(self):
-        tier, reasons = _assign_tier(80, 3.0, "High", True)
+        tier, reasons = _assign_tier(80, 3.0, "High", True, rec_books_used=6)
         assert tier == "avoid"
-        assert "market_unstable" in reasons
+        assert any("Unstable market" in r for r in reasons)
 
     def test_avoid_multiple_reasons(self):
-        tier, reasons = _assign_tier(20, 0.5, "Low", True)
+        tier, reasons = _assign_tier(
+            20, 0.5, "Low", True, rec_books_used=2, rec_oldest_age_min=200.0,
+        )
         assert tier == "avoid"
-        assert len(reasons) == 4
+        # unstable, edge too small, low quality, low confidence,
+        # too few books, stale lines
+        assert len(reasons) == 6
 
     def test_tier2_boundary_quality(self):
         # quality exactly 40, edge exactly 1.0 → tier2
-        tier, reasons = _assign_tier(40, 1.0, "Medium", False)
+        tier, reasons = _assign_tier(40, 1.0, "Medium", False, rec_books_used=5)
         assert tier == "tier2"
 
     def test_tier1_boundary(self):
         # quality exactly 70, edge exactly 2.0 → tier1
-        tier, reasons = _assign_tier(70, 2.0, "High", False)
+        tier, reasons = _assign_tier(70, 2.0, "High", False, rec_books_used=6)
         assert tier == "tier1"
+
+    def test_avoid_too_few_books(self):
+        """Fewer than 4 books triggers avoid."""
+        tier, reasons = _assign_tier(80, 3.0, "High", False, rec_books_used=3)
+        assert tier == "avoid"
+        assert any(f"Too few books (<{_MIN_BOOKS})" in r for r in reasons)
+
+    def test_avoid_too_few_books_boundary(self):
+        """Exactly 4 books does NOT trigger the too-few-books reason."""
+        tier, reasons = _assign_tier(80, 3.0, "High", False, rec_books_used=4)
+        assert tier == "tier1"
+        assert not any("Too few books" in r for r in reasons)
+
+    def test_avoid_stale_lines(self):
+        """Oldest update > 120 min triggers avoid."""
+        tier, reasons = _assign_tier(
+            80, 3.0, "High", False, rec_books_used=6, rec_oldest_age_min=150.0,
+        )
+        assert tier == "avoid"
+        assert any("Stale lines" in r for r in reasons)
+
+    def test_stale_lines_boundary(self):
+        """Exactly 120 min does NOT trigger stale-lines reason."""
+        tier, reasons = _assign_tier(
+            80, 3.0, "High", False, rec_books_used=6, rec_oldest_age_min=120.0,
+        )
+        assert tier == "tier1"
+        assert not any("Stale lines" in r for r in reasons)
+
+    def test_avoid_edge_outlier_low_confidence(self):
+        """High edge + low confidence triggers the outlier reason."""
+        tier, reasons = _assign_tier(
+            80, _EDGE_OUTLIER_THRESHOLD, "Low", False, rec_books_used=6,
+        )
+        assert tier == "avoid"
+        assert any("Edge outlier" in r for r in reasons)
+        # Also has the basic low-confidence reason
+        assert any("Low confidence (books disagree)" in r for r in reasons)
+
+    def test_no_edge_outlier_when_high_confidence(self):
+        """High edge + high confidence does NOT trigger outlier reason."""
+        tier, reasons = _assign_tier(
+            80, 5.0, "High", False, rec_books_used=6,
+        )
+        assert tier == "tier1"
+        assert not any("Edge outlier" in r for r in reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +454,38 @@ class TestBuildDailySlate:
         ]
         result = build_daily_slate({"evt1": _event_lines()})
         entry = result["avoid"][0]
-        assert "market_unstable" in entry["avoid_reasons"]
-        assert "low_confidence" in entry["avoid_reasons"]
-        assert any("edge_pct" in r for r in entry["avoid_reasons"])
-        assert any("quality_score" in r for r in entry["avoid_reasons"])
+        assert any("Unstable market" in r for r in entry["avoid_reasons"])
+        assert any("Low confidence (books disagree)" in r for r in entry["avoid_reasons"])
+        assert any("Edge too small" in r for r in entry["avoid_reasons"])
+        assert any("Low quality score" in r for r in entry["avoid_reasons"])
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_avoid_stale_lines_integration(self, mock_rbb):
+        """Stale lines cause avoid with descriptive reason."""
+        mock_rbb.return_value = [
+            _make_rec(quality_score=80, edge_pct=3.0, oldest_update_age_min=200.0)
+        ]
+        result = build_daily_slate({"evt1": _event_lines()})
+        entry = result["avoid"][0]
+        assert any("Stale lines" in r for r in entry["avoid_reasons"])
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_avoid_too_few_books_integration(self, mock_rbb):
+        """Too few books causes avoid with descriptive reason."""
+        mock_rbb.return_value = [
+            _make_rec(quality_score=80, edge_pct=3.0, books_used_count=2)
+        ]
+        result = build_daily_slate({"evt1": _event_lines()})
+        entry = result["avoid"][0]
+        assert any("Too few books" in r for r in entry["avoid_reasons"])
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_avoid_edge_outlier_integration(self, mock_rbb):
+        """High edge + low confidence triggers edge outlier reason."""
+        mock_rbb.return_value = [
+            _make_rec(quality_score=80, edge_pct=5.0, confidence="Low")
+        ]
+        result = build_daily_slate({"evt1": _event_lines()})
+        entry = result["avoid"][0]
+        assert any("Edge outlier" in r for r in entry["avoid_reasons"])
+        assert any("Low confidence" in r for r in entry["avoid_reasons"])
