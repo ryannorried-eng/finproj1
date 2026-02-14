@@ -1135,38 +1135,73 @@ class TestEdgeScore:
 
 class TestAgreementScore:
     def test_tight_many_books_fresh(self):
-        # IQR <= 0.03 → base 90, 5+ books → no penalty, fresh → no penalty
+        # IQR <= 0.03 → base 90, std tiny → no penalty, books=5 < 6 → -10
         probs = [0.550, 0.552, 0.548, 0.551, 0.549]
-        assert _agreement_score(probs, 5, stalest_age_min=10.0) == 90.0
+        assert _agreement_score(probs, 5, stalest_age_min=10.0) == 80.0
+
+    def test_tight_many_books_6_fresh(self):
+        # IQR <= 0.03 → base 90, std tiny → no penalty, books=6 → no penalty
+        probs = [0.550, 0.552, 0.548, 0.551, 0.549, 0.550]
+        assert _agreement_score(probs, 6, stalest_age_min=10.0) == 90.0
 
     def test_tight_few_books(self):
-        # IQR <= 0.03 → base 90, books < 5 → -10
+        # IQR <= 0.03 → base 90, std tiny → no penalty, books=3 < 6 → -10
         probs = [0.550, 0.552, 0.548]
         assert _agreement_score(probs, 3, stalest_age_min=10.0) == 80.0
 
     def test_tight_stale(self):
-        # IQR <= 0.03 → base 90, 5+ books, stalest > 60 → -10
+        # IQR <= 0.03 → base 90, std tiny, books=5 < 6 → -10, stalest > 60 → -10
         probs = [0.550, 0.552, 0.548, 0.551, 0.549]
-        assert _agreement_score(probs, 5, stalest_age_min=90.0) == 80.0
+        assert _agreement_score(probs, 5, stalest_age_min=90.0) == 70.0
 
     def test_moderate_dispersion(self):
-        # IQR 0.03–0.06 → base 70, books < 5 → -10
+        # IQR 0.03–0.06 → base 70, std ≈ 0.026 → no penalty, books < 6 → -10
         probs = [0.48, 0.50, 0.52, 0.54]
         assert _agreement_score(probs, 4, stalest_age_min=10.0) == 60.0
 
     def test_wide_dispersion(self):
-        # IQR > 0.06 → base 40, books < 5 → -10
+        # IQR > 0.06 → base 40, std ≈ 0.091 > 0.08 → -25, books < 6 → -10
         probs = [0.40, 0.55, 0.60, 0.45]
-        assert _agreement_score(probs, 3, stalest_age_min=10.0) == 30.0
+        assert _agreement_score(probs, 3, stalest_age_min=10.0) == 5.0
 
     def test_single_book(self):
-        # < 2 probs → base 40, books < 5 → -10
+        # < 2 probs → base 40, no std (len<2), books < 6 → -10
         assert _agreement_score([0.55], 1, stalest_age_min=10.0) == 30.0
 
     def test_clamp_floor(self):
-        # Wide dispersion + few books + stale → 40 - 10 - 10 = 20
+        # Wide dispersion + std penalty + few books + stale → clamped at 0
         probs = [0.40, 0.55, 0.60, 0.45]
-        assert _agreement_score(probs, 3, stalest_age_min=90.0) == 20.0
+        assert _agreement_score(probs, 3, stalest_age_min=90.0) == 0.0
+
+    def test_std_penalty_medium(self):
+        # IQR tight but std between 0.05–0.08 triggers -15
+        # Use values where IQR is small but tails push std > 0.05
+        probs = [0.50, 0.50, 0.50, 0.50, 0.50, 0.38, 0.62]
+        # q1=0.50, q3=0.50, IQR=0.0 → base 90
+        # std ≈ 0.072 > 0.05 → -15
+        # books=7 >= 6 → no penalty, fresh → no penalty
+        assert _agreement_score(probs, 7, stalest_age_min=10.0) == 75.0
+
+    def test_std_penalty_large(self):
+        # std > 0.08 triggers -25
+        probs = [0.50, 0.50, 0.50, 0.50, 0.50, 0.30, 0.70]
+        # IQR=0.0 → base 90, std ≈ 0.112 > 0.08 → -25
+        # books=7 >= 6 → no penalty
+        assert _agreement_score(probs, 7, stalest_age_min=10.0) == 65.0
+
+    def test_tight_beats_wide_with_similar_iqr(self):
+        """Tight distribution scores higher than wide even when IQR is similar.
+
+        Both sets have IQR near zero (all middle values identical), but the
+        wide set has extreme tails that raise std and trigger a penalty.
+        """
+        # Tight: all values clustered, IQR≈0, std tiny
+        tight = [0.50, 0.50, 0.51, 0.50, 0.49, 0.50, 0.50]
+        # Wide: same IQR≈0 (middle 50% identical) but outlier tails → high std
+        wide = [0.50, 0.50, 0.50, 0.50, 0.50, 0.35, 0.65]
+        score_tight = _agreement_score(tight, 7, stalest_age_min=10.0)
+        score_wide = _agreement_score(wide, 7, stalest_age_min=10.0)
+        assert score_tight > score_wide
 
 
 class TestCoverageScore:

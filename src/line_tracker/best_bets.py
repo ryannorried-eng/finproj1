@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import exp
-from statistics import median, quantiles
+from statistics import median, quantiles, stdev
 
 from line_tracker.bet_slip import (
     american_to_decimal,
@@ -326,8 +326,15 @@ def _agreement_score(
 ) -> float:
     """Score sportsbook agreement on a 0–100 scale.
 
-    Base score from IQR dispersion, with penalties for thin coverage
-    and stale data.
+    Combines IQR dispersion (inter-quartile range) with standard-deviation
+    penalties so that distributions with heavy tails score lower even when
+    IQR looks tight.
+
+    Penalties:
+      - std > 0.08  →  −25
+      - std > 0.05  →  −15
+      - books_used < 6  →  −10
+      - stalest_age_min > 60  →  −10
     """
     # Base from IQR
     if len(side_probs) < 2:
@@ -342,8 +349,16 @@ def _agreement_score(
         else:
             base = 40.0
 
+    # Std-deviation penalty (captures tail spread IQR may miss)
+    if len(side_probs) >= 2:
+        sd = stdev(side_probs)
+        if sd > 0.08:
+            base -= 25.0
+        elif sd > 0.05:
+            base -= 15.0
+
     # Penalties
-    if books_used < 5:
+    if books_used < 6:
         base -= 10.0
     if stalest_age_min > 60:
         base -= 10.0
