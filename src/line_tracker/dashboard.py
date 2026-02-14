@@ -741,13 +741,16 @@ def _detail_best_bet_section(game_lines):
                 f"**{top.consensus_prob * 100:.1f}%** | "
                 f"Breakeven: **{top.breakeven_prob * 100:.1f}%** | "
                 f"Edge: **{fmt_pct(top.edge_pct, sign=True)}** | "
-                f"EV: **{fmt_money(top.ev_per_100, sign=True)} per $100**"
+                f"EV: **{fmt_money(top.ev_per_100, sign=True).replace('$', '\\$')}"
+                f" per \\$100**"
             )
             st.markdown(
-                f"Market confidence: **{top.confidence}**",
+                f"Market confidence: **{top.confidence}** | "
+                f"Quality: **{top.quality_score}/100 ({top.quality_tier})**",
                 help=(
-                    "Measures sportsbook disagreement in implied "
-                    "probabilities, not certainty of outcome."
+                    "Confidence measures sportsbook disagreement. "
+                    "Quality is a composite score of edge, agreement, "
+                    "coverage, and data freshness."
                 ),
             )
 
@@ -758,23 +761,27 @@ def _detail_best_bet_section(game_lines):
             st.markdown("**Other +EV bets:**")
             for r in others:
                 ml = _best_bet_market_label(r)
+                ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
                 st.markdown(
                     f"- {r.selection} ({ml}) at "
                     f"{format_american(r.best_odds)} "
                     f"on {r.best_sportsbook} — "
                     f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
-                    f"EV: {fmt_money(r.ev_per_100, sign=True)} per $100"
+                    f"EV: {ev_str} per \\$100 — "
+                    f"Quality: {r.quality_score} ({r.quality_tier})"
                 )
     else:
         st.info("No bets meet your min edge threshold. Showing closest candidates:")
         for r in recs[:3]:
             ml = _best_bet_market_label(r)
+            ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
             st.markdown(
                 f"- {r.selection} ({ml}) at "
                 f"{format_american(r.best_odds)} "
                 f"on {r.best_sportsbook} — "
                 f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
-                f"EV: {fmt_money(r.ev_per_100, sign=True)} per $100"
+                f"EV: {ev_str} per \\$100 — "
+                f"Quality: {r.quality_score} ({r.quality_tier})"
             )
 
 
@@ -791,6 +798,7 @@ def _render_best_bet_why(rec) -> None:
                 f"{rec.books_used_count} / {rec.total_books_count} "
                 f"books{line_label}\n"
             )
+        ev_str = fmt_money(rec.ev_per_100, sign=True).replace("$", "\\$")
         st.markdown(
             f"{books_line}"
             f"- **Weighted consensus (vig-free):** "
@@ -806,8 +814,15 @@ def _render_best_bet_why(rec) -> None:
             f"- **Edge:** ({rec.consensus_prob * 100:.1f}% \u2212 "
             f"{rec.breakeven_prob * 100:.1f}%) = "
             f"{fmt_pct(rec.edge_pct, sign=True)}\n"
-            f"- **EV:** {fmt_money(rec.ev_per_100, sign=True)} per $100 "
-            f"({rec.ev * 100:+.1f}% per $1)"
+            f"- **EV:** {ev_str} per \\$100 "
+            f"({rec.ev * 100:+.1f}% per \\$1)\n"
+            f"- **Quality:** {rec.quality_score}/100 ({rec.quality_tier})"
+        )
+        st.caption(
+            f"Edge Score: {rec.edge_score:.0f} | "
+            f"Agreement: {rec.agreement_score:.0f} | "
+            f"Coverage: {rec.coverage_score:.0f} | "
+            f"Freshness: {rec.freshness_score:.0f}"
         )
 
 
