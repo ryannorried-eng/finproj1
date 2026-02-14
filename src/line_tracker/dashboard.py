@@ -27,6 +27,7 @@ from line_tracker.bet_slip import (
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
 from line_tracker.scraper import OddsClient
+from line_tracker.slate import build_daily_slate
 from line_tracker.storage import LineStore
 
 SPORTS = {
@@ -344,7 +345,7 @@ def _sidebar():
         # --- Page navigation ---
         st.radio(
             "Page",
-            ["Dashboard", "Best Lines to Shop"],
+            ["Dashboard", "Best Lines to Shop", "Daily Slate"],
             key="nav_page",
             horizontal=True,
         )
@@ -1733,6 +1734,245 @@ def _page_best_lines():
 
 
 # ---------------------------------------------------------------------------
+# PAGE 4: Daily Slate
+# ---------------------------------------------------------------------------
+
+def _page_daily_slate():
+    """Aggregated daily slate with tier-based recommendations."""
+    st.title("Daily Slate")
+    st.caption(
+        "Today's best bets across all events, ranked and tiered by "
+        "consensus edge and quality score."
+    )
+
+    lines = st.session_state.get("last_fetch")
+    if not lines:
+        st.info("No data loaded yet. Fetch odds from the Dashboard first.")
+        return
+
+    # --- Filters ---
+    fcols = st.columns(3)
+    with fcols[0]:
+        min_edge = st.slider(
+            "Min edge (%)",
+            min_value=0.0,
+            max_value=5.0,
+            value=0.5,
+            step=0.1,
+            key="slate_min_edge",
+        )
+    with fcols[1]:
+        min_quality = st.slider(
+            "Min quality",
+            min_value=0,
+            max_value=100,
+            value=65,
+            step=5,
+            key="slate_min_quality",
+        )
+    with fcols[2]:
+        hide_low = st.toggle(
+            "Hide low confidence",
+            value=True,
+            key="slate_hide_low",
+        )
+
+    # --- Build lines_by_event ---
+    lines_by_event: dict[str, list] = defaultdict(list)
+    for ln in lines:
+        lines_by_event[ln.event].append(ln)
+
+    filters = {
+        "min_edge": min_edge,
+        "min_quality": min_quality,
+        "hide_low_confidence": hide_low,
+        "max_per_event": 2,
+    }
+    slate = build_daily_slate(dict(lines_by_event), filters=filters)
+
+    tier1 = slate["tier1"]
+    tier2 = slate["tier2"]
+    avoid = slate["avoid"]
+
+    # Summary metrics
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Top Plays", len(tier1))
+    mc2.metric("More Plays", len(tier2))
+    mc3.metric("Stay Away", len(avoid))
+
+    st.divider()
+
+    # ── Tier 1: Top Plays (up to 3 cards) ─────────────────────────────────
+    st.subheader("Top Plays (Tier 1)")
+    if not tier1:
+        st.info("No top plays match your filters.")
+    else:
+        _render_slate_date_groups(tier1[:3], show_cards=True)
+
+    st.divider()
+
+    # ── Tier 2: More Plays (table, next 10) ───────────────────────────────
+    st.subheader("More Plays (Tier 2)")
+    if not tier2:
+        st.info("No additional plays match your filters.")
+    else:
+        _render_slate_table(tier2[:10])
+
+    st.divider()
+
+    # ── Avoid ─────────────────────────────────────────────────────────────
+    st.subheader("Stay Away")
+    if not avoid:
+        st.info("Nothing flagged to avoid.")
+    else:
+        for entry in avoid:
+            reasons = ", ".join(entry["avoid_reasons"])
+            market_label = _slate_market_label(entry)
+            ct = entry.get("commence_time")
+            time_str = f" \u00b7 {_format_start_time(ct)}" if ct else ""
+            st.markdown(
+                f"- **{entry['event']}** \u2014 "
+                f"{entry['selection']} ({market_label}){time_str} \u2014 "
+                f":red[{reasons}]"
+            )
+
+
+def _slate_market_label(entry: dict) -> str:
+    """Format market + line for a slate entry."""
+    market = entry["market"]
+    line = entry.get("line")
+    if market == "spread" and line is not None:
+        return f"Spread ({line:+.1f})"
+    if market == "total" and line is not None:
+        return f"Total ({line:.1f})"
+    return market.title()
+
+
+def _render_slate_date_groups(entries: list[dict], *, show_cards: bool) -> None:
+    """Render slate entries grouped by commence date."""
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    # Check if any entry has commence_time
+    has_dates = any(e.get("commence_time") is not None for e in entries)
+
+    if not has_dates:
+        # No grouping — render flat
+        if show_cards:
+            for entry in entries:
+                _render_slate_card(entry)
+        return
+
+    # Group by local date
+    groups: dict[date | None, list[dict]] = defaultdict(list)
+    for entry in entries:
+        ct = entry.get("commence_time")
+        if ct is not None:
+            local_date = ct.astimezone().date() if ct.tzinfo else ct.date()
+        else:
+            local_date = None
+        groups[local_date].append(entry)
+
+    dated_keys = sorted(k for k in groups if k is not None)
+    ordered_keys: list[date | None] = list(dated_keys)
+    if None in groups:
+        ordered_keys.append(None)
+
+    for group_date in ordered_keys:
+        if group_date is None:
+            label = "Time TBD"
+        elif group_date == today:
+            label = f"Today \u2014 {group_date.strftime('%a %b %-d')}"
+        elif group_date == tomorrow:
+            label = f"Tomorrow \u2014 {group_date.strftime('%a %b %-d')}"
+        else:
+            label = group_date.strftime("%a %b %-d")
+
+        st.markdown(f"**{label}**")
+
+        if show_cards:
+            for entry in groups[group_date]:
+                _render_slate_card(entry)
+
+
+def _render_slate_card(entry: dict) -> None:
+    """Render a single Tier-1 slate card with Add-to-slip."""
+    slip_book = _get_slip_book()
+    market_label = _slate_market_label(entry)
+    ct = entry.get("commence_time")
+    time_str = _format_start_time(ct) if ct else "TBD"
+
+    with st.container(border=True):
+        cols = st.columns([4, 2, 2, 1.5])
+        with cols[0]:
+            st.markdown(
+                f"**{entry['event']}**  \n"
+                f"{entry['selection']} ({market_label}) at "
+                f"{format_american(entry['best_odds'])} on "
+                f"**{entry['best_sportsbook']}**"
+            )
+            st.caption(f"Start: {time_str}")
+        with cols[1]:
+            st.metric("Edge", fmt_pct(entry["edge_pct"], sign=True))
+            st.caption(f"Quality: {entry['quality_score']}/100")
+        with cols[2]:
+            st.metric("Slate Score", f"{entry['slate_score']:.0f}")
+            st.caption(f"Confidence: {entry['confidence']}")
+        with cols[3]:
+            can_add = not slip_book or entry["best_sportsbook"] == slip_book
+            safe_key = entry["event_id"].replace(" ", "_")
+            if can_add:
+                if st.button(
+                    "\u2795 Slip",
+                    key=f"slate_add_{safe_key}_{entry['market']}",
+                    type="primary",
+                ):
+                    leg = {
+                        "sport": _sport_name(),
+                        "event_name": entry["event"],
+                        "sportsbook": entry["best_sportsbook"],
+                        "market": BET_TYPE_SHORT.get(entry["market"], entry["market"]),
+                        "selection": entry["selection"],
+                        "line": entry.get("line"),
+                        "odds": entry["best_odds"],
+                        "fetched_at": "",
+                    }
+                    _try_add_leg(leg)
+            elif slip_book:
+                st.caption(f"Locked to {slip_book}")
+
+            if st.button("View", key=f"slate_view_{safe_key}_{entry['market']}"):
+                st.session_state["page"] = "detail"
+                st.session_state["selected_game"] = entry["event"]
+                st.rerun()
+
+
+def _render_slate_table(entries: list[dict]) -> None:
+    """Render Tier-2 slate entries as a table grouped by date."""
+    rows = []
+    for entry in entries:
+        ct = entry.get("commence_time")
+        time_str = _format_start_time(ct) if ct else "TBD"
+        market_label = _slate_market_label(entry)
+        rows.append({
+            "Event": entry["event"],
+            "Start": time_str,
+            "Pick": f"{entry['selection']} ({market_label})",
+            "Odds": format_american(entry["best_odds"]),
+            "Book": entry["best_sportsbook"],
+            "Edge": fmt_pct(entry["edge_pct"], sign=True),
+            "Quality": entry["quality_score"],
+            "Score": f"{entry['slate_score']:.0f}",
+            "Confidence": entry["confidence"],
+        })
+    st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bet History dialog
 # ---------------------------------------------------------------------------
 
@@ -1953,6 +2193,8 @@ def main():
         nav = st.session_state.get("nav_page", "Dashboard")
         if nav == "Best Lines to Shop":
             _page_best_lines()
+        elif nav == "Daily Slate":
+            _page_daily_slate()
         else:
             _page_dashboard()
 
