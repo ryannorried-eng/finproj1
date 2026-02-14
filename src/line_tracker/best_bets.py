@@ -351,9 +351,21 @@ def _agreement_score(
     return max(0.0, min(base, 100.0))
 
 
+_THIN_MARKET_BOOKS = 5  # markets with fewer total books are "thin"
+_THIN_MARKET_COVERAGE_CAP = 70.0  # max coverage_score for thin markets
+
+
 def _coverage_score(books_used: int, books_total: int) -> float:
-    """Score market coverage (books_used / books_total) on 0–100."""
-    return max(0.0, min(books_used / max(books_total, 1) * 100.0, 100.0))
+    """Score market coverage (books_used / books_total) on 0–100.
+
+    When *books_total* < 5 the market is considered thin and the score
+    is capped at 70 — even perfect used/total ratio shouldn't claim
+    full coverage when the sample is small.
+    """
+    raw = max(0.0, min(books_used / max(books_total, 1) * 100.0, 100.0))
+    if books_total < _THIN_MARKET_BOOKS:
+        raw = min(raw, _THIN_MARKET_COVERAGE_CAP)
+    return raw
 
 
 def _freshness_score(freshest_age_min: float, stalest_age_min: float) -> float:
@@ -441,6 +453,12 @@ def _build_rec(
     if market_unstable:
         _TIER_DOWNGRADE = {"Elite": "Strong", "Strong": "Moderate", "Moderate": "Thin"}
         q_tier = _TIER_DOWNGRADE.get(q_tier, q_tier)
+
+    # Thin book usage: fewer than 4 books used → cap score and tier
+    if books_used_count < 4:
+        q_score = min(q_score, 55)
+        if q_tier in ("Elite", "Strong"):
+            q_tier = "Moderate"
 
     return BetRecommendation(
         market=market,

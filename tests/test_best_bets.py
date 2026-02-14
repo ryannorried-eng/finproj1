@@ -1182,6 +1182,21 @@ class TestCoverageScore:
     def test_partial_coverage(self):
         assert abs(_coverage_score(2, 5) - 40.0) < 0.01
 
+    def test_thin_market_4_of_4_capped_at_70(self):
+        """4 total books with 4 used should NOT produce coverage_score 100."""
+        score = _coverage_score(4, 4)
+        assert score <= 70.0
+
+    def test_thin_market_3_of_3_capped_at_70(self):
+        """3/3 books should also be capped."""
+        score = _coverage_score(3, 3)
+        assert score <= 70.0
+
+    def test_5_total_books_not_capped(self):
+        """5+ total books should not be capped."""
+        assert _coverage_score(5, 5) == 100.0
+        assert _coverage_score(4, 5) == 80.0
+
 
 class TestFreshnessScore:
     def test_very_fresh(self):
@@ -1311,8 +1326,8 @@ class TestQualityScoreIntegration:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            if r.market_unstable:
-                continue  # tier may be downgraded
+            if r.market_unstable or r.books_used_count < 4:
+                continue  # tier may be downgraded by caps
             if r.quality_score >= 85:
                 assert r.quality_tier == "Elite"
             elif r.quality_score >= 70:
@@ -1321,6 +1336,60 @@ class TestQualityScoreIntegration:
                 assert r.quality_tier == "Moderate"
             else:
                 assert r.quality_tier == "Thin"
+
+    def test_thin_market_4_books_coverage_not_100(self):
+        """4 total books with 4 used should NOT produce coverage_score 100."""
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh_ts = datetime(2025, 6, 1, 11, 55)
+        lines = [
+            _ml_line_ts("DraftKings", -150, 130, fresh_ts),
+            _ml_line_ts("FanDuel", -150, 130, fresh_ts),
+            _ml_line_ts("BetMGM", -148, 128, fresh_ts),
+            _ml_line_ts("Caesars", -152, 132, fresh_ts),
+        ]
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        for r in recs:
+            assert r.coverage_score <= 70.0, (
+                f"coverage_score={r.coverage_score} with only 4 books"
+            )
+
+    def test_books_used_lt_4_prevents_strong_or_elite(self):
+        """books_used < 4 should prevent Strong/Elite tier."""
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh_ts = datetime(2025, 6, 1, 11, 55)
+        # 3 books → all used (3 < 4) → tier capped at Moderate
+        lines = [
+            _ml_line_ts("DraftKings", -150, 130, fresh_ts),
+            _ml_line_ts("FanDuel", -150, 130, fresh_ts),
+            _ml_line_ts("BetMGM", -148, 128, fresh_ts),
+        ]
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        for r in recs:
+            assert r.quality_tier not in ("Elite", "Strong"), (
+                f"tier={r.quality_tier} with only {r.books_used_count} books used"
+            )
+            assert r.quality_score <= 55, (
+                f"quality_score={r.quality_score} with only {r.books_used_count} books used"
+            )
+
+    def test_books_used_ge_4_allows_strong(self):
+        """With 5+ books used, Strong/Elite tiers should still be possible."""
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh_ts = datetime(2025, 6, 1, 11, 55)
+        # 6 books, tight consensus, generous edge → should reach Strong+
+        lines = [
+            _ml_line_ts("Pinnacle", -150, 130, fresh_ts),
+            _ml_line_ts("DraftKings", -150, 130, fresh_ts),
+            _ml_line_ts("FanDuel", -150, 130, fresh_ts),
+            _ml_line_ts("BetMGM", -150, 130, fresh_ts),
+            _ml_line_ts("Caesars", -150, 130, fresh_ts),
+            _ml_line_ts("BetOnline", -120, 100, fresh_ts),  # generous edge
+        ]
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        best = recs[0]
+        assert best.quality_tier in ("Strong", "Elite"), (
+            f"tier={best.quality_tier} should allow Strong/Elite with {best.books_used_count} books"
+        )
 
 
 # ---------------------------------------------------------------------------
