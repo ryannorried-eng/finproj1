@@ -119,6 +119,12 @@ class BetRecommendation:
     oldest_update_age_min: float = 0.0  # minutes since oldest book update
     books_used_count: int = 0  # books in the chosen line group
     total_books_count: int = 0  # total priced books for this market
+    quality_score: int = 0  # composite 0–100 bet quality score
+    quality_tier: str = ""  # "Elite", "Strong", "Moderate", or "Thin"
+    edge_score: float = 0.0  # 0–100 subscore for edge size
+    agreement_score: float = 0.0  # 0–100 subscore for book agreement
+    coverage_score: float = 0.0  # 0–100 subscore for market coverage
+    freshness_score: float = 0.0  # 0–100 subscore for data freshness
 
 
 def _remove_vig(odds_a: float, odds_b: float) -> tuple[float, float]:
@@ -168,6 +174,115 @@ def _confidence_label(probs: list[float]) -> str:
     return "Low"
 
 
+# ---------------------------------------------------------------------------
+# Bet Quality Score — composite 0–100 score with subscores
+# ---------------------------------------------------------------------------
+
+_EDGE_BREAKPOINTS: list[tuple[float, float]] = [
+    (0.0, 0),
+    (0.5, 35),
+    (1.0, 55),
+    (2.0, 75),
+    (3.0, 85),
+    (5.0, 95),
+    (7.0, 100),
+]
+
+
+def _edge_score(edge_pct: float) -> float:
+    """Map *edge_pct* (percentage points) to a 0–100 score.
+
+    Uses piecewise-linear interpolation through ``_EDGE_BREAKPOINTS``.
+    Values beyond 7 % are capped at 100.
+    """
+    if edge_pct <= 0:
+        return 0.0
+    for i in range(len(_EDGE_BREAKPOINTS) - 1):
+        x0, y0 = _EDGE_BREAKPOINTS[i]
+        x1, y1 = _EDGE_BREAKPOINTS[i + 1]
+        if edge_pct <= x1:
+            t = (edge_pct - x0) / (x1 - x0)
+            return y0 + t * (y1 - y0)
+    return 100.0
+
+
+def _agreement_score(
+    side_probs: list[float],
+    books_used: int,
+    stalest_age_min: float,
+) -> float:
+    """Score sportsbook agreement on a 0–100 scale.
+
+    Base score from IQR dispersion, with penalties for thin coverage
+    and stale data.
+    """
+    # Base from IQR
+    if len(side_probs) < 2:
+        base = 40.0
+    else:
+        q1, _, q3 = quantiles(side_probs, n=4)
+        iqr = q3 - q1
+        if iqr <= 0.03:
+            base = 90.0
+        elif iqr <= 0.06:
+            base = 70.0
+        else:
+            base = 40.0
+
+    # Penalties
+    if books_used < 5:
+        base -= 10.0
+    if stalest_age_min > 60:
+        base -= 10.0
+
+    return max(0.0, min(base, 100.0))
+
+
+def _coverage_score(books_used: int, books_total: int) -> float:
+    """Score market coverage (books_used / books_total) on 0–100."""
+    return max(0.0, min(books_used / max(books_total, 1) * 100.0, 100.0))
+
+
+def _freshness_score(freshest_age_min: float, stalest_age_min: float) -> float:
+    """Score data freshness on 0–100 based on age of lines."""
+    # Primary driver is the stalest line
+    if stalest_age_min <= 10:
+        return 95.0
+    if stalest_age_min <= 30:
+        return 75.0
+    if stalest_age_min <= 60:
+        return 60.0
+    return 40.0
+
+
+_QW_EDGE = 0.45
+_QW_AGREEMENT = 0.25
+_QW_COVERAGE = 0.20
+_QW_FRESHNESS = 0.10
+
+
+def _quality_score(
+    edge: float,
+    agreement: float,
+    coverage: float,
+    freshness: float,
+) -> int:
+    """Combine subscores into a single 0–100 integer quality score."""
+    raw = _QW_EDGE * edge + _QW_AGREEMENT * agreement + _QW_COVERAGE * coverage + _QW_FRESHNESS * freshness
+    return max(0, min(round(raw), 100))
+
+
+def _quality_tier(score: int) -> str:
+    """Map a 0–100 quality score to a human-readable tier label."""
+    if score >= 85:
+        return "Elite"
+    if score >= 70:
+        return "Strong"
+    if score >= 55:
+        return "Moderate"
+    return "Thin"
+
+
 def _build_rec(
     *,
     market: str,
@@ -188,6 +303,20 @@ def _build_rec(
     be_prob = breakeven_prob_from_american(best_odds)
     ev = ev_per_dollar(consensus_prob, best_odds)
     edge = consensus_prob - be_prob
+    edge_pct_val = round(edge * 100, 2)
+
+    # Quality subscores
+    e_score = round(_edge_score(edge_pct_val), 1)
+    a_score = round(
+        _agreement_score(side_probs, books_used_count, oldest_update_age_min), 1
+    )
+    c_score = round(_coverage_score(books_used_count, total_books_count), 1)
+    f_score = round(
+        _freshness_score(newest_update_age_min, oldest_update_age_min), 1
+    )
+    q_score = _quality_score(e_score, a_score, c_score, f_score)
+    q_tier = _quality_tier(q_score)
+
     return BetRecommendation(
         market=market,
         selection=selection,
@@ -198,7 +327,7 @@ def _build_rec(
         best_odds=best_odds,
         breakeven_prob=round(be_prob, 4),
         ev=round(ev, 4),
-        edge_pct=round(edge * 100, 2),
+        edge_pct=edge_pct_val,
         ev_per_100=round(ev * 100, 2),
         confidence=_confidence_label(side_probs),
         unweighted_consensus_prob=round(unweighted_consensus_prob, 4),
@@ -206,6 +335,12 @@ def _build_rec(
         oldest_update_age_min=round(oldest_update_age_min, 1),
         books_used_count=books_used_count,
         total_books_count=total_books_count,
+        quality_score=q_score,
+        quality_tier=q_tier,
+        edge_score=e_score,
+        agreement_score=a_score,
+        coverage_score=c_score,
+        freshness_score=f_score,
     )
 
 

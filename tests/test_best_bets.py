@@ -6,11 +6,17 @@ from line_tracker.best_bets import (
     BOOK_WEIGHTS,
     RECENCY_HALF_LIFE_MIN,
     BetRecommendation,
+    _agreement_score,
     _best_line_group,
     _compute_ev,
     _confidence_label,
+    _coverage_score,
+    _edge_score,
+    _freshness_score,
     _line_weight,
     _mode_value,
+    _quality_score,
+    _quality_tier,
     _recency_multiplier,
     _remove_vig,
     _weight_for_book,
@@ -981,3 +987,226 @@ class TestLineGroupIntegration:
         for r in spread_recs:
             assert r.books_used_count == 3
             assert r.total_books_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Quality score helpers — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeScore:
+    def test_zero_edge(self):
+        assert _edge_score(0.0) == 0.0
+
+    def test_negative_edge(self):
+        assert _edge_score(-1.0) == 0.0
+
+    def test_half_percent(self):
+        assert abs(_edge_score(0.5) - 35.0) < 0.01
+
+    def test_one_percent(self):
+        assert abs(_edge_score(1.0) - 55.0) < 0.01
+
+    def test_two_percent(self):
+        assert abs(_edge_score(2.0) - 75.0) < 0.01
+
+    def test_three_percent(self):
+        assert abs(_edge_score(3.0) - 85.0) < 0.01
+
+    def test_five_percent(self):
+        assert abs(_edge_score(5.0) - 95.0) < 0.01
+
+    def test_above_seven_capped_at_100(self):
+        assert _edge_score(10.0) == 100.0
+
+    def test_interpolation_between_breakpoints(self):
+        # 1.5% is midway between 1% (55) and 2% (75) → 65
+        assert abs(_edge_score(1.5) - 65.0) < 0.01
+
+
+class TestAgreementScore:
+    def test_tight_many_books_fresh(self):
+        # IQR <= 0.03 → base 90, 5+ books → no penalty, fresh → no penalty
+        probs = [0.550, 0.552, 0.548, 0.551, 0.549]
+        assert _agreement_score(probs, 5, stalest_age_min=10.0) == 90.0
+
+    def test_tight_few_books(self):
+        # IQR <= 0.03 → base 90, books < 5 → -10
+        probs = [0.550, 0.552, 0.548]
+        assert _agreement_score(probs, 3, stalest_age_min=10.0) == 80.0
+
+    def test_tight_stale(self):
+        # IQR <= 0.03 → base 90, 5+ books, stalest > 60 → -10
+        probs = [0.550, 0.552, 0.548, 0.551, 0.549]
+        assert _agreement_score(probs, 5, stalest_age_min=90.0) == 80.0
+
+    def test_moderate_dispersion(self):
+        # IQR 0.03–0.06 → base 70, books < 5 → -10
+        probs = [0.48, 0.50, 0.52, 0.54]
+        assert _agreement_score(probs, 4, stalest_age_min=10.0) == 60.0
+
+    def test_wide_dispersion(self):
+        # IQR > 0.06 → base 40, books < 5 → -10
+        probs = [0.40, 0.55, 0.60, 0.45]
+        assert _agreement_score(probs, 3, stalest_age_min=10.0) == 30.0
+
+    def test_single_book(self):
+        # < 2 probs → base 40, books < 5 → -10
+        assert _agreement_score([0.55], 1, stalest_age_min=10.0) == 30.0
+
+    def test_clamp_floor(self):
+        # Wide dispersion + few books + stale → 40 - 10 - 10 = 20
+        probs = [0.40, 0.55, 0.60, 0.45]
+        assert _agreement_score(probs, 3, stalest_age_min=90.0) == 20.0
+
+
+class TestCoverageScore:
+    def test_full_coverage(self):
+        assert _coverage_score(5, 5) == 100.0
+
+    def test_half_coverage(self):
+        assert abs(_coverage_score(3, 6) - 50.0) < 0.01
+
+    def test_zero_total_safe(self):
+        assert _coverage_score(0, 0) == 0.0
+
+    def test_partial_coverage(self):
+        assert abs(_coverage_score(2, 5) - 40.0) < 0.01
+
+
+class TestFreshnessScore:
+    def test_very_fresh(self):
+        assert _freshness_score(5.0, 8.0) == 95.0
+
+    def test_moderate_age(self):
+        assert _freshness_score(5.0, 25.0) == 75.0
+
+    def test_hour_old(self):
+        assert _freshness_score(10.0, 55.0) == 60.0
+
+    def test_stale(self):
+        assert _freshness_score(30.0, 90.0) == 40.0
+
+
+class TestQualityScoreComposite:
+    def test_perfect_scores(self):
+        # All subscores at 100
+        assert _quality_score(100, 100, 100, 100) == 100
+
+    def test_zero_scores(self):
+        assert _quality_score(0, 0, 0, 0) == 0
+
+    def test_weights_sum_to_one(self):
+        # 0.45 + 0.25 + 0.20 + 0.10 = 1.0
+        # All subscores at 80 → quality = 80
+        assert _quality_score(80, 80, 80, 80) == 80
+
+
+class TestQualityTier:
+    def test_elite(self):
+        assert _quality_tier(85) == "Elite"
+        assert _quality_tier(100) == "Elite"
+
+    def test_strong(self):
+        assert _quality_tier(70) == "Strong"
+        assert _quality_tier(84) == "Strong"
+
+    def test_moderate(self):
+        assert _quality_tier(55) == "Moderate"
+        assert _quality_tier(69) == "Moderate"
+
+    def test_thin(self):
+        assert _quality_tier(54) == "Thin"
+        assert _quality_tier(0) == "Thin"
+
+
+# ---------------------------------------------------------------------------
+# Quality score integration — end-to-end via recommend_best_bets
+# ---------------------------------------------------------------------------
+
+
+class TestQualityScoreIntegration:
+    def test_high_edge_many_books_low_dispersion_quality_ge_80(self):
+        """High edge + many agreeing books + low dispersion → quality >= 80."""
+        now = datetime(2025, 6, 1, 12, 0)
+        fresh_ts = datetime(2025, 6, 1, 11, 55)  # 5 min ago
+
+        # 5 books agree at -150/+130 (tight consensus home ≈ 0.58).
+        # One generous book at -120/+100 provides a big edge for the home bet:
+        # best home odds = -120 (breakeven ≈ 0.545) vs consensus ≈ 0.58 → ~3.4% edge.
+        # 6 books, tight IQR, fresh data, full coverage → high quality.
+        lines = [
+            _ml_line_ts("Pinnacle", -150, 130, fresh_ts),
+            _ml_line_ts("DraftKings", -150, 130, fresh_ts),
+            _ml_line_ts("FanDuel", -150, 130, fresh_ts),
+            _ml_line_ts("BetMGM", -150, 130, fresh_ts),
+            _ml_line_ts("Caesars", -150, 130, fresh_ts),
+            _ml_line_ts("BetOnline", -120, 100, fresh_ts),  # generous home odds
+        ]
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        assert len(recs) >= 1
+
+        # All recs should have quality fields populated
+        for r in recs:
+            assert r.quality_score >= 0
+            assert r.quality_tier in ("Elite", "Strong", "Moderate", "Thin")
+            assert 0 <= r.edge_score <= 100
+            assert 0 <= r.agreement_score <= 100
+            assert 0 <= r.coverage_score <= 100
+            assert 0 <= r.freshness_score <= 100
+
+        # The highest-EV rec (home side with ~3.4% edge) should score >= 80.
+        best_rec = recs[0]
+        assert best_rec.quality_score >= 80
+
+    def test_low_edge_few_books_stale_quality_le_50(self):
+        """Negative edge + few books + stale data → quality <= 50."""
+        now = datetime(2025, 6, 1, 12, 0)
+        stale_ts = datetime(2025, 6, 1, 10, 0)  # 2 hours ago
+
+        # Two books with identical vigged odds → both sides have negative edge
+        # (consensus < breakeven due to vig).  Only 2 books, stale timestamps.
+        lines = [
+            _ml_line_ts("DraftKings", -150, 130, stale_ts),
+            _ml_line_ts("FanDuel", -150, 130, stale_ts),
+        ]
+        recs = recommend_best_bets(lines, top_n=10, now=now)
+        assert len(recs) >= 1
+
+        for r in recs:
+            assert r.quality_score <= 50
+
+    def test_quality_fields_always_present(self):
+        """Every recommendation should have quality fields populated."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+            _spread_line("A", -3.5, 3.5, -110, -110),
+            _spread_line("B", -3.5, 3.5, -105, -115),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert isinstance(r.quality_score, int)
+            assert r.quality_tier in ("Elite", "Strong", "Moderate", "Thin")
+            assert isinstance(r.edge_score, float)
+            assert isinstance(r.agreement_score, float)
+            assert isinstance(r.coverage_score, float)
+            assert isinstance(r.freshness_score, float)
+
+    def test_quality_tier_matches_score(self):
+        """Quality tier should be consistent with quality score."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+            _ml_line("C", -160, 140),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            if r.quality_score >= 85:
+                assert r.quality_tier == "Elite"
+            elif r.quality_score >= 70:
+                assert r.quality_tier == "Strong"
+            elif r.quality_score >= 55:
+                assert r.quality_tier == "Moderate"
+            else:
+                assert r.quality_tier == "Thin"
