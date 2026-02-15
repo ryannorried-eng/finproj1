@@ -442,6 +442,9 @@ def build_daily_slate(
                 "books_used": rec.books_used_count,
                 "updated_age_min": rec.newest_update_age_min,
                 "oldest_update_age_min": rec.oldest_update_age_min,
+                "kelly_base": rec.kelly_base,
+                "kelly_suggested": rec.kelly_suggested,
+                "sizing_note": rec.sizing_note,
             }
 
             # Classify — runs for EVERY rec, no pre-filtering

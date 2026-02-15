@@ -179,6 +179,29 @@ def fmt_odds(x: float) -> str:
     return format_american(x)
 
 
+def _bankroll() -> float:
+    """Return the user's bankroll setting, or 0 if unset."""
+    return st.session_state.get("bankroll", 0.0)
+
+
+def _kelly_line(rec, prefix: str = "Sizing") -> str:
+    """Build a markdown string showing Kelly sizing info for *rec*.
+
+    If a bankroll is set, also shows the dollar stake.
+    """
+    if rec.kelly_suggested <= 0:
+        return ""
+    pct = rec.kelly_suggested * 100
+    br = _bankroll()
+    if br > 0:
+        stake = br * rec.kelly_suggested
+        return (
+            f"{prefix}: **{pct:.1f}%** "
+            f"({fmt_money(stake)}) — {rec.sizing_note}"
+        )
+    return f"{prefix}: **{pct:.1f}%** — {rec.sizing_note}"
+
+
 def _get_slip_book() -> str | None:
     """Return the currently locked sportsbook, or None."""
     return st.session_state.get("slip_book")
@@ -388,6 +411,18 @@ def _sidebar():
             list(SPORTS.keys()),
             key="sport_name",
             help="Pick the league you want to track.",
+        )
+
+        st.number_input(
+            "Bankroll ($)",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            key="bankroll",
+            help=(
+                "Enter your total bankroll to see Kelly-based "
+                "suggested stake amounts alongside recommendations."
+            ),
         )
 
         st.divider()
@@ -791,6 +826,10 @@ def _detail_best_bet_section(game_lines):
                     "coverage, and data freshness."
                 ),
             )
+
+            kelly_str = _kelly_line(top)
+            if kelly_str:
+                st.markdown(kelly_str)
 
             _render_best_bet_why(top)
 
@@ -2154,6 +2193,16 @@ def _render_slate_card(entry: dict) -> None:
         with cols[2]:
             st.metric("Slate Score", f"{entry['slate_score']:.0f}")
             st.caption(f"Confidence: {entry['confidence']}")
+            k_sugg = entry.get("kelly_suggested", 0)
+            if k_sugg and k_sugg > 0:
+                br = _bankroll()
+                if br > 0:
+                    st.caption(
+                        f"Size: {k_sugg * 100:.1f}% "
+                        f"({fmt_money(br * k_sugg)})"
+                    )
+                else:
+                    st.caption(f"Size: {k_sugg * 100:.1f}%")
         with cols[3]:
             can_add = not slip_book or entry["best_sportsbook"] == slip_book
             safe_key = entry["event_id"].replace(" ", "_")
@@ -2191,6 +2240,14 @@ def _render_slate_table(entries: list[dict]) -> None:
         ct = entry.get("commence_time")
         time_str = _format_start_time(ct) if ct else "TBD"
         market_label = _slate_market_label(entry)
+        k_sugg = entry.get("kelly_suggested", 0)
+        br = _bankroll()
+        if k_sugg and k_sugg > 0 and br > 0:
+            sizing_str = f"{k_sugg * 100:.1f}% ({fmt_money(br * k_sugg)})"
+        elif k_sugg and k_sugg > 0:
+            sizing_str = f"{k_sugg * 100:.1f}%"
+        else:
+            sizing_str = ""
         rows.append({
             "Event": entry["event"],
             "Start": time_str,
@@ -2201,6 +2258,7 @@ def _render_slate_table(entries: list[dict]) -> None:
             "Quality": entry["quality_score"],
             "Score": f"{entry['slate_score']:.0f}",
             "Confidence": entry["confidence"],
+            "Sizing": sizing_str,
         })
     st.dataframe(
         pd.DataFrame(rows),

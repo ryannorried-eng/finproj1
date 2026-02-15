@@ -40,6 +40,67 @@ _DEFAULT_WEIGHT = 1.0
 # Tier downgrade map when a market is flagged as unstable.
 _TIER_DOWNGRADE = {"Elite": "Strong", "Strong": "Moderate", "Moderate": "Thin"}
 
+# ---------------------------------------------------------------------------
+# Kelly criterion helpers
+# ---------------------------------------------------------------------------
+_KELLY_CAP = 0.25  # never suggest more than 25% of bankroll
+
+_CONFIDENCE_MULTIPLIER: dict[str, float] = {
+    "High": 1.0,
+    "Medium": 0.5,
+    "Low": 0.25,
+}
+
+
+def kelly_fraction(
+    p: float,
+    decimal_odds: float,
+    cap: float = _KELLY_CAP,
+) -> float:
+    """Compute the Kelly fraction: (p * dec - 1) / (dec - 1), clipped to [0, cap].
+
+    Parameters
+    ----------
+    p : float
+        Estimated true win probability (0–1).
+    decimal_odds : float
+        Decimal odds offered by the sportsbook (must be > 1).
+    cap : float
+        Maximum fraction (default 0.25).
+
+    Returns 0.0 when EV is non-positive or odds are invalid.
+    """
+    if decimal_odds <= 1.0 or p <= 0.0:
+        return 0.0
+    raw = (p * decimal_odds - 1.0) / (decimal_odds - 1.0)
+    return min(max(raw, 0.0), cap)
+
+
+def kelly_suggested(
+    p: float,
+    decimal_odds: float,
+    confidence: str,
+    cap: float = _KELLY_CAP,
+) -> float:
+    """Kelly fraction scaled by confidence multiplier."""
+    base = kelly_fraction(p, decimal_odds, cap)
+    mult = _CONFIDENCE_MULTIPLIER.get(confidence, 0.25)
+    return round(base * mult, 6)
+
+
+def _sizing_note(frac: float) -> str:
+    """Human-readable note for the suggested fraction."""
+    if frac <= 0:
+        return "No edge — skip"
+    pct = frac * 100
+    if pct < 1:
+        return f"{pct:.2f}% — tiny edge"
+    if pct < 3:
+        return f"{pct:.1f}% — small"
+    if pct < 8:
+        return f"{pct:.1f}% — moderate"
+    return f"{pct:.1f}% — strong"
+
 
 def _weight_for_book(sportsbook: str) -> float:
     """Return the weight for a sportsbook, falling back to the default."""
@@ -199,6 +260,9 @@ class BetRecommendation:
     market_volatility_sigma: float = 0.0  # std dev of devigged probs
     robust_sigma: float = 0.0  # IQR / 1.349
     edge_z: float = 0.0  # edge / max(robust_sigma, 0.01)
+    kelly_base: float = 0.0  # raw Kelly fraction (capped at 25%)
+    kelly_suggested: float = 0.0  # Kelly × confidence multiplier
+    sizing_note: str = ""  # human-readable sizing label
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +614,12 @@ def _build_rec(
     if books_used_count < 4:
         q_score = min(q_score, 55)
 
+    # Kelly sizing
+    dec_odds = american_to_decimal(best_odds)
+    k_base = kelly_fraction(consensus_prob, dec_odds)
+    k_sugg = kelly_suggested(consensus_prob, dec_odds, confidence)
+    s_note = _sizing_note(k_sugg)
+
     return BetRecommendation(
         market=market,
         selection=selection,
@@ -581,6 +651,9 @@ def _build_rec(
         market_volatility_sigma=vol_sigma,
         robust_sigma=r_sigma,
         edge_z=ez,
+        kelly_base=round(k_base, 6),
+        kelly_suggested=round(k_sugg, 6),
+        sizing_note=s_note,
     )
 
 
