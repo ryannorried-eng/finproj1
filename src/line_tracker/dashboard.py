@@ -2182,15 +2182,20 @@ def _page_daily_slate():
 
 
 def _render_stay_away_entry(entry: dict) -> None:
-    """Render a single Stay Away entry."""
+    """Render a single Stay Away entry with risk score and reasons."""
     market_label = _slate_market_label(entry)
     ct = entry.get("commence_time")
     time_str = f" \u00b7 {_format_start_time(ct)}" if ct else ""
+    score = entry.get("avoid_score", 0.0)
     with st.container(border=True):
-        st.markdown(
-            f"**{entry['event']}** \u2014 "
-            f"{entry['selection']} ({market_label}){time_str}"
-        )
+        hcol, scol = st.columns([5, 1])
+        with hcol:
+            st.markdown(
+                f"**{entry['event']}** \u2014 "
+                f"{entry['selection']} ({market_label}){time_str}"
+            )
+        with scol:
+            st.metric("Risk", f"{score:.0f}")
         for reason in entry["avoid_reasons"]:
             st.markdown(f"- :red[{reason}]")
 

@@ -7,7 +7,8 @@ import statistics
 from collections import Counter
 
 from line_tracker.best_bets import recommend_best_bets
-from line_tracker.models import BettingLine
+from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
+from line_tracker.models import BettingLine, BetType
 
 # ── tier thresholds ────────────────────────────────────────────────
 _TIER1_BASE_EDGE = 3.0
@@ -19,6 +20,12 @@ _STALE_THRESHOLD_MIN = 120.0
 _EDGE_OUTLIER_THRESHOLD = 4.0
 _STAY_AWAY_LIMIT = 15
 
+# ── market-quality avoid thresholds ───────────────────────────────────
+_AVOID_HOLD_MAX = 7.0  # median book hold% above which market is suspect
+_AVOID_NOISE_SIGMA_MIN = 0.05  # volatility sigma for "noisy" flag
+_AVOID_NOISE_EDGE_MAX = 2.0  # edge% below which noise matters
+_AVOID_DIVERGENCE_MIN = 0.04  # sharp-retail divergence threshold
+
 # ── relaxed Tier 2 display thresholds (used when strict mode OFF) ─────
 _RELAXED_TIER2_EDGE = 0.5
 _RELAXED_TIER2_EDGE_Z_MIN = 0.75
@@ -27,6 +34,66 @@ _RELAXED_TIER2_EDGE_Z_MIN = 0.75
 def _slate_score(quality_score: float, edge_pct: float) -> float:
     """0.6 * quality_score + 0.4 * min(edge_pct, 5) * 20"""
     return 0.6 * quality_score + 0.4 * min(edge_pct, 5) * 20
+
+
+# ── market-quality avoid flags ─────────────────────────────────────
+
+
+def _add_market_quality_flags(reasons: list[str], entry: dict) -> None:
+    """Append market-quality avoid flags to *reasons* (mutates in place)."""
+    hold = entry.get("market_hold_median", 0.0)
+    sigma = entry.get("market_volatility_sigma", 0.0)
+    edge = entry.get("edge_pct", 0.0)
+    div = entry.get("divergence")
+
+    if hold > _AVOID_HOLD_MAX:
+        reasons.append(
+            f"High market hold ({hold:.1f}% > {_AVOID_HOLD_MAX:.0f}%)"
+        )
+    if sigma > _AVOID_NOISE_SIGMA_MIN and edge < _AVOID_NOISE_EDGE_MAX:
+        reasons.append(
+            f"Noisy market (\u03c3={sigma:.4f}, edge only {edge:.1f}%)"
+        )
+    if div is not None and div > _AVOID_DIVERGENCE_MIN:
+        reasons.append(
+            f"Sharp-retail divergence ({div:.4f} > {_AVOID_DIVERGENCE_MIN})"
+        )
+
+
+def _avoid_score(entry: dict) -> float:
+    """Composite badness score — higher means more reasons to avoid."""
+    score = 0.0
+
+    conf = entry.get("confidence", "")
+    if conf == "Low":
+        score += 30.0
+    elif conf not in ("High", "Medium"):
+        score += 20.0
+
+    qt = entry.get("quality_tier", "")
+    if qt == "Thin":
+        score += 25.0
+    elif qt not in ("Elite", "Strong", "Moderate"):
+        score += 15.0
+
+    edge_z = entry.get("edge_z", 0.0)
+    if edge_z and edge_z < 1.0:
+        score += max(0.0, 20.0 * (1.0 - edge_z))
+
+    hold = entry.get("market_hold_median", 0.0)
+    if hold > _AVOID_HOLD_MAX:
+        score += 15.0
+
+    sigma = entry.get("market_volatility_sigma", 0.0)
+    edge = entry.get("edge_pct", 0.0)
+    if sigma > _AVOID_NOISE_SIGMA_MIN and edge < _AVOID_NOISE_EDGE_MAX:
+        score += 20.0
+
+    div = entry.get("divergence")
+    if div is not None and div > _AVOID_DIVERGENCE_MIN:
+        score += 15.0
+
+    return round(score, 2)
 
 
 # ── classification ─────────────────────────────────────────────────
@@ -79,6 +146,7 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         hard_reasons.append("Edge outlier with low confidence (possible bad data)")
 
     if hard_reasons:
+        _add_market_quality_flags(hard_reasons, entry)
         return {
             "tier": "avoid",
             "reasons": hard_reasons,
@@ -137,6 +205,9 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
             f"given volatility σ={sigma:.3f}"
         )
 
+    # Market-quality flags (supplementary context)
+    _add_market_quality_flags(reasons, entry)
+
     if not reasons:
         reasons.append("Does not meet Tier 2 criteria")
 
@@ -147,9 +218,14 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
 
 
 def _stay_away_sort_key(entry: dict) -> tuple:
-    """Composite key: worst entries sort first (ascending)."""
+    """Composite key: worst entries sort first (ascending).
+
+    Primary: highest avoid_score first (negated so ascending = worst).
+    Secondary tiebreakers: confidence, edge_z, sigma, quality_score.
+    """
     conf_order = {"Low": 0, "Medium": 1, "High": 2}
     return (
+        -_avoid_score(entry),
         conf_order.get(entry.get("confidence", ""), 1),
         entry.get("edge_z", 0.0),
         -entry.get("market_volatility_sigma", 0.0),
@@ -415,6 +491,14 @@ def build_daily_slate(
 
         top_recs = recs[: max(1, max_per_event)]
 
+        # Pre-compute sharp-retail divergence per market for this event
+        _div_cache: dict[str, float | None] = {}
+        for bt in BetType:
+            mkt_lines = [ln for ln in lines if ln.bet_type == bt]
+            if len(mkt_lines) >= 2:
+                div_info = _sharp_retail_div(mkt_lines)
+                _div_cache[bt.value] = div_info.get("divergence")
+
         sample_line = lines[0]
         event_name = sample_line.event
         commence_time = sample_line.commence_time
@@ -442,6 +526,8 @@ def build_daily_slate(
                 "books_used": rec.books_used_count,
                 "updated_age_min": rec.newest_update_age_min,
                 "oldest_update_age_min": rec.oldest_update_age_min,
+                "market_hold_median": rec.market_hold_median,
+                "divergence": _div_cache.get(rec.market),
                 "kelly_base": rec.kelly_base,
                 "kelly_suggested": rec.kelly_suggested,
                 "sizing_note": rec.sizing_note,
@@ -452,6 +538,7 @@ def build_daily_slate(
             entry["tier"] = classification["tier"]
             entry["avoid_reasons"] = classification["reasons"]
             entry["dynamic_edge_floor"] = classification["dynamic_edge_floor"]
+            entry["avoid_score"] = _avoid_score(entry)
 
             all_entries.append(entry)
 
