@@ -42,6 +42,32 @@ class LineStore:
             )
         """)
         self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS bet_clv (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bet_id TEXT NOT NULL,
+                leg_index INTEGER NOT NULL DEFAULT 0,
+                event TEXT NOT NULL,
+                market TEXT NOT NULL,
+                pick_side TEXT NOT NULL,
+                pick_line_value REAL,
+                pick_odds_american REAL NOT NULL,
+                pick_odds_decimal REAL NOT NULL,
+                consensus_prob_at_pick REAL NOT NULL,
+                market_hold_median_at_pick REAL DEFAULT 0.0,
+                market_volatility_sigma_at_pick REAL DEFAULT 0.0,
+                consensus_prob_close REAL,
+                best_odds_close_american REAL,
+                best_odds_close_decimal REAL,
+                closed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(bet_id, leg_index)
+            )
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bet_clv_bet_id
+            ON bet_clv (bet_id)
+        """)
+        self._conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_event_type
             ON lines (event, bet_type)
         """)
@@ -150,6 +176,85 @@ class LineStore:
             "SELECT DISTINCT event FROM lines ORDER BY event"
         ).fetchall()
         return [row["event"] for row in rows]
+
+    # ------------------------------------------------------------------
+    # CLV tracking
+    # ------------------------------------------------------------------
+
+    def save_clv_pick(
+        self,
+        *,
+        bet_id: str,
+        leg_index: int,
+        event: str,
+        market: str,
+        pick_side: str,
+        pick_line_value: float | None,
+        pick_odds_american: float,
+        pick_odds_decimal: float,
+        consensus_prob_at_pick: float,
+        market_hold_median_at_pick: float = 0.0,
+        market_volatility_sigma_at_pick: float = 0.0,
+    ) -> None:
+        """Persist the pick-time snapshot for one leg of a bet."""
+        self._conn.execute(
+            """INSERT OR REPLACE INTO bet_clv
+               (bet_id, leg_index, event, market, pick_side,
+                pick_line_value, pick_odds_american,
+                pick_odds_decimal, consensus_prob_at_pick,
+                market_hold_median_at_pick,
+                market_volatility_sigma_at_pick)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bet_id,
+                leg_index,
+                event,
+                market,
+                pick_side,
+                pick_line_value,
+                pick_odds_american,
+                pick_odds_decimal,
+                consensus_prob_at_pick,
+                market_hold_median_at_pick,
+                market_volatility_sigma_at_pick,
+            ),
+        )
+        self._conn.commit()
+
+    def close_clv(
+        self,
+        *,
+        bet_id: str,
+        leg_index: int,
+        consensus_prob_close: float,
+        best_odds_close_american: float,
+        best_odds_close_decimal: float,
+    ) -> None:
+        """Write the closing-line snapshot for one leg."""
+        self._conn.execute(
+            """UPDATE bet_clv
+               SET consensus_prob_close = ?,
+                   best_odds_close_american = ?,
+                   best_odds_close_decimal = ?,
+                   closed_at = CURRENT_TIMESTAMP
+               WHERE bet_id = ? AND leg_index = ?""",
+            (
+                consensus_prob_close,
+                best_odds_close_american,
+                best_odds_close_decimal,
+                bet_id,
+                leg_index,
+            ),
+        )
+        self._conn.commit()
+
+    def get_clv(self, bet_id: str) -> list[dict]:
+        """Return all CLV rows for a bet, ordered by leg_index."""
+        rows = self._conn.execute(
+            "SELECT * FROM bet_clv WHERE bet_id = ? ORDER BY leg_index",
+            (bet_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         self._conn.close()

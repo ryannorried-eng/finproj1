@@ -14,6 +14,7 @@ from line_tracker.bet_slip import (
     decimal_to_american,
     parlay_payout,
 )
+from line_tracker.models import BetType
 
 
 @dataclass
@@ -159,3 +160,143 @@ def delete_bet(state: dict, bet_id: str) -> Bet:
                 return lst.pop(i)
 
     raise KeyError(f"No bet with id {bet_id!r}")
+
+
+# ---------------------------------------------------------------------------
+# CLV tracking
+# ---------------------------------------------------------------------------
+
+_MARKET_LABEL_TO_BET_TYPE = {
+    "ML": BetType.MONEYLINE,
+    "Spread": BetType.SPREAD,
+    "Total": BetType.TOTAL,
+}
+
+_SIDE_MAP = {
+    ("ML", "Home"): "home",
+    ("ML", "Away"): "away",
+    ("Spread", "Home"): "home",
+    ("Spread", "Away"): "away",
+    ("Total", "Over"): "over",
+    ("Total", "Under"): "under",
+}
+
+
+def snapshot_pick(bet: Bet, store) -> None:
+    """Persist pick-time consensus snapshot for every leg.
+
+    *store* is a ``LineStore`` instance.  For each leg we look up the
+    latest lines, run consensus, and find the matching recommendation.
+    """
+    from line_tracker.best_bets import recommend_best_bets
+
+    for idx, leg in enumerate(bet.legs):
+        event = leg["event_name"]
+        market_label = leg["market"]
+        bet_type = _MARKET_LABEL_TO_BET_TYPE.get(market_label)
+        if bet_type is None:
+            continue
+
+        lines = store.get_latest_for_event(event, bet_type)
+        if not lines:
+            continue
+
+        recs = recommend_best_bets(lines, top_n=10)
+        side_key = _SIDE_MAP.get(
+            (market_label, leg["selection"]),
+        )
+
+        # Find rec matching this side
+        rec = None
+        for r in recs:
+            if r.side == side_key:
+                rec = r
+                break
+
+        if rec is None:
+            continue
+
+        pick_odds = leg["odds"]
+        store.save_clv_pick(
+            bet_id=bet.id,
+            leg_index=idx,
+            event=event,
+            market=market_label,
+            pick_side=leg["selection"],
+            pick_line_value=leg.get("line"),
+            pick_odds_american=pick_odds,
+            pick_odds_decimal=round(
+                american_to_decimal(pick_odds), 4,
+            ),
+            consensus_prob_at_pick=rec.consensus_prob,
+            market_hold_median_at_pick=rec.market_hold_median,
+            market_volatility_sigma_at_pick=(
+                rec.market_volatility_sigma
+            ),
+        )
+
+
+def close_bet_clv(bet_id: str, store) -> None:
+    """Fetch closing lines and write CLV close snapshot.
+
+    For each open CLV row (no closed_at), re-fetch latest lines,
+    compute consensus, and store closing odds/prob.
+    """
+    from line_tracker.best_bets import recommend_best_bets
+
+    rows = store.get_clv(bet_id)
+    for row in rows:
+        if row.get("closed_at"):
+            continue
+
+        event = row["event"]
+        market_label = row["market"]
+        bet_type = _MARKET_LABEL_TO_BET_TYPE.get(market_label)
+        if bet_type is None:
+            continue
+
+        lines = store.get_latest_for_event(event, bet_type)
+        if not lines:
+            continue
+
+        recs = recommend_best_bets(lines, top_n=10)
+        side_key = _SIDE_MAP.get(
+            (market_label, row["pick_side"]),
+        )
+
+        rec = None
+        for r in recs:
+            if r.side == side_key:
+                rec = r
+                break
+
+        if rec is None:
+            continue
+
+        store.close_clv(
+            bet_id=bet_id,
+            leg_index=row["leg_index"],
+            consensus_prob_close=rec.consensus_prob,
+            best_odds_close_american=rec.best_odds,
+            best_odds_close_decimal=round(
+                american_to_decimal(rec.best_odds), 4,
+            ),
+        )
+
+
+def compute_clv(row: dict) -> dict | None:
+    """Compute CLV metrics from a single bet_clv row.
+
+    Returns dict with clv_decimal and clv_prob, or None
+    if the row has no closing data.
+    """
+    if row.get("best_odds_close_decimal") is None:
+        return None
+    pick_dec = row["pick_odds_decimal"]
+    close_dec = row["best_odds_close_decimal"]
+    pick_prob = row["consensus_prob_at_pick"]
+    close_prob = row.get("consensus_prob_close", pick_prob)
+    return {
+        "clv_decimal": round(close_dec - pick_dec, 4),
+        "clv_prob": round(close_prob - pick_prob, 4),
+    }

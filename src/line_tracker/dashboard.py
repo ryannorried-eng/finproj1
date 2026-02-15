@@ -11,7 +11,14 @@ import streamlit as st
 
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
 from line_tracker.best_bets import recommend_best_bets
-from line_tracker.bet_history import init_bet_state, settle_bet, submit_bet
+from line_tracker.bet_history import (
+    close_bet_clv,
+    compute_clv,
+    init_bet_state,
+    settle_bet,
+    snapshot_pick,
+    submit_bet,
+)
 from line_tracker.bet_slip import (
     american_profit,
     american_to_decimal as _slip_a2d,
@@ -1541,8 +1548,13 @@ def _slip_dialog():
             use_container_width=True,
         ):
             try:
-                submit_bet(st.session_state, stake)
+                bet = submit_bet(st.session_state, stake)
                 st.session_state["_slip_submitted"] = True
+                try:
+                    with LineStore() as _s:
+                        snapshot_pick(bet, _s)
+                except Exception:
+                    pass  # CLV snapshot is best-effort
             except ValueError as exc:
                 st.error(str(exc))
             st.rerun()
@@ -2046,30 +2058,35 @@ def _bet_history_dialog():
                 # Settlement controls
                 st.markdown("**Settle this bet:**")
                 scols = st.columns(3)
+
+                def _settle(bid, outcome, _key=""):
+                    try:
+                        with LineStore() as _s:
+                            close_bet_clv(bid, _s)
+                    except Exception:
+                        pass  # CLV close is best-effort
+                    settle_bet(st.session_state, bid, outcome)
+                    st.session_state["_reopen_history"] = True
+                    st.rerun()
+
                 with scols[0]:
                     if st.button(
                         "Won", key=f"hist_won_{bet.id}",
                         type="primary", use_container_width=True,
                     ):
-                        settle_bet(st.session_state, bet.id, "won")
-                        st.session_state["_reopen_history"] = True
-                        st.rerun()
+                        _settle(bet.id, "won")
                 with scols[1]:
                     if st.button(
                         "Lost", key=f"hist_lost_{bet.id}",
                         use_container_width=True,
                     ):
-                        settle_bet(st.session_state, bet.id, "lost")
-                        st.session_state["_reopen_history"] = True
-                        st.rerun()
+                        _settle(bet.id, "lost")
                 with scols[2]:
                     if st.button(
                         "Push", key=f"hist_push_{bet.id}",
                         use_container_width=True,
                     ):
-                        settle_bet(st.session_state, bet.id, "push")
-                        st.session_state["_reopen_history"] = True
-                        st.rerun()
+                        _settle(bet.id, "push")
 
     with tab_settled:
         if not settled:
@@ -2126,13 +2143,45 @@ def _bet_history_dialog():
                     with hcols[2]:
                         if bet.status == "won":
                             pnl = bet.total_payout - bet.stake
-                            st.metric("Profit", f":green[+{fmt_money(pnl)}]")
+                            st.metric(
+                                "Profit",
+                                f":green[+{fmt_money(pnl)}]",
+                            )
                         elif bet.status == "push":
                             st.metric("Profit", fmt_money(0))
                         else:
-                            st.metric("Profit", f":red[-{fmt_money(bet.stake)}]")
+                            st.metric(
+                                "Profit",
+                                f":red[-{fmt_money(bet.stake)}]",
+                            )
                         if bet.settled_at:
-                            st.caption(f"Settled {bet.settled_at[:16]}")
+                            st.caption(
+                                f"Settled {bet.settled_at[:16]}",
+                            )
+
+                    # -- CLV metrics (best-effort) --
+                    try:
+                        with LineStore() as _s:
+                            clv_rows = _s.get_clv(bet.id)
+                    except Exception:
+                        clv_rows = []
+                    if clv_rows:
+                        parts: list[str] = []
+                        for cr in clv_rows:
+                            m = compute_clv(cr)
+                            if m is None:
+                                continue
+                            cd = m["clv_decimal"]
+                            cp = m["clv_prob"]
+                            color = "green" if cd >= 0 else "red"
+                            parts.append(
+                                f"Leg {cr['leg_index']+1}: "
+                                f":{color}[CLV "
+                                f"{cd:+.3f} dec "
+                                f"/ {cp*100:+.2f}pp]"
+                            )
+                        if parts:
+                            st.caption(" | ".join(parts))
 
     st.divider()
     if st.button("Close", key="hist_close", use_container_width=True):
