@@ -233,6 +233,14 @@ def snapshot_pick(bet: Bet, store) -> None:
             market_volatility_sigma_at_pick=(
                 rec.market_volatility_sigma
             ),
+            pick_sportsbook=leg.get("sportsbook"),
+            sport=leg.get("sport"),
+            confidence_at_pick=rec.confidence,
+            quality_tier_at_pick=rec.quality_tier,
+            edge_pct_at_pick=rec.edge_pct,
+            edge_z_at_pick=rec.edge_z,
+            books_used_at_pick=rec.books_used_count,
+            agreement_score_at_pick=rec.agreement_score,
         )
 
 

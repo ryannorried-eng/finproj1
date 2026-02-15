@@ -85,6 +85,7 @@ class LineStore:
         """)
         self._conn.commit()
         self._migrate_commence_time()
+        self._migrate_clv_metadata()
 
     def _migrate_commence_time(self) -> None:
         """Add commence_time column if it doesn't exist yet."""
@@ -97,6 +98,31 @@ class LineStore:
                 "ALTER TABLE lines ADD COLUMN commence_time TEXT"
             )
             self._conn.commit()
+
+    def _migrate_clv_metadata(self) -> None:
+        """Add pick-time metadata columns to bet_clv if they don't exist."""
+        cols = {
+            row[1]
+            for row in self._conn.execute(
+                "PRAGMA table_info(bet_clv)"
+            ).fetchall()
+        }
+        new_cols = {
+            "pick_sportsbook": "TEXT",
+            "sport": "TEXT",
+            "confidence_at_pick": "TEXT",
+            "quality_tier_at_pick": "TEXT",
+            "edge_pct_at_pick": "REAL",
+            "edge_z_at_pick": "REAL",
+            "books_used_at_pick": "INTEGER",
+            "agreement_score_at_pick": "REAL",
+        }
+        for col, col_type in new_cols.items():
+            if col not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE bet_clv ADD COLUMN {col} {col_type}"
+                )
+        self._conn.commit()
 
     def save_lines(self, lines: list[BettingLine]) -> int:
         """Save a batch of lines. Returns number of rows inserted."""
@@ -195,6 +221,14 @@ class LineStore:
         consensus_prob_at_pick: float,
         market_hold_median_at_pick: float = 0.0,
         market_volatility_sigma_at_pick: float = 0.0,
+        pick_sportsbook: str | None = None,
+        sport: str | None = None,
+        confidence_at_pick: str | None = None,
+        quality_tier_at_pick: str | None = None,
+        edge_pct_at_pick: float | None = None,
+        edge_z_at_pick: float | None = None,
+        books_used_at_pick: int | None = None,
+        agreement_score_at_pick: float | None = None,
     ) -> None:
         """Persist the pick-time snapshot for one leg of a bet."""
         self._conn.execute(
@@ -203,8 +237,13 @@ class LineStore:
                 pick_line_value, pick_odds_american,
                 pick_odds_decimal, consensus_prob_at_pick,
                 market_hold_median_at_pick,
-                market_volatility_sigma_at_pick)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                market_volatility_sigma_at_pick,
+                pick_sportsbook, sport, confidence_at_pick,
+                quality_tier_at_pick, edge_pct_at_pick,
+                edge_z_at_pick, books_used_at_pick,
+                agreement_score_at_pick)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 bet_id,
                 leg_index,
@@ -217,6 +256,14 @@ class LineStore:
                 consensus_prob_at_pick,
                 market_hold_median_at_pick,
                 market_volatility_sigma_at_pick,
+                pick_sportsbook,
+                sport,
+                confidence_at_pick,
+                quality_tier_at_pick,
+                edge_pct_at_pick,
+                edge_z_at_pick,
+                books_used_at_pick,
+                agreement_score_at_pick,
             ),
         )
         self._conn.commit()
@@ -253,6 +300,14 @@ class LineStore:
         rows = self._conn.execute(
             "SELECT * FROM bet_clv WHERE bet_id = ? ORDER BY leg_index",
             (bet_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_clv(self) -> list[dict]:
+        """Return every CLV row that has been closed (has closing data)."""
+        rows = self._conn.execute(
+            "SELECT * FROM bet_clv WHERE closed_at IS NOT NULL "
+            "ORDER BY closed_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 

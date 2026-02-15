@@ -33,6 +33,14 @@ from line_tracker.bet_slip import (
 )
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
+from line_tracker.performance import (
+    all_breakdowns,
+    apply_filters,
+    build_clv_dataframe,
+    clv_distribution,
+    rolling_clv_series,
+    summary_kpis,
+)
 from line_tracker.scraper import OddsClient
 from line_tracker.slate import build_daily_slate, passes_relaxed_tier2
 from line_tracker.storage import LineStore
@@ -355,7 +363,7 @@ def _sidebar():
         # --- Page navigation ---
         st.radio(
             "Page",
-            ["Dashboard", "Best Lines to Shop", "Daily Slate"],
+            ["Dashboard", "Best Lines to Shop", "Daily Slate", "Performance"],
             key="nav_page",
             horizontal=True,
         )
@@ -2416,6 +2424,175 @@ def _render_legend():
 
 
 # ---------------------------------------------------------------------------
+# Performance page
+# ---------------------------------------------------------------------------
+
+_BREAKDOWN_LABELS: dict[str, str] = {
+    "confidence_at_pick": "Confidence",
+    "quality_tier_at_pick": "Quality Tier",
+    "market": "Market Type",
+    "sport": "Sport",
+    "pick_sportsbook": "Sportsbook",
+}
+
+
+def _page_performance():
+    st.title("Performance")
+    st.caption("Closing Line Value (CLV) analytics across all settled legs.")
+
+    store = LineStore(DB_PATH)
+    rows = store.get_all_clv()
+
+    if not rows:
+        st.info("No settled legs with CLV data yet. Settle some bets first!")
+        return
+
+    df_full = build_clv_dataframe(rows)
+    if df_full.empty:
+        st.info("No CLV data available.")
+        return
+
+    # ---- Filters ----
+    with st.expander("Filters", expanded=False):
+        fcols = st.columns(5)
+        with fcols[0]:
+            date_start = st.date_input("From", value=None, key="perf_date_start")
+        with fcols[1]:
+            date_end = st.date_input("To", value=None, key="perf_date_end")
+        with fcols[2]:
+            sports = ["All"] + sorted(
+                df_full["sport"].dropna().unique().tolist()
+            )
+            sport_filter = st.selectbox("Sport", sports, key="perf_sport")
+        with fcols[3]:
+            markets = ["All"] + sorted(
+                df_full["market"].dropna().unique().tolist()
+            )
+            market_filter = st.selectbox("Market", markets, key="perf_market")
+        with fcols[4]:
+            confs = ["All"] + sorted(
+                df_full["confidence_at_pick"].dropna().unique().tolist()
+            )
+            conf_filter = st.selectbox(
+                "Confidence", confs, key="perf_confidence",
+            )
+
+        tiers = ["All"] + sorted(
+            df_full["quality_tier_at_pick"].dropna().unique().tolist()
+        )
+        tier_filter = st.selectbox(
+            "Quality Tier", tiers, key="perf_tier",
+        )
+
+    df = apply_filters(
+        df_full,
+        date_start=str(date_start) if date_start else None,
+        date_end=str(date_end) if date_end else None,
+        sport=sport_filter if sport_filter != "All" else None,
+        market=market_filter if market_filter != "All" else None,
+        confidence=conf_filter if conf_filter != "All" else None,
+        quality_tier=tier_filter if tier_filter != "All" else None,
+    )
+
+    if df.empty:
+        st.warning("No data matches the selected filters.")
+        return
+
+    # ---- KPI cards ----
+    kpis = summary_kpis(df)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Legs (Closed)", kpis["total_legs"])
+    k2.metric("Beating Close %", f"{kpis['beating_close_pct']}%")
+    k3.metric("Avg CLV (prob pts)", f"{kpis['avg_clv_prob']:+.4f}")
+
+    k4, k5, k6 = st.columns(3)
+    k4.metric("Median CLV (prob pts)", f"{kpis['median_clv_prob']:+.4f}")
+    k5.metric("Avg CLV (decimal)", f"{kpis['avg_clv_decimal']:+.4f}")
+    k6.metric("Median CLV (decimal)", f"{kpis['median_clv_decimal']:+.4f}")
+
+    st.divider()
+
+    # ---- Breakdown tables ----
+    st.subheader("Breakdowns")
+    breakdowns = all_breakdowns(df)
+
+    if breakdowns:
+        tabs = st.tabs([
+            _BREAKDOWN_LABELS.get(col, col) for col in breakdowns
+        ])
+        for tab, (col, tbl) in zip(tabs, breakdowns.items()):
+            with tab:
+                display_tbl = tbl.rename(columns={
+                    col: _BREAKDOWN_LABELS.get(col, col),
+                    "legs": "Legs",
+                    "beating_pct": "Beating %",
+                    "avg_clv_decimal": "Avg CLV (dec)",
+                    "avg_clv_prob": "Avg CLV (prob)",
+                })
+                st.dataframe(
+                    display_tbl,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+    else:
+        st.info("Not enough metadata for breakdowns.")
+
+    st.divider()
+
+    # ---- Charts ----
+    chart_left, chart_right = st.columns(2)
+
+    with chart_left:
+        st.subheader("30-Day Rolling CLV")
+        rolling = rolling_clv_series(df)
+        if not rolling.empty:
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.plot(
+                rolling["date"],
+                rolling["rolling_clv_prob"],
+                linewidth=1.5,
+            )
+            ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+            ax.set_ylabel("Rolling CLV (prob)")
+            ax.set_xlabel("")
+            fig.autofmt_xdate(rotation=30)
+            fig.tight_layout()
+            st.pyplot(fig)
+        else:
+            st.info("Not enough data for rolling chart.")
+
+    with chart_right:
+        st.subheader("CLV Distribution")
+        dist = clv_distribution(df)
+        if not dist.empty:
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(6, 3))
+            colors = [
+                "#d9534f" if "< " in lbl or lbl.startswith("[-")
+                else "#5cb85c"
+                for lbl in dist["bin_label"]
+            ]
+            ax.bar(
+                range(len(dist)),
+                dist["count"],
+                color=colors,
+                edgecolor="white",
+                linewidth=0.5,
+            )
+            ax.set_xticks(range(len(dist)))
+            ax.set_xticklabels(dist["bin_label"], rotation=45, ha="right", fontsize=7)
+            ax.set_ylabel("Count")
+            fig.tight_layout()
+            st.pyplot(fig)
+        else:
+            st.info("Not enough data for distribution chart.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2464,6 +2641,8 @@ def main():
             _page_best_lines()
         elif nav == "Daily Slate":
             _page_daily_slate()
+        elif nav == "Performance":
+            _page_performance()
         else:
             _page_dashboard()
 
