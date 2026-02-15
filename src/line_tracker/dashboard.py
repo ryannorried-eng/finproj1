@@ -399,6 +399,12 @@ def _sidebar():
                     "for a denser view."
                 ),
             )
+            st.toggle(
+                "Slate debug counters",
+                value=False,
+                key="slate_debug",
+                help="Show classification breakdown on the Daily Slate page.",
+            )
 
         with st.expander("Glossary"):
             st.caption(
@@ -1811,11 +1817,13 @@ def _page_daily_slate():
     for ln in lines:
         lines_by_event[ln.event].append(ln)
 
+    show_debug = st.session_state.get("slate_debug", False)
     filters = {
         "min_edge": min_edge,
         "min_quality": min_quality,
         "hide_low_confidence": hide_low,
         "max_per_event": 2,
+        "debug": show_debug,
     }
     slate = build_daily_slate(dict(lines_by_event), filters=filters)
 
@@ -1828,6 +1836,22 @@ def _page_daily_slate():
     mc1.metric("Top Plays", len(tier1))
     mc2.metric("More Plays", len(tier2))
     mc3.metric("Stay Away", len(avoid))
+
+    # Debug counters (behind toggle)
+    debug = slate.get("debug")
+    if debug:
+        with st.expander("Debug: Classification Breakdown", expanded=False):
+            dc1, dc2, dc3, dc4 = st.columns(4)
+            dc1.metric("Total Recs", debug["total_recs"])
+            dc2.metric("Tier 1", debug["tier1_count"])
+            dc3.metric("Tier 2", debug["tier2_count"])
+            dc4.metric("Stay Away", debug["stay_away_count"])
+            st.markdown("**By Confidence:** " + ", ".join(
+                f"{k}: {v}" for k, v in sorted(debug["by_confidence"].items())
+            ))
+            st.markdown("**By Quality Tier:** " + ", ".join(
+                f"{k}: {v}" for k, v in sorted(debug["by_quality_tier"].items())
+            ))
 
     st.divider()
 
