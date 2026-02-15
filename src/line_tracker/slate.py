@@ -20,6 +20,12 @@ _STALE_THRESHOLD_MIN = 120.0
 _EDGE_OUTLIER_THRESHOLD = 4.0
 _STAY_AWAY_LIMIT = 15
 
+# ── Pro Mode Tier 1 thresholds (stricter than standard) ──────────────
+_PRO_EDGE_MIN = 3.5  # minimum edge%
+_PRO_EDGE_Z_MIN = 2.8  # minimum edge Z-score
+_PRO_BOOKS_MIN = 6  # minimum books used
+_PRO_HOLD_MAX = 6.0  # maximum market hold median %
+
 # ── market-quality avoid thresholds ───────────────────────────────────
 _AVOID_HOLD_MAX = 7.0  # median book hold% above which market is suspect
 _AVOID_NOISE_SIGMA_MIN = 0.05  # volatility sigma for "noisy" flag
@@ -112,7 +118,10 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         quality_score, market_volatility_sigma, edge_z, books_used,
         oldest_update_age_min, market_unstable.
     settings:
-        Reserved for future per-user threshold overrides.
+        Optional overrides.  Recognised keys:
+
+        * ``pro_mode`` (bool): when True, Tier 1 uses tighter gates
+          (edge >= 3.5%, edge_z >= 2.8, books >= 6, hold <= 6%).
 
     Returns
     -------
@@ -121,6 +130,9 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         reasons: list[str]  (empty for tier1/tier2; populated for avoid)
         dynamic_edge_floor: float  (Tier 1 floor used, for debugging)
     """
+    settings = settings or {}
+    pro_mode = settings.get("pro_mode", False)
+
     edge = entry.get("edge_pct", 0.0)
     confidence = entry.get("confidence", "")
     quality_tier = entry.get("quality_tier", "")
@@ -129,6 +141,7 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
     market_unstable = entry.get("market_unstable", False)
     books_used = entry.get("books_used", 0)
     oldest_age = entry.get("oldest_update_age_min", 0.0)
+    hold_median = entry.get("market_hold_median", 0.0)
 
     dyn_floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
 
@@ -154,13 +167,36 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         }
 
     # ── Tier 1 ────────────────────────────────────────────────────
-    if (
-        confidence == "High"
-        and quality_tier in ("Elite", "Strong")
-        and edge >= dyn_floor
-        and edge > 0
-    ):
-        return {"tier": "tier1", "reasons": [], "dynamic_edge_floor": dyn_floor}
+    if pro_mode:
+        # Pro Mode: tighter gates on top of standard requirements
+        pro_floor = max(dyn_floor, _PRO_EDGE_MIN)
+        if (
+            confidence == "High"
+            and quality_tier in ("Elite", "Strong")
+            and edge >= pro_floor
+            and edge > 0
+            and (edge_z >= _PRO_EDGE_Z_MIN if edge_z else False)
+            and books_used >= _PRO_BOOKS_MIN
+            and hold_median <= _PRO_HOLD_MAX
+        ):
+            return {
+                "tier": "tier1",
+                "reasons": [],
+                "dynamic_edge_floor": dyn_floor,
+            }
+    else:
+        # Standard Tier 1
+        if (
+            confidence == "High"
+            and quality_tier in ("Elite", "Strong")
+            and edge >= dyn_floor
+            and edge > 0
+        ):
+            return {
+                "tier": "tier1",
+                "reasons": [],
+                "dynamic_edge_floor": dyn_floor,
+            }
 
     # ── Tier 2 (independent criteria, NOT Tier 1 lite) ────────────
     t2_conf = confidence in ("High", "Medium")
@@ -451,6 +487,7 @@ def build_daily_slate(
     lines_by_event: dict[str, list[BettingLine]],
     *,
     filters: dict | None = None,
+    settings: dict | None = None,
 ) -> dict:
     """Build the daily slate from lines grouped by event.
 
@@ -466,6 +503,9 @@ def build_daily_slate(
     filters:
         Optional display-filter dict (see ``_passes_filters``).
         ``max_per_event`` (int, default 1) limits recs taken per event.
+    settings:
+        Optional classification overrides forwarded to ``classify_rec``
+        (e.g. ``{"pro_mode": True}``).
 
     Returns
     -------
@@ -477,6 +517,7 @@ def build_daily_slate(
     True).
     """
     filters = filters or {}
+    settings = settings or {}
     max_per_event: int = filters.get("max_per_event", 1)
 
     all_entries: list[dict] = []
@@ -534,7 +575,7 @@ def build_daily_slate(
             }
 
             # Classify — runs for EVERY rec, no pre-filtering
-            classification = classify_rec(entry)
+            classification = classify_rec(entry, settings=settings)
             entry["tier"] = classification["tier"]
             entry["avoid_reasons"] = classification["reasons"]
             entry["dynamic_edge_floor"] = classification["dynamic_edge_floor"]

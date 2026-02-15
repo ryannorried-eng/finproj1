@@ -252,3 +252,64 @@ def apply_filters(
         mask &= df["quality_tier_at_pick"] == quality_tier
 
     return df[mask]
+
+
+# ------------------------------------------------------------------
+# Calibration: tier-proxy CLV comparison
+# ------------------------------------------------------------------
+
+# Thresholds matching the standard classify_rec Tier 1 / Tier 2 gates
+_CAL_T1_EDGE = 3.0
+_CAL_T2_EDGE = 1.5
+
+
+def _tier_proxy(row: pd.Series) -> str:
+    """Assign a proxy tier label based on pick-time metadata.
+
+    Uses the same gate logic as ``classify_rec`` (standard mode) but
+    applied to CLV-table columns which use ``_at_pick`` suffixes.
+    """
+    conf = row.get("confidence_at_pick", "")
+    qt = row.get("quality_tier_at_pick", "")
+    edge = row.get("edge_pct_at_pick") or 0.0
+
+    if conf == "High" and qt in ("Elite", "Strong") and edge >= _CAL_T1_EDGE:
+        return "Tier 1"
+    if (
+        conf in ("High", "Medium")
+        and qt in ("Elite", "Strong", "Moderate")
+        and edge >= _CAL_T2_EDGE
+    ):
+        return "Tier 2"
+    return "Stay Away"
+
+
+def calibration_stats(df: pd.DataFrame) -> dict[str, dict]:
+    """Compare CLV performance across proxy tier groups.
+
+    Returns ``{tier_label: {"legs": int, "beating_pct": float,
+    "avg_clv_prob": float}}``.
+    """
+    if df.empty:
+        return {}
+
+    required = {"confidence_at_pick", "quality_tier_at_pick", "edge_pct_at_pick"}
+    if not required.issubset(df.columns):
+        return {}
+
+    df = df.copy()
+    df["tier_proxy"] = df.apply(_tier_proxy, axis=1)
+
+    result: dict[str, dict] = {}
+    for tier in ("Tier 1", "Tier 2", "Stay Away"):
+        sub = df[df["tier_proxy"] == tier]
+        if sub.empty:
+            result[tier] = {"legs": 0, "beating_pct": 0.0, "avg_clv_prob": 0.0}
+            continue
+        n = len(sub)
+        result[tier] = {
+            "legs": n,
+            "beating_pct": round(100.0 * (sub["clv_prob"] > 0).sum() / n, 1),
+            "avg_clv_prob": round(float(sub["clv_prob"].mean()), 4),
+        }
+    return result

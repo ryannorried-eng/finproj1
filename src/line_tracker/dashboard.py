@@ -38,6 +38,7 @@ from line_tracker.performance import (
     all_breakdowns,
     apply_filters,
     build_clv_dataframe,
+    calibration_stats,
     clv_distribution,
     rolling_clv_series,
     summary_kpis,
@@ -1978,6 +1979,16 @@ def _page_daily_slate():
     with st.expander("Slate Filters", expanded=False):
         sf1, sf2 = st.columns(2)
         with sf1:
+            pro_mode = st.toggle(
+                "Pro Mode",
+                value=False,
+                key="slate_pro_mode",
+                help=(
+                    "Tighter Tier 1: edge >= 3.5%, edge_z >= 2.8, "
+                    "books >= 6, hold <= 6%. Fewer top plays, higher "
+                    "conviction. Tier 2 / Stay Away unchanged."
+                ),
+            )
             strict_mode = st.toggle(
                 "Strict mode",
                 value=True,
@@ -2037,7 +2048,11 @@ def _page_daily_slate():
         "max_per_event": 2,
         "debug": show_debug,
     }
-    slate = build_daily_slate(dict(lines_by_event), filters=filters)
+    slate = build_daily_slate(
+        dict(lines_by_event),
+        filters=filters,
+        settings={"pro_mode": pro_mode},
+    )
 
     tier1 = slate["tier1"]
     tier2 = list(slate["tier2"])
@@ -2762,6 +2777,51 @@ def _page_performance():
             st.pyplot(fig)
         else:
             st.info("Not enough data for distribution chart.")
+
+    # ---- Calibration Panel ------------------------------------------------
+    st.divider()
+    st.subheader("Tier Calibration")
+    st.caption(
+        "Compares CLV performance across proxy tier groups "
+        "(Tier 1 / Tier 2 / Stay Away based on pick-time metadata)."
+    )
+
+    cal = calibration_stats(df)
+    if cal:
+        cc1, cc2, cc3 = st.columns(3)
+        for col, tier in zip((cc1, cc2, cc3), ("Tier 1", "Tier 2", "Stay Away")):
+            stats = cal.get(tier, {})
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{tier}**")
+                    st.metric("Legs", stats.get("legs", 0))
+                    st.metric(
+                        "Beating Close %",
+                        f"{stats.get('beating_pct', 0.0)}%",
+                    )
+                    st.metric(
+                        "Avg CLV (prob)",
+                        f"{stats.get('avg_clv_prob', 0.0):+.4f}",
+                    )
+
+        # Advisory message when Tier 1 does not outperform Tier 2
+        t1 = cal.get("Tier 1", {})
+        t2 = cal.get("Tier 2", {})
+        if (
+            t1.get("legs", 0) >= 5
+            and t2.get("legs", 0) >= 5
+            and t1.get("avg_clv_prob", 0.0) <= t2.get("avg_clv_prob", 0.0)
+        ):
+            st.warning(
+                "Tier 1 is not outperforming Tier 2 on average CLV. "
+                "Consider enabling **Pro Mode** on the Daily Slate to "
+                "tighten Tier 1 criteria, or review your edge thresholds."
+            )
+    else:
+        st.info(
+            "Not enough pick-time metadata for calibration "
+            "(needs confidence, quality tier, and edge at pick)."
+        )
 
 
 # ---------------------------------------------------------------------------
