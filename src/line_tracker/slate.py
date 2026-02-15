@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import statistics
 from collections import Counter
 
 from line_tracker.best_bets import recommend_best_bets
@@ -201,6 +202,151 @@ def passes_relaxed_tier2(entry: dict) -> bool:
     return True
 
 
+# ── debug statistics ──────────────────────────────────────────────────
+
+
+def _min_med_max(vals: list[float]) -> dict:
+    """Return min / median / max for a list of floats (empty-safe)."""
+    if not vals:
+        return {"min": None, "median": None, "max": None}
+    return {
+        "min": min(vals),
+        "median": statistics.median(vals),
+        "max": max(vals),
+    }
+
+
+def compute_slate_debug_stats(entries: list[dict]) -> dict:
+    """Compute detailed debug statistics over *all* classified entries.
+
+    Parameters
+    ----------
+    entries:
+        The flat list of entry dicts **after** ``classify_rec`` has run
+        (each entry has ``tier``, ``dynamic_edge_floor``, etc.).
+
+    Returns
+    -------
+    dict with keys:
+        total_recs, counts_by_tier, counts_by_confidence,
+        counts_by_quality_tier, tier1_gate_failures, tier2_gate_failures,
+        sigma_stats, dynamic_floor_stats, warnings.
+    """
+    total = len(entries)
+
+    counts_by_tier = dict(Counter(e["tier"] for e in entries))
+    counts_by_confidence = dict(Counter(e.get("confidence", "") for e in entries))
+    counts_by_quality_tier = dict(Counter(e.get("quality_tier", "") for e in entries))
+
+    # ── Tier 1 gate failure counts ────────────────────────────────
+    t1_fail_conf = 0
+    t1_fail_qt = 0
+    t1_fail_dyn_floor = 0
+    t1_fail_edge_pos = 0
+
+    # ── Tier 2 gate failure counts ────────────────────────────────
+    t2_fail_conf = 0
+    t2_fail_qt = 0
+    t2_fail_edge_floor = 0
+    t2_fail_edge_z = 0
+
+    sigmas: list[float] = []
+    robust_sigmas: list[float] = []
+    dyn_floors: list[float] = []
+
+    for e in entries:
+        edge = e.get("edge_pct", 0.0)
+        conf = e.get("confidence", "")
+        qt = e.get("quality_tier", "")
+        sigma = e.get("market_volatility_sigma", 0.0)
+        edge_z = e.get("edge_z", 0.0)
+        dfloor = e.get("dynamic_edge_floor", _TIER1_BASE_EDGE)
+
+        sigmas.append(sigma)
+        if e.get("robust_sigma") is not None:
+            robust_sigmas.append(e["robust_sigma"])
+        dyn_floors.append(dfloor)
+
+        # Tier 1 gate failures (count how many entries fail each gate)
+        if conf != "High":
+            t1_fail_conf += 1
+        if qt not in ("Elite", "Strong"):
+            t1_fail_qt += 1
+        if edge < dfloor:
+            t1_fail_dyn_floor += 1
+        if edge <= 0:
+            t1_fail_edge_pos += 1
+
+        # Tier 2 gate failures
+        if conf not in ("High", "Medium"):
+            t2_fail_conf += 1
+        if qt not in ("Elite", "Strong", "Moderate"):
+            t2_fail_qt += 1
+        if edge < _TIER2_EDGE:
+            t2_fail_edge_floor += 1
+        if edge_z and edge_z < _TIER2_EDGE_Z_MIN:
+            t2_fail_edge_z += 1
+
+    sigma_stats = _min_med_max(sigmas)
+    robust_sigma_stats = _min_med_max(robust_sigmas)
+    floor_stats = _min_med_max(dyn_floors)
+
+    # ── Sanity warnings ───────────────────────────────────────────
+    warnings: list[str] = []
+    n_tier1 = counts_by_tier.get("tier1", 0)
+    n_tier2 = counts_by_tier.get("tier2", 0)
+    n_avoid = counts_by_tier.get("avoid", 0)
+
+    if total > 0 and n_tier1 + n_tier2 + n_avoid == 0:
+        warnings.append(
+            "total_recs > 0 but Tier1+Tier2+StayAway == 0 "
+            "(entries may be lost)"
+        )
+    if total > 0 and n_avoid == 0:
+        warnings.append(
+            "total_recs > 0 but StayAway == 0 "
+            "(every rec passed — check thresholds)"
+        )
+    if sigma_stats["max"] is not None and sigma_stats["max"] > 0.25:
+        warnings.append(
+            f"sigma max = {sigma_stats['max']:.4f} > 0.25 "
+            "(likely units bug — sigma should be in probability units)"
+        )
+    if robust_sigma_stats["max"] is not None and robust_sigma_stats["max"] > 0.25:
+        warnings.append(
+            f"robust_sigma max = {robust_sigma_stats['max']:.4f} > 0.25 "
+            "(likely units bug)"
+        )
+    if floor_stats["median"] is not None and floor_stats["median"] > 6.0:
+        warnings.append(
+            f"dynamic floor median = {floor_stats['median']:.2f}% > 6.0% "
+            "(likely units bug — sigma may be in wrong units)"
+        )
+
+    return {
+        "total_recs": total,
+        "counts_by_tier": counts_by_tier,
+        "counts_by_confidence": counts_by_confidence,
+        "counts_by_quality_tier": counts_by_quality_tier,
+        "tier1_gate_failures": {
+            "confidence_not_high": t1_fail_conf,
+            "quality_tier_not_elite_strong": t1_fail_qt,
+            "below_dynamic_floor": t1_fail_dyn_floor,
+            "edge_not_positive": t1_fail_edge_pos,
+        },
+        "tier2_gate_failures": {
+            "confidence_not_high_medium": t2_fail_conf,
+            "quality_tier_not_elite_strong_moderate": t2_fail_qt,
+            "below_edge_floor": t2_fail_edge_floor,
+            "edge_z_too_low": t2_fail_edge_z,
+        },
+        "sigma_stats": sigma_stats,
+        "robust_sigma_stats": robust_sigma_stats,
+        "dynamic_floor_stats": floor_stats,
+        "warnings": warnings,
+    }
+
+
 # ── display filters (applied AFTER classification) ─────────────────
 
 
@@ -248,9 +394,11 @@ def build_daily_slate(
     Returns
     -------
     dict with keys ``"tier1"``, ``"tier2"``, ``"stay_away"`` (lists of
-    slate-entry dicts), ``"counts"`` (always present), and ``"debug"``
-    (detailed counters, present when ``LINE_TRACKER_DEBUG`` env-var is set
-    or ``debug`` filter flag is True).
+    slate-entry dicts), ``"counts"`` (always present), ``"debug_stats"``
+    (gate-failure counts, sigma/floor stats, warnings — always present),
+    and ``"debug"`` (extended counters, present when
+    ``LINE_TRACKER_DEBUG`` env-var is set or ``debug`` filter flag is
+    True).
     """
     filters = filters or {}
     max_per_event: int = filters.get("max_per_event", 1)
@@ -338,7 +486,10 @@ def build_daily_slate(
         "stay_away": sum(1 for e in all_entries if e["tier"] == "avoid"),
     }
 
-    # ── Debug counters (extended breakdown) ────────────────────────
+    # ── Debug stats (always computed, keyed separately) ──────────
+    result["debug_stats"] = compute_slate_debug_stats(all_entries)
+
+    # ── Debug counters (extended breakdown, shown only on flag) ───
     show_debug = (
         os.environ.get("LINE_TRACKER_DEBUG", "").lower() in ("1", "true", "yes")
         or filters.get("debug", False)

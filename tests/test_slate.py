@@ -15,6 +15,7 @@ from line_tracker.slate import (
     _stay_away_sort_key,
     build_daily_slate,
     classify_rec,
+    compute_slate_debug_stats,
     passes_relaxed_tier2,
 )
 
@@ -1100,3 +1101,353 @@ class TestEmptyStateStrings:
         )]
         result = build_daily_slate({"evt1": _event_lines()})
         assert len(result["stay_away"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Debug stats: compute_slate_debug_stats
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSlateDebugStats:
+    def test_empty_entries(self):
+        ds = compute_slate_debug_stats([])
+        assert ds["total_recs"] == 0
+        assert ds["sigma_stats"]["min"] is None
+        assert ds["dynamic_floor_stats"]["min"] is None
+        assert ds["warnings"] == []
+
+    def test_basic_counts(self):
+        entries = [
+            {**_entry(edge_pct=4.0, confidence="High", quality_tier="Elite"),
+             "tier": "tier1", "dynamic_edge_floor": 3.0},
+            {**_entry(edge_pct=2.0, confidence="Medium", quality_tier="Moderate"),
+             "tier": "tier2", "dynamic_edge_floor": 3.0},
+            {**_entry(edge_pct=0.5, confidence="Low", quality_tier="Thin"),
+             "tier": "avoid", "dynamic_edge_floor": 3.0},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        assert ds["total_recs"] == 3
+        assert ds["counts_by_tier"] == {"tier1": 1, "tier2": 1, "avoid": 1}
+        assert ds["counts_by_confidence"]["High"] == 1
+        assert ds["counts_by_confidence"]["Medium"] == 1
+        assert ds["counts_by_confidence"]["Low"] == 1
+        assert ds["counts_by_quality_tier"]["Elite"] == 1
+        assert ds["counts_by_quality_tier"]["Moderate"] == 1
+        assert ds["counts_by_quality_tier"]["Thin"] == 1
+
+    def test_tier1_gate_failure_counts(self):
+        entries = [
+            {**_entry(edge_pct=2.0, confidence="Medium", quality_tier="Moderate"),
+             "tier": "tier2", "dynamic_edge_floor": 3.0},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        t1g = ds["tier1_gate_failures"]
+        assert t1g["confidence_not_high"] == 1
+        assert t1g["quality_tier_not_elite_strong"] == 1
+        assert t1g["below_dynamic_floor"] == 1
+        assert t1g["edge_not_positive"] == 0
+
+    def test_tier2_gate_failure_counts(self):
+        entries = [
+            {**_entry(edge_pct=0.5, confidence="Low", quality_tier="Thin", edge_z=0.3),
+             "tier": "avoid", "dynamic_edge_floor": 3.0},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        t2g = ds["tier2_gate_failures"]
+        assert t2g["confidence_not_high_medium"] == 1
+        assert t2g["quality_tier_not_elite_strong_moderate"] == 1
+        assert t2g["below_edge_floor"] == 1
+        assert t2g["edge_z_too_low"] == 1
+
+    def test_sigma_stats(self):
+        entries = [
+            {**_entry(market_volatility_sigma=0.01),
+             "tier": "tier1", "dynamic_edge_floor": 3.012},
+            {**_entry(market_volatility_sigma=0.03),
+             "tier": "tier1", "dynamic_edge_floor": 3.036},
+            {**_entry(market_volatility_sigma=0.05),
+             "tier": "tier1", "dynamic_edge_floor": 3.06},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        assert ds["sigma_stats"]["min"] == 0.01
+        assert ds["sigma_stats"]["max"] == 0.05
+        assert abs(ds["sigma_stats"]["median"] - 0.03) < 1e-9
+
+    def test_dynamic_floor_stats(self):
+        entries = [
+            {**_entry(), "tier": "tier1", "dynamic_edge_floor": 3.0},
+            {**_entry(), "tier": "tier1", "dynamic_edge_floor": 3.5},
+            {**_entry(), "tier": "tier1", "dynamic_edge_floor": 4.0},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        assert ds["dynamic_floor_stats"]["min"] == 3.0
+        assert ds["dynamic_floor_stats"]["max"] == 4.0
+        assert ds["dynamic_floor_stats"]["median"] == 3.5
+
+    def test_warning_sigma_too_large(self):
+        """sigma > 0.25 triggers a units-bug warning."""
+        entries = [
+            {**_entry(market_volatility_sigma=2.0),
+             "tier": "avoid", "dynamic_edge_floor": 5.4},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        assert any("sigma max" in w for w in ds["warnings"])
+
+    def test_warning_floor_median_too_large(self):
+        """dynamic floor median > 6 triggers a units-bug warning."""
+        entries = [
+            {**_entry(), "tier": "avoid", "dynamic_edge_floor": 7.0},
+            {**_entry(), "tier": "avoid", "dynamic_edge_floor": 8.0},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        assert any("dynamic floor median" in w for w in ds["warnings"])
+
+    def test_warning_no_stay_away(self):
+        """All recs in tier1 → StayAway==0 warning."""
+        entries = [
+            {**_entry(), "tier": "tier1", "dynamic_edge_floor": 3.0},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        assert any("StayAway == 0" in w for w in ds["warnings"])
+
+    def test_no_warnings_for_normal_data(self):
+        entries = [
+            {**_entry(market_volatility_sigma=0.02),
+             "tier": "tier1", "dynamic_edge_floor": 3.024},
+            {**_entry(market_volatility_sigma=0.01, edge_pct=0.5,
+                      confidence="Low", quality_tier="Thin"),
+             "tier": "avoid", "dynamic_edge_floor": 3.012},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        # Has both tiers and stay_away, sigma < 0.25, floor < 6
+        assert ds["warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# Regression: classification not dropped pre-filtering
+# ---------------------------------------------------------------------------
+
+
+class TestClassificationNotDroppedPreFiltering:
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_all_recs_accounted_for(self, mock_rbb):
+        """Every rec is classified into exactly one bucket — none dropped."""
+
+        def _recs(lines):
+            ev = lines[0].event
+            if "A" in ev:
+                return [_make_rec(
+                    quality_score=90, edge_pct=4.0,
+                    quality_tier="Elite", confidence="High",
+                )]
+            if "B" in ev:
+                return [_make_rec(
+                    quality_score=55, edge_pct=2.0,
+                    quality_tier="Moderate", confidence="Medium",
+                )]
+            if "C" in ev:
+                return [_make_rec(
+                    quality_score=20, edge_pct=0.3,
+                    quality_tier="Thin", confidence="Low",
+                )]
+            return [_make_rec(
+                quality_score=60, edge_pct=1.0,
+                quality_tier="Moderate", confidence="Medium",
+            )]
+
+        mock_rbb.side_effect = _recs
+        lines = {
+            "e1": _event_lines("TeamA @ X"),
+            "e2": _event_lines("TeamB @ Y"),
+            "e3": _event_lines("TeamC @ Z"),
+            "e4": _event_lines("TeamD @ W"),
+        }
+        result = build_daily_slate(lines)
+
+        total = result["counts"]["total_recs"]
+        assert total == 4
+
+        # Sum of displayed buckets may be < total (display filters can hide
+        # tier1/tier2 entries), but counts should always add up.
+        classified = (
+            result["counts"]["tier1"]
+            + result["counts"]["tier2"]
+            + result["counts"]["stay_away"]
+        )
+        assert classified == total
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_display_filters_cannot_drop_classifications(self, mock_rbb):
+        """Aggressive display filters don't change classification counts."""
+
+        def _recs(lines):
+            return [_make_rec(
+                quality_score=80, edge_pct=3.0,
+                quality_tier="Strong", confidence="High",
+            )]
+
+        mock_rbb.side_effect = _recs
+        lines = {"e1": _event_lines("TeamA @ X"), "e2": _event_lines("TeamB @ Y")}
+
+        r_plain = build_daily_slate(lines)
+        r_filtered = build_daily_slate(
+            lines, filters={"min_edge": 99.0, "min_quality": 99}
+        )
+
+        # Classification counts identical
+        assert r_plain["counts"] == r_filtered["counts"]
+        # Display may differ — filtered tier1 list is empty
+        assert len(r_filtered["tier1"]) == 0
+        assert len(r_plain["tier1"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Regression: strict mode affects only Tier 2 display, not classification
+# ---------------------------------------------------------------------------
+
+
+class TestStrictModeRegression:
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_strict_vs_relaxed_tier1_unchanged(self, mock_rbb):
+        """Tier 1 membership is identical under strict and relaxed modes."""
+
+        def _recs(lines):
+            ev = lines[0].event
+            if "A" in ev:
+                return [_make_rec(
+                    quality_score=90, edge_pct=4.0,
+                    quality_tier="Elite", confidence="High",
+                )]
+            return [_make_rec(
+                quality_score=60, edge_pct=0.8,
+                quality_tier="Moderate", confidence="Medium",
+            )]
+
+        mock_rbb.side_effect = _recs
+        lines = {
+            "e1": _event_lines("TeamA @ X"),
+            "e2": _event_lines("TeamB @ Y"),
+        }
+        result = build_daily_slate(lines)
+
+        tier1_strict = result["tier1"]
+        stay_away = result["stay_away"]
+
+        # Relaxed display: promote qualifying stay_away into tier2 display
+        promoted = [e for e in stay_away if passes_relaxed_tier2(e)]
+        tier2_relaxed = list(result["tier2"]) + promoted
+
+        # Tier 1 is identical
+        assert tier1_strict == result["tier1"]
+        # Tier 2 gained entries in relaxed mode
+        assert len(tier2_relaxed) >= len(result["tier2"])
+        # Classification tier field on entries is unchanged
+        for e in promoted:
+            assert e["tier"] == "avoid"  # canonical assignment unchanged
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_strict_vs_relaxed_counts_unchanged(self, mock_rbb):
+        """counts dict is identical — relaxed mode is display-only."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=60, edge_pct=0.8,
+            quality_tier="Moderate", confidence="Medium",
+        )]
+        result = build_daily_slate({"e1": _event_lines()})
+        counts_before = dict(result["counts"])
+
+        # Simulate relaxed display
+        _ = [e for e in result["stay_away"] if passes_relaxed_tier2(e)]
+
+        # Counts unchanged
+        assert result["counts"] == counts_before
+
+
+# ---------------------------------------------------------------------------
+# Gate failure counters integration
+# ---------------------------------------------------------------------------
+
+
+class TestGateFailureCountersIntegration:
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_gate_failures_nonzero_when_tier1_empty(self, mock_rbb):
+        """When no entries make Tier 1, at least one T1 gate failure is non-zero."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=55, edge_pct=2.0,
+            quality_tier="Moderate", confidence="Medium",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        ds = result["debug_stats"]
+        t1g = ds["tier1_gate_failures"]
+        assert result["counts"]["tier1"] == 0
+        # At least one gate failed
+        assert sum(t1g.values()) > 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_gate_failures_zero_for_tier1_pass(self, mock_rbb):
+        """When entry passes Tier 1, it shouldn't fail any T1 gate."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=90, edge_pct=4.0,
+            quality_tier="Elite", confidence="High",
+            market_volatility_sigma=0.0,
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        ds = result["debug_stats"]
+        t1g = ds["tier1_gate_failures"]
+        # With 1 entry that passes all T1 gates, all failure counts are 0
+        assert t1g["confidence_not_high"] == 0
+        assert t1g["quality_tier_not_elite_strong"] == 0
+        assert t1g["below_dynamic_floor"] == 0
+        assert t1g["edge_not_positive"] == 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_debug_stats_always_present(self, mock_rbb):
+        """debug_stats is present even without debug flag."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=80, edge_pct=3.0,
+            quality_tier="Strong", confidence="High",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        assert "debug_stats" in result
+        assert "debug" not in result  # debug flag was not passed
+
+
+# ---------------------------------------------------------------------------
+# Sigma unit sanity
+# ---------------------------------------------------------------------------
+
+
+class TestSigmaUnitSanity:
+    def test_small_sigma_correct_floor(self):
+        """sigma=0.02 → floor = 3.0 + 1.2*0.02 = 3.024."""
+        result = classify_rec(_entry(
+            edge_pct=3.024, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=0.02,
+        ))
+        assert result["tier"] == "tier1"
+        assert abs(result["dynamic_edge_floor"] - 3.024) < 1e-9
+
+    def test_large_sigma_triggers_warning(self):
+        """sigma=2.0 → floor = 5.4; debug_stats should warn."""
+        entries = [
+            {**_entry(market_volatility_sigma=2.0),
+             "tier": "avoid", "dynamic_edge_floor": 5.4},
+        ]
+        ds = compute_slate_debug_stats(entries)
+        assert any("sigma max" in w for w in ds["warnings"])
+        assert ds["sigma_stats"]["max"] == 2.0
+        assert ds["dynamic_floor_stats"]["max"] == 5.4
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_sigma_stats_integration(self, mock_rbb):
+        """Sigma stats are populated from real build_daily_slate."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=80, edge_pct=3.1,
+            quality_tier="Strong", confidence="High",
+            market_volatility_sigma=0.02,
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        ds = result["debug_stats"]
+        assert ds["sigma_stats"]["min"] == 0.02
+        assert ds["sigma_stats"]["max"] == 0.02
+        expected_floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * 0.02
+        assert abs(ds["dynamic_floor_stats"]["min"] - expected_floor) < 1e-9

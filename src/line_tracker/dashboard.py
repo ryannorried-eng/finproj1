@@ -1925,9 +1925,15 @@ def _page_daily_slate():
     mc2.metric("More Plays", len(tier2_display))
     mc3.metric("Stay Away", len(stay_away_display))
 
+    # Sanity-check warnings (shown when debug env is on)
+    if _debug_env:
+        for w in slate.get("debug_stats", {}).get("warnings", []):
+            st.warning(f"Slate Debug: {w}")
+
     # Debug counters (behind toggle)
     debug = slate.get("debug")
-    if debug:
+    ds = slate.get("debug_stats")
+    if debug and ds:
         with st.expander("Debug: Classification Breakdown", expanded=False):
             dc1, dc2, dc3, dc4 = st.columns(4)
             dc1.metric("Total Recs", debug["total_recs"])
@@ -1940,6 +1946,47 @@ def _page_daily_slate():
             st.markdown("**By Quality Tier:** " + ", ".join(
                 f"{k}: {v}" for k, v in sorted(debug["by_quality_tier"].items())
             ))
+
+            # Gate failure counts
+            st.markdown("---")
+            st.markdown("**Tier 1 gate failures**")
+            t1g = ds["tier1_gate_failures"]
+            gc1, gc2, gc3, gc4 = st.columns(4)
+            gc1.metric("Conf != High", t1g["confidence_not_high"])
+            gc2.metric("QT != Elite/Strong", t1g["quality_tier_not_elite_strong"])
+            gc3.metric("< Dyn Floor", t1g["below_dynamic_floor"])
+            gc4.metric("Edge <= 0", t1g["edge_not_positive"])
+
+            st.markdown("**Tier 2 gate failures**")
+            t2g = ds["tier2_gate_failures"]
+            gc5, gc6, gc7, gc8 = st.columns(4)
+            gc5.metric("Conf != H/M", t2g["confidence_not_high_medium"])
+            gc6.metric("QT != E/S/M", t2g["quality_tier_not_elite_strong_moderate"])
+            gc7.metric("< Edge Floor", t2g["below_edge_floor"])
+            gc8.metric("Edge Z Low", t2g["edge_z_too_low"])
+
+            # Sigma + dynamic floor stats
+            st.markdown("---")
+            _fmt_stat = (
+                lambda s: "—"
+                if s["min"] is None
+                else f"min={s['min']:.4f}  med={s['median']:.4f}  "
+                f"max={s['max']:.4f}"
+            )
+            st.markdown(
+                f"**Sigma stats:** {_fmt_stat(ds['sigma_stats'])}"
+            )
+            if ds["robust_sigma_stats"]["min"] is not None:
+                st.markdown(
+                    f"**Robust sigma:** {_fmt_stat(ds['robust_sigma_stats'])}"
+                )
+            st.markdown(
+                f"**Dynamic floor stats:** {_fmt_stat(ds['dynamic_floor_stats'])}"
+            )
+
+            # Warnings
+            for w in ds.get("warnings", []):
+                st.warning(w)
 
     st.divider()
 
