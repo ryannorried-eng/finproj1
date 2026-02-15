@@ -399,7 +399,7 @@ def _sidebar():
 
         st.text_input(
             "API Key",
-            value=os.environ.get("ODDS_API_KEY", ""),
+            value=os.environ.get("ODDS_API_KEY", "09d11879822c9c7bd81c7eb210c82d92"),
             type="password",
             key="api_key",
             help=(
