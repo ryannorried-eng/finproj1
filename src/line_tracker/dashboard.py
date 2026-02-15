@@ -31,6 +31,7 @@ from line_tracker.bet_slip import (
 from line_tracker.bet_slip import (
     american_to_decimal as _slip_a2d,
 )
+from line_tracker.market_structure import analyze_market
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
 from line_tracker.performance import (
@@ -745,6 +746,9 @@ def _page_detail():
         # --- Best Bet (Consensus EV) ---
         _detail_best_bet_section(game_lines)
 
+        # --- Market Structure ---
+        _detail_market_structure(game_lines)
+
     tabs = st.tabs([
         "Odds Comparison", "Arbitrage", "Line Movements", "History",
     ])
@@ -928,6 +932,111 @@ def _best_bet_market_label(rec) -> str:
     if rec.market == "total" and rec.line is not None:
         return f"Total ({rec.line:.1f})"
     return rec.market.title()
+
+
+# -- Detail: Market Structure -----------------------------------------------
+
+_TAG_COLORS = {
+    "Efficient": "green",
+    "Normal": "blue",
+    "Noisy": "orange",
+}
+
+_MKT_LABELS = {
+    "moneyline": "Moneyline",
+    "spread": "Spread",
+    "total": "Total",
+}
+
+
+def _detail_market_structure(game_lines):
+    """Show a Market Structure card with efficiency metrics."""
+    ml = [ln for ln in game_lines if ln.bet_type == BetType.MONEYLINE]
+    sp = [ln for ln in game_lines if ln.bet_type == BetType.SPREAD]
+    tot = [ln for ln in game_lines if ln.bet_type == BetType.TOTAL]
+
+    analyses = {}
+    for label, subset in [("moneyline", ml), ("spread", sp), ("total", tot)]:
+        a = analyze_market(subset)
+        if a:
+            analyses[label] = a
+
+    if not analyses:
+        return
+
+    st.divider()
+    st.subheader("Market Structure")
+    st.caption("Efficiency and stability metrics across sportsbooks")
+
+    for mkt_key, info in analyses.items():
+        mkt_name = _MKT_LABELS.get(mkt_key, mkt_key)
+        tag = info["tag"]
+        tag_color = _TAG_COLORS.get(tag, "gray")
+
+        with st.container(border=True):
+            hdr = (
+                f"**{mkt_name}** — "
+                f":{tag_color}-background[**{tag}**]"
+            )
+            st.markdown(hdr)
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric(
+                "Books",
+                f"{info['books_with_holds']}/{info['books_total']}",
+            )
+            c2.metric("Hold (median)", f"{info['market_hold_median']:.1f}%")
+            h_spr = info["hold_spread"]
+            c3.metric(
+                "Hold Spread",
+                f"{h_spr:.1f}%" if h_spr is not None else "N/A",
+                help="IQR (p75-p25) of book hold percentages",
+            )
+            c4.metric(
+                "Volatility",
+                f"{info['volatility_sigma']:.4f}",
+                help="Std dev of de-vigged probabilities",
+            )
+
+            # Sharp vs retail divergence
+            div = info["divergence"]
+            if div is not None:
+                d1, d2, d3 = st.columns(3)
+                d1.metric(
+                    "Sharp Consensus",
+                    f"{info['sharp_consensus'] * 100:.1f}%",
+                )
+                d2.metric(
+                    "Retail Consensus",
+                    f"{info['retail_consensus'] * 100:.1f}%",
+                )
+                d3.metric(
+                    "Divergence",
+                    f"{div * 100:.1f} pp",
+                    help=(
+                        "Absolute difference between sharp and "
+                        "retail consensus probabilities"
+                    ),
+                )
+                sharp_str = ", ".join(info["sharp_books"]) or "—"
+                retail_str = ", ".join(info["retail_books"]) or "—"
+                st.caption(
+                    f"Sharp: {sharp_str} | Retail: {retail_str}"
+                )
+            else:
+                st.caption(
+                    "Sharp/retail divergence: insufficient books "
+                    "in one or both groups"
+                )
+
+            # Line dispersion (spread/total)
+            disp = info.get("line_dispersion")
+            if disp:
+                parts = [
+                    f"{val:g} ({cnt})"
+                    for val, cnt in disp.items()
+                ]
+                st.caption(f"Line dispersion: {', '.join(parts)}")
 
 
 # -- Detail: Summary strip -------------------------------------------------
