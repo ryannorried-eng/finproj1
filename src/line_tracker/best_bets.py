@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import exp
 from statistics import median, quantiles, stdev
@@ -194,6 +194,11 @@ class BetRecommendation:
     outlier_filtered: bool = False  # True if outlier books were removed
     market_unstable: bool = False  # True if too many books were filtered out
     skipped_reason: str = ""  # non-empty if this rec was skipped (unsupported)
+    book_holds: dict[str, float] = field(default_factory=dict)  # implied hold% per book
+    market_hold_median: float = 0.0  # median hold% across books
+    market_volatility_sigma: float = 0.0  # std dev of devigged probs
+    robust_sigma: float = 0.0  # IQR / 1.349
+    edge_z: float = 0.0  # edge / max(robust_sigma, 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +472,7 @@ def _build_rec(
     total_books_count: int = 0,
     outlier_filtered: bool = False,
     market_unstable: bool = False,
+    book_holds: dict[str, float] | None = None,
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs."""
     be_prob = breakeven_prob_from_american(best_odds)
@@ -501,6 +507,30 @@ def _build_rec(
         if q_tier in ("Elite", "Strong"):
             q_tier = "Moderate"
 
+    # --- New consensus metrics ---
+    holds = book_holds or {}
+    hold_values = list(holds.values())
+    mkt_hold_med = round(median(hold_values), 2) if hold_values else 0.0
+
+    # Volatility of devigged probabilities (filtered set)
+    if len(side_probs) >= 2:
+        vol_sigma = round(stdev(side_probs), 4)
+        q1, _, q3 = quantiles(side_probs, n=4)
+        r_sigma = round((q3 - q1) / 1.349, 4)
+    else:
+        vol_sigma = 0.0
+        r_sigma = 0.0
+
+    ez = round(edge / max(r_sigma, 0.01), 2)
+
+    # Confidence derived from edge_z thresholds
+    if ez >= 2.5:
+        confidence = "High"
+    elif ez >= 1.5:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
     return BetRecommendation(
         market=market,
         selection=selection,
@@ -513,7 +543,7 @@ def _build_rec(
         ev=round(ev, 4),
         edge_pct=edge_pct_val,
         ev_per_100=round(ev * 100, 2),
-        confidence=_confidence_label(side_probs),
+        confidence=confidence,
         unweighted_consensus_prob=round(unweighted_consensus_prob, 4),
         newest_update_age_min=round(newest_update_age_min, 1),
         oldest_update_age_min=round(oldest_update_age_min, 1),
@@ -527,6 +557,11 @@ def _build_rec(
         freshness_score=f_score,
         outlier_filtered=outlier_filtered,
         market_unstable=market_unstable,
+        book_holds=holds,
+        market_hold_median=mkt_hold_med,
+        market_volatility_sigma=vol_sigma,
+        robust_sigma=r_sigma,
+        edge_z=ez,
     )
 
 
@@ -620,6 +655,13 @@ def _moneyline_recommendations(
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
+    # Implied hold% per sportsbook (all books, pre-filter)
+    book_holds: dict[str, float] = {}
+    for ln in lines:
+        pa_raw = implied_prob_from_american(ln.home_value)
+        pb_raw = implied_prob_from_american(ln.away_value)
+        book_holds[ln.sportsbook] = round((pa_raw + pb_raw - 1) * 100, 2)
+
     results: list[BetRecommendation] = []
 
     n_total = len(lines)
@@ -642,6 +684,7 @@ def _moneyline_recommendations(
             total_books_count=n_total,
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
+            book_holds=book_holds,
         )
     )
 
@@ -662,6 +705,7 @@ def _moneyline_recommendations(
             total_books_count=n_total,
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
+            book_holds=book_holds,
         )
     )
 
@@ -734,6 +778,13 @@ def _spread_recommendations(
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
+    # Implied hold% per sportsbook (matching lines, pre-filter)
+    book_holds: dict[str, float] = {}
+    for ln in matching:
+        pa_raw = implied_prob_from_american(ln.home_price)
+        pb_raw = implied_prob_from_american(ln.away_price)
+        book_holds[ln.sportsbook] = round((pa_raw + pb_raw - 1) * 100, 2)
+
     results: list[BetRecommendation] = []
 
     results.append(
@@ -753,6 +804,7 @@ def _spread_recommendations(
             total_books_count=total_books,
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
+            book_holds=book_holds,
         )
     )
 
@@ -774,6 +826,7 @@ def _spread_recommendations(
             total_books_count=total_books,
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
+            book_holds=book_holds,
         )
     )
 
@@ -842,6 +895,13 @@ def _total_recommendations(
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
+    # Implied hold% per sportsbook (matching lines, pre-filter)
+    book_holds: dict[str, float] = {}
+    for ln in matching:
+        pa_raw = implied_prob_from_american(ln.home_price)
+        pb_raw = implied_prob_from_american(ln.away_price)
+        book_holds[ln.sportsbook] = round((pa_raw + pb_raw - 1) * 100, 2)
+
     results: list[BetRecommendation] = []
 
     results.append(
@@ -861,6 +921,7 @@ def _total_recommendations(
             total_books_count=total_books,
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
+            book_holds=book_holds,
         )
     )
 
@@ -881,6 +942,7 @@ def _total_recommendations(
             total_books_count=total_books,
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
+            book_holds=book_holds,
         )
     )
 

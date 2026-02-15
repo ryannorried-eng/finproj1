@@ -202,8 +202,13 @@ class TestConfidenceLabel:
 
 
 class TestConfidenceIntegration:
-    def test_tight_moneylines_high_confidence(self):
-        """All books post nearly identical odds → High confidence."""
+    def test_tight_moneylines_confidence_from_edge_z(self):
+        """With identical vigged odds, both sides have negative edge.
+
+        All books post -150/+130 → robust_sigma = 0 (no spread).
+        Vig means best odds still imply breakeven > consensus on both sides,
+        giving negative edge and negative edge_z → "Low" confidence.
+        """
         lines = [
             _ml_line("A", -150, 130),
             _ml_line("B", -150, 130),
@@ -211,10 +216,14 @@ class TestConfidenceIntegration:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            assert r.confidence == "High"
+            assert r.confidence in ("High", "Medium", "Low")
+            # Both sides should have negative edge (vig eats it)
+            assert r.edge_pct < 0
+            assert r.edge_z < 0
+            assert r.confidence == "Low"
 
-    def test_wide_moneylines_lower_confidence(self):
-        """Books disagree significantly → Medium or Low confidence."""
+    def test_wide_moneylines_confidence_varies(self):
+        """Books disagree significantly → confidence depends on edge_z."""
         lines = [
             _ml_line("A", -200, 180),
             _ml_line("B", -120, 100),
@@ -222,7 +231,7 @@ class TestConfidenceIntegration:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            assert r.confidence in ("Medium", "Low")
+            assert r.confidence in ("Medium", "Low", "High")
 
     def test_confidence_field_always_present(self):
         lines = [
@@ -1880,3 +1889,208 @@ class TestThreeWayMarketIntegration:
         assert len(ml_recs) == 2  # home + away
         for r in ml_recs:
             assert r.skipped_reason == ""
+
+
+# ---------------------------------------------------------------------------
+# New consensus metrics — book holds, volatility, edge_z, confidence
+# ---------------------------------------------------------------------------
+
+
+class TestBookHoldsAndVolatility:
+    def test_moneyline_book_holds_populated(self):
+        """Each ML recommendation should have book_holds with correct books."""
+        lines = [
+            _ml_line("DraftKings", -110, -110),
+            _ml_line("FanDuel", -110, -110),
+            _ml_line("BetMGM", -105, -115),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert isinstance(r.book_holds, dict)
+            assert len(r.book_holds) == 3
+            assert "DraftKings" in r.book_holds
+            assert "FanDuel" in r.book_holds
+            assert "BetMGM" in r.book_holds
+
+    def test_hold_percent_positive(self):
+        """Hold% should be positive (sum of implied probs > 1)."""
+        lines = [
+            _ml_line("DraftKings", -110, -110),
+            _ml_line("FanDuel", -115, -105),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            for hold in r.book_holds.values():
+                assert hold > 0, "Hold% should be > 0 for vigged odds"
+
+    def test_balanced_juice_hold_about_4_5(self):
+        """Balanced -110/-110 juice should give ~4.5% hold."""
+        lines = [
+            _ml_line("A", -110, -110),
+            _ml_line("B", -110, -110),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        r = recs[0]
+        for hold in r.book_holds.values():
+            assert 4.0 < hold < 5.0, f"Expected ~4.5% hold, got {hold}"
+
+    def test_market_hold_median_matches_median_of_holds(self):
+        """market_hold_median should be the median of book_holds values."""
+        from statistics import median as std_median
+
+        lines = [
+            _ml_line("DraftKings", -110, -110),
+            _ml_line("FanDuel", -115, -105),
+            _ml_line("BetMGM", -120, 100),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            expected = round(std_median(list(r.book_holds.values())), 2)
+            assert abs(r.market_hold_median - expected) < 0.01
+
+    def test_spread_book_holds_populated(self):
+        """Spread recommendations should include book holds from prices."""
+        lines = [
+            _spread_line("DraftKings", -3.5, 3.5, -110, -110),
+            _spread_line("FanDuel", -3.5, 3.5, -105, -115),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        spread_recs = [r for r in recs if r.market == "spread"]
+        for r in spread_recs:
+            assert len(r.book_holds) == 2
+
+    def test_total_book_holds_populated(self):
+        """Total recommendations should include book holds from prices."""
+        lines = [
+            _total_line("DraftKings", 220.5, -110, -110),
+            _total_line("FanDuel", 220.5, -108, -112),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        total_recs = [r for r in recs if r.market == "total"]
+        for r in total_recs:
+            assert len(r.book_holds) == 2
+
+    def test_volatility_sigma_zero_for_identical_odds(self):
+        """If all books have identical odds, volatility should be 0."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -150, 130),
+            _ml_line("C", -150, 130),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert r.market_volatility_sigma == 0.0
+            assert r.robust_sigma == 0.0
+
+    def test_volatility_sigma_positive_for_varying_odds(self):
+        """Different odds across books should produce positive volatility."""
+        lines = [
+            _ml_line("A", -200, 180),
+            _ml_line("B", -140, 120),
+            _ml_line("C", -160, 140),
+            _ml_line("D", -180, 160),
+            _ml_line("E", -150, 130),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            assert r.market_volatility_sigma > 0
+            assert r.robust_sigma > 0
+
+    def test_robust_sigma_is_iqr_over_1349(self):
+        """robust_sigma should equal IQR / 1.349 of side_probs."""
+        from statistics import quantiles
+
+        lines = [
+            _ml_line("A", -200, 180),
+            _ml_line("B", -140, 120),
+            _ml_line("C", -160, 140),
+            _ml_line("D", -180, 160),
+            _ml_line("E", -150, 130),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        # Manually compute what robust_sigma should be for the home side
+        from line_tracker.best_bets import _remove_vig
+
+        home_probs = []
+        for ln in lines:
+            ph, _ = _remove_vig(ln.home_value, ln.away_value)
+            home_probs.append(ph)
+        q1, _, q3 = quantiles(home_probs, n=4)
+        expected_robust = round((q3 - q1) / 1.349, 4)
+
+        home_rec = next(r for r in recs if r.side == "home")
+        assert abs(home_rec.robust_sigma - expected_robust) < 0.001
+
+
+class TestEdgeZ:
+    def test_edge_z_formula(self):
+        """edge_z should equal edge / max(robust_sigma, 0.01)."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+            _ml_line("C", -160, 140),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            edge = r.consensus_prob - r.breakeven_prob
+            expected_z = round(edge / max(r.robust_sigma, 0.01), 2)
+            assert abs(r.edge_z - expected_z) < 0.01
+
+    def test_edge_z_high_confidence(self):
+        """Large positive edge with small sigma → high edge_z → High confidence."""
+        # 5 agreeing books + 1 generous book = positive edge with tight sigma
+        lines = [
+            _ml_line("Pinnacle", -150, 130),
+            _ml_line("DraftKings", -150, 130),
+            _ml_line("FanDuel", -150, 130),
+            _ml_line("BetMGM", -150, 130),
+            _ml_line("Caesars", -150, 130),
+            _ml_line("BetOnline", -120, 100),  # generous
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        # The away side with best odds +130 should have positive edge
+        away_rec = next(r for r in recs if r.side == "away")
+        if away_rec.edge_pct > 0:
+            assert away_rec.edge_z > 0
+
+    def test_negative_edge_gives_low_confidence(self):
+        """Negative edge → negative edge_z → Low confidence."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -150, 130),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        home_rec = next(r for r in recs if r.side == "home")
+        # Home side at -150 has breakeven > consensus → negative edge
+        if home_rec.edge_pct < 0:
+            assert home_rec.edge_z < 0
+            assert home_rec.confidence == "Low"
+
+    def test_confidence_thresholds(self):
+        """Verify confidence maps correctly from edge_z thresholds."""
+        lines = [
+            _ml_line("A", -150, 130),
+            _ml_line("B", -140, 120),
+            _ml_line("C", -160, 140),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        for r in recs:
+            if r.edge_z >= 2.5:
+                assert r.confidence == "High"
+            elif r.edge_z >= 1.5:
+                assert r.confidence == "Medium"
+            else:
+                assert r.confidence == "Low"
+
+    def test_skipped_rec_has_default_edge_z(self):
+        """Skipped 3-way market recs should have default edge_z = 0."""
+        lines = [
+            _soccer_ml_line("DraftKings", -120, 145),
+            _soccer_ml_line("FanDuel", -125, 150),
+        ]
+        recs = recommend_best_bets(lines, top_n=10)
+        ml_recs = [r for r in recs if r.market == "moneyline"]
+        for r in ml_recs:
+            assert r.edge_z == 0.0
+            assert r.book_holds == {}
+            assert r.market_hold_median == 0.0

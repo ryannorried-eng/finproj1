@@ -840,6 +840,24 @@ def _render_best_bet_why(rec) -> None:
             f"Freshness: {rec.freshness_score:.0f}"
         )
 
+        # Market volatility & hold metrics
+        st.markdown(
+            f"- **Market hold median:** {rec.market_hold_median:.2f}%\n"
+            f"- **Volatility (sigma):** {rec.market_volatility_sigma:.4f} | "
+            f"**Robust sigma (IQR/1.349):** {rec.robust_sigma:.4f}\n"
+            f"- **Edge Z-score:** {rec.edge_z:+.2f} "
+            f"(confidence: {rec.confidence})"
+        )
+
+        if rec.book_holds:
+            holds_str = " | ".join(
+                f"{book}: {hold:.2f}%"
+                for book, hold in sorted(
+                    rec.book_holds.items(), key=lambda kv: kv[1]
+                )
+            )
+            st.caption(f"Book holds: {holds_str}")
+
 
 def _best_bet_market_label(rec) -> str:
     """Format the market name with line info for display."""
