@@ -18,6 +18,10 @@ _STALE_THRESHOLD_MIN = 120.0
 _EDGE_OUTLIER_THRESHOLD = 4.0
 _STAY_AWAY_LIMIT = 15
 
+# ── relaxed Tier 2 display thresholds (used when strict mode OFF) ─────
+_RELAXED_TIER2_EDGE = 0.5
+_RELAXED_TIER2_EDGE_Z_MIN = 0.75
+
 
 def _slate_score(quality_score: float, edge_pct: float) -> float:
     """0.6 * quality_score + 0.4 * min(edge_pct, 5) * 20"""
@@ -152,6 +156,51 @@ def _stay_away_sort_key(entry: dict) -> tuple:
     )
 
 
+# ── relaxed Tier 2 display check (post-classification) ───────────────
+
+
+def passes_relaxed_tier2(entry: dict) -> bool:
+    """Return True if a stay-away entry meets relaxed Tier 2 display criteria.
+
+    Called by the dashboard when *strict mode* is OFF.  This never changes
+    the canonical tier assignment — it only decides whether to **show** the
+    entry in the Tier 2 section instead of Stay Away.
+
+    Relaxed rules (vs. strict):
+    * edge >= 0.5 %  (strict: 1.5 %)
+    * edge_z >= 0.75  (strict: 1.0), skipped when 0
+    * confidence Low allowed **only** when quality_tier in (Elite, Strong)
+    * Hard disqualifiers still block promotion.
+    """
+    # Hard disqualifiers — never promote
+    if entry.get("market_unstable", False):
+        return False
+    books = entry.get("books_used", 0)
+    if books and books < _MIN_BOOKS:
+        return False
+    if entry.get("oldest_update_age_min", 0.0) > _STALE_THRESHOLD_MIN:
+        return False
+    edge = entry.get("edge_pct", 0.0)
+    if edge >= _EDGE_OUTLIER_THRESHOLD and entry.get("confidence", "") == "Low":
+        return False
+
+    # Relaxed thresholds
+    if edge <= 0 or edge < _RELAXED_TIER2_EDGE:
+        return False
+    edge_z = entry.get("edge_z", 0.0)
+    if edge_z and edge_z < _RELAXED_TIER2_EDGE_Z_MIN:
+        return False
+    confidence = entry.get("confidence", "")
+    quality_tier = entry.get("quality_tier", "")
+    if confidence == "Low" and quality_tier not in ("Elite", "Strong"):
+        return False
+    if confidence not in ("High", "Medium", "Low"):
+        return False
+    if quality_tier not in ("Elite", "Strong", "Moderate"):
+        return False
+    return True
+
+
 # ── display filters (applied AFTER classification) ─────────────────
 
 
@@ -198,9 +247,10 @@ def build_daily_slate(
 
     Returns
     -------
-    dict with keys ``"tier1"``, ``"tier2"``, ``"avoid"`` (lists of
-    slate-entry dicts) and ``"debug"`` (counters, present when
-    ``LINE_TRACKER_DEBUG`` env-var is set or ``debug`` filter flag is True).
+    dict with keys ``"tier1"``, ``"tier2"``, ``"stay_away"`` (lists of
+    slate-entry dicts), ``"counts"`` (always present), and ``"debug"``
+    (detailed counters, present when ``LINE_TRACKER_DEBUG`` env-var is set
+    or ``debug`` filter flag is True).
     """
     filters = filters or {}
     max_per_event: int = filters.get("max_per_event", 1)
@@ -258,7 +308,7 @@ def build_daily_slate(
     all_entries.sort(key=lambda e: e["slate_score"], reverse=True)
 
     # ── Bucket into tiers (display-filters on tier1/tier2 only) ───
-    result: dict[str, list[dict]] = {"tier1": [], "tier2": [], "avoid": []}
+    result: dict = {"tier1": [], "tier2": [], "stay_away": []}
     display_filters = {k: v for k, v in filters.items() if k != "max_per_event"}
 
     for entry in all_entries:
@@ -274,23 +324,32 @@ def build_daily_slate(
             if "markets" in filters:
                 markets_filter["markets"] = filters["markets"]
             if _passes_filters(entry, markets_filter):
-                result["avoid"].append(entry)
+                result["stay_away"].append(entry)
 
     # Rank Stay Away by "worst-ness" and cap at _STAY_AWAY_LIMIT
-    result["avoid"].sort(key=_stay_away_sort_key)
-    result["avoid"] = result["avoid"][:_STAY_AWAY_LIMIT]
+    result["stay_away"].sort(key=_stay_away_sort_key)
+    result["stay_away"] = result["stay_away"][:_STAY_AWAY_LIMIT]
 
-    # ── Debug counters ────────────────────────────────────────────
+    # ── Counts (always available) ─────────────────────────────────
+    result["counts"] = {
+        "total_recs": len(all_entries),
+        "tier1": sum(1 for e in all_entries if e["tier"] == "tier1"),
+        "tier2": sum(1 for e in all_entries if e["tier"] == "tier2"),
+        "stay_away": sum(1 for e in all_entries if e["tier"] == "avoid"),
+    }
+
+    # ── Debug counters (extended breakdown) ────────────────────────
     show_debug = (
         os.environ.get("LINE_TRACKER_DEBUG", "").lower() in ("1", "true", "yes")
         or filters.get("debug", False)
     )
     if show_debug:
         result["debug"] = {
+            **result["counts"],
             "total_recs": len(all_entries),
-            "tier1_count": sum(1 for e in all_entries if e["tier"] == "tier1"),
-            "tier2_count": sum(1 for e in all_entries if e["tier"] == "tier2"),
-            "stay_away_count": sum(1 for e in all_entries if e["tier"] == "avoid"),
+            "tier1_count": result["counts"]["tier1"],
+            "tier2_count": result["counts"]["tier2"],
+            "stay_away_count": result["counts"]["stay_away"],
             "by_confidence": dict(
                 Counter(e.get("confidence", "") for e in all_entries)
             ),

@@ -15,6 +15,7 @@ from line_tracker.slate import (
     _stay_away_sort_key,
     build_daily_slate,
     classify_rec,
+    passes_relaxed_tier2,
 )
 
 # ---------------------------------------------------------------------------
@@ -451,8 +452,8 @@ class TestBuildDailySlate:
             quality_score=20, edge_pct=0.5, quality_tier="Thin",
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        assert len(result["avoid"]) == 1
-        assert len(result["avoid"][0]["avoid_reasons"]) >= 1
+        assert len(result["stay_away"]) == 1
+        assert len(result["stay_away"][0]["avoid_reasons"]) >= 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_metadata_attached(self, mock_rbb):
@@ -464,7 +465,8 @@ class TestBuildDailySlate:
         )]
         lines = {"evt1": _event_lines("Knicks @ Heat", commence=ct)}
         result = build_daily_slate(lines)
-        entry = (result["tier1"] + result["tier2"] + result["avoid"])[0]
+        all_entries = result["tier1"] + result["tier2"] + result["stay_away"]
+        entry = all_entries[0]
         assert entry["event"] == "Knicks @ Heat"
         assert entry["commence_time"] == ct
         assert entry["books_used"] == 6
@@ -519,7 +521,7 @@ class TestBuildDailySlate:
                       quality_tier="Moderate", confidence="Medium"),
         ]
         result = build_daily_slate({"evt1": _event_lines()})
-        total = len(result["tier1"]) + len(result["tier2"]) + len(result["avoid"])
+        total = len(result["tier1"]) + len(result["tier2"]) + len(result["stay_away"])
         assert total == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -534,7 +536,7 @@ class TestBuildDailySlate:
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"max_per_event": 2},
         )
-        total = len(result["tier1"]) + len(result["tier2"]) + len(result["avoid"])
+        total = len(result["tier1"]) + len(result["tier2"]) + len(result["stay_away"])
         assert total == 2
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -549,7 +551,7 @@ class TestBuildDailySlate:
         )
         # Entry is classified as avoid (edge too small for Tier 2),
         # and NOT dropped by the display filter.
-        assert len(result["avoid"]) == 1
+        assert len(result["stay_away"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_filter_markets(self, mock_rbb):
@@ -561,7 +563,7 @@ class TestBuildDailySlate:
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"markets": ["spread", "total"]}
         )
-        total = len(result["tier1"]) + len(result["tier2"]) + len(result["avoid"])
+        total = len(result["tier1"]) + len(result["tier2"]) + len(result["stay_away"])
         assert total == 0
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -575,7 +577,7 @@ class TestBuildDailySlate:
             {"evt1": _event_lines()}, filters={"hide_low_confidence": True}
         )
         # Low confidence recs are classified to avoid, not dropped
-        assert len(result["avoid"]) == 1
+        assert len(result["stay_away"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_empty_input(self, mock_rbb):
@@ -583,7 +585,7 @@ class TestBuildDailySlate:
         result = build_daily_slate({})
         assert result["tier1"] == []
         assert result["tier2"] == []
-        assert result["avoid"] == []
+        assert result["stay_away"] == []
         mock_rbb.assert_not_called()
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -593,7 +595,7 @@ class TestBuildDailySlate:
         result = build_daily_slate({"evt1": _event_lines()})
         assert result["tier1"] == []
         assert result["tier2"] == []
-        assert result["avoid"] == []
+        assert result["stay_away"] == []
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_multiple_events_mixed_tiers(self, mock_rbb):
@@ -625,7 +627,7 @@ class TestBuildDailySlate:
         result = build_daily_slate(lines)
         assert len(result["tier1"]) == 1
         assert len(result["tier2"]) == 1
-        assert len(result["avoid"]) == 1
+        assert len(result["stay_away"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_avoid_reasons_populated(self, mock_rbb):
@@ -635,7 +637,7 @@ class TestBuildDailySlate:
                       market_unstable=True, quality_tier="Thin")
         ]
         result = build_daily_slate({"evt1": _event_lines()})
-        entry = result["avoid"][0]
+        entry = result["stay_away"][0]
         assert any("Unstable market" in r for r in entry["avoid_reasons"])
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -646,7 +648,7 @@ class TestBuildDailySlate:
                       quality_tier="Strong", confidence="High")
         ]
         result = build_daily_slate({"evt1": _event_lines()})
-        entry = result["avoid"][0]
+        entry = result["stay_away"][0]
         assert any("Stale lines" in r for r in entry["avoid_reasons"])
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -657,7 +659,7 @@ class TestBuildDailySlate:
                       quality_tier="Strong", confidence="High")
         ]
         result = build_daily_slate({"evt1": _event_lines()})
-        entry = result["avoid"][0]
+        entry = result["stay_away"][0]
         assert any("Too few books" in r for r in entry["avoid_reasons"])
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -668,7 +670,7 @@ class TestBuildDailySlate:
                       quality_tier="Thin")
         ]
         result = build_daily_slate({"evt1": _event_lines()})
-        entry = result["avoid"][0]
+        entry = result["stay_away"][0]
         assert any("Edge outlier" in r for r in entry["avoid_reasons"])
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -688,7 +690,7 @@ class TestBuildDailySlate:
             for i in range(_STAY_AWAY_LIMIT + 5)
         }
         result = build_daily_slate(lines)
-        assert len(result["avoid"]) == _STAY_AWAY_LIMIT
+        assert len(result["stay_away"]) == _STAY_AWAY_LIMIT
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_debug_counters_when_enabled(self, mock_rbb):
@@ -741,8 +743,8 @@ class TestStayAwayAlwaysPopulated:
         result = build_daily_slate(lines)
         assert len(result["tier1"]) == 0
         assert len(result["tier2"]) == 0
-        assert len(result["avoid"]) == 2
-        for entry in result["avoid"]:
+        assert len(result["stay_away"]) == 2
+        for entry in result["stay_away"]:
             assert len(entry["avoid_reasons"]) >= 1
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -756,8 +758,8 @@ class TestStayAwayAlwaysPopulated:
             {"evt1": _event_lines()},
             filters={"min_edge": 5.0, "min_quality": 90, "hide_low_confidence": True},
         )
-        assert len(result["avoid"]) == 1
-        assert len(result["avoid"][0]["avoid_reasons"]) >= 1
+        assert len(result["stay_away"]) == 1
+        assert len(result["stay_away"][0]["avoid_reasons"]) >= 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_medium_quality_recs_go_to_stay_away_with_reasons(self, mock_rbb):
@@ -767,8 +769,8 @@ class TestStayAwayAlwaysPopulated:
             quality_tier="Moderate", confidence="Medium",
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        assert len(result["avoid"]) == 1
-        entry = result["avoid"][0]
+        assert len(result["stay_away"]) == 1
+        entry = result["stay_away"][0]
         assert any("Edge too small" in r for r in entry["avoid_reasons"])
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -870,3 +872,231 @@ class TestDynamicEdgeFloor:
         # 3.1 < 3.12 → tier2 (since 3.1 >= 1.5)
         assert len(result["tier2"]) == 1
         assert len(result["tier1"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Counts always present
+# ---------------------------------------------------------------------------
+
+
+class TestCountsAlwaysPresent:
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_counts_present_without_debug(self, mock_rbb):
+        """counts dict is always present, even without debug flag."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=80, edge_pct=3.0, quality_tier="Strong", confidence="High",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        assert "counts" in result
+        assert result["counts"]["total_recs"] == 1
+        assert result["counts"]["tier1"] == 1
+        assert result["counts"]["tier2"] == 0
+        assert result["counts"]["stay_away"] == 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_counts_zero_on_empty(self, mock_rbb):
+        """counts is present and all zeros when no events supplied."""
+        result = build_daily_slate({})
+        assert result["counts"]["total_recs"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Display filters never change classification
+# ---------------------------------------------------------------------------
+
+
+class TestFiltersNeverChangeClassification:
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_tier_field_unchanged_by_display_filters(self, mock_rbb):
+        """Each entry's 'tier' field is identical regardless of display filters."""
+
+        def _recs(lines):
+            ev = lines[0].event
+            if "A" in ev:
+                return [_make_rec(
+                    quality_score=90, edge_pct=4.0,
+                    quality_tier="Elite", confidence="High",
+                )]
+            if "B" in ev:
+                return [_make_rec(
+                    quality_score=55, edge_pct=2.0,
+                    quality_tier="Moderate", confidence="Medium",
+                )]
+            return [_make_rec(
+                quality_score=20, edge_pct=0.3,
+                quality_tier="Thin", confidence="Low",
+            )]
+
+        mock_rbb.side_effect = _recs
+        lines = {
+            "e1": _event_lines("TeamA @ TeamX"),
+            "e2": _event_lines("TeamB @ TeamY"),
+            "e3": _event_lines("TeamC @ TeamZ"),
+        }
+
+        # Without filters
+        r1 = build_daily_slate(lines)
+        # With aggressive filters
+        r2 = build_daily_slate(lines, filters={
+            "min_edge": 5.0, "min_quality": 95, "hide_low_confidence": True,
+        })
+
+        # Classification counts must be identical
+        assert r1["counts"] == r2["counts"]
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_display_filters_only_reduce_shown_entries(self, mock_rbb):
+        """Display filters can only remove entries from tier1/tier2, never add."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=80, edge_pct=3.0, quality_tier="Strong", confidence="High",
+        )]
+        no_filter = build_daily_slate({"evt1": _event_lines()})
+        filtered = build_daily_slate(
+            {"evt1": _event_lines()}, filters={"min_edge": 5.0}
+        )
+        assert len(filtered["tier1"]) <= len(no_filter["tier1"])
+        # Stay away cannot gain entries from display-filtering tier1/tier2
+        assert filtered["counts"] == no_filter["counts"]
+
+
+# ---------------------------------------------------------------------------
+# Strict mode / relaxed Tier 2 display
+# ---------------------------------------------------------------------------
+
+
+class TestRelaxedTier2:
+    def test_strict_avoid_passes_relaxed(self):
+        """An entry that's avoid under strict but meets relaxed thresholds."""
+        e = _entry(
+            edge_pct=0.8, confidence="Medium", quality_tier="Moderate",
+            edge_z=0.0, books_used=5,
+        )
+        result = classify_rec(e)
+        assert result["tier"] == "avoid"  # strict classification
+        assert passes_relaxed_tier2(e) is True  # relaxed display
+
+    def test_relaxed_rejects_hard_disqualifier(self):
+        """Hard disqualifiers prevent relaxed promotion."""
+        e = _entry(
+            edge_pct=1.0, confidence="Medium", quality_tier="Moderate",
+            market_unstable=True,
+        )
+        assert passes_relaxed_tier2(e) is False
+
+    def test_relaxed_allows_low_conf_strong_quality(self):
+        """Low confidence is allowed when quality_tier is Strong."""
+        e = _entry(
+            edge_pct=1.0, confidence="Low", quality_tier="Strong",
+            edge_z=0.0, books_used=5,
+        )
+        assert passes_relaxed_tier2(e) is True
+
+    def test_relaxed_rejects_low_conf_moderate_quality(self):
+        """Low confidence is rejected when quality_tier is only Moderate."""
+        e = _entry(
+            edge_pct=1.0, confidence="Low", quality_tier="Moderate",
+            edge_z=0.0, books_used=5,
+        )
+        assert passes_relaxed_tier2(e) is False
+
+    def test_relaxed_rejects_below_edge_floor(self):
+        """Edge below 0.5% fails relaxed mode."""
+        e = _entry(
+            edge_pct=0.4, confidence="Medium", quality_tier="Moderate",
+            edge_z=0.0, books_used=5,
+        )
+        assert passes_relaxed_tier2(e) is False
+
+    def test_relaxed_rejects_low_edge_z(self):
+        """edge_z below 0.75 fails relaxed mode."""
+        e = _entry(
+            edge_pct=1.0, confidence="Medium", quality_tier="Moderate",
+            edge_z=0.5, books_used=5,
+        )
+        assert passes_relaxed_tier2(e) is False
+
+    def test_relaxed_does_not_change_tier1(self):
+        """passes_relaxed_tier2 is only for avoid entries; Tier1 stays strict."""
+        e = _entry(
+            edge_pct=3.0, confidence="High", quality_tier="Strong",
+        )
+        result = classify_rec(e)
+        # Tier 1 entries should never need relaxed promotion
+        assert result["tier"] == "tier1"
+
+    def test_relaxed_rejects_stale(self):
+        """Stale lines block relaxed promotion."""
+        e = _entry(
+            edge_pct=1.0, confidence="Medium", quality_tier="Moderate",
+            oldest_update_age_min=200.0, books_used=5,
+        )
+        assert passes_relaxed_tier2(e) is False
+
+    def test_relaxed_rejects_too_few_books(self):
+        """Too few books blocks relaxed promotion."""
+        e = _entry(
+            edge_pct=1.0, confidence="Medium", quality_tier="Moderate",
+            books_used=2,
+        )
+        assert passes_relaxed_tier2(e) is False
+
+    def test_relaxed_rejects_thin_quality(self):
+        """Thin quality tier fails relaxed mode."""
+        e = _entry(
+            edge_pct=1.0, confidence="Medium", quality_tier="Thin",
+            books_used=5,
+        )
+        assert passes_relaxed_tier2(e) is False
+
+
+# ---------------------------------------------------------------------------
+# Empty state message strings
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyStateStrings:
+    """Verify that the expected empty-state text constants are correct.
+
+    The actual rendering is in Streamlit UI code; here we verify that
+    the slate module returns the right structure so the dashboard can
+    produce the right messages.
+    """
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_empty_tier1_has_data_for_message(self, mock_rbb):
+        """When tier1 is empty but recs exist, counts reflect it."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=55, edge_pct=2.0,
+            quality_tier="Moderate", confidence="Medium",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        assert len(result["tier1"]) == 0
+        assert result["counts"]["tier1"] == 0
+        assert result["counts"]["total_recs"] > 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_empty_tier2_has_data_for_message(self, mock_rbb):
+        """When tier2 is empty but recs exist, counts reflect it."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=90, edge_pct=4.0,
+            quality_tier="Elite", confidence="High",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        assert len(result["tier2"]) == 0
+        assert result["counts"]["tier2"] == 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_all_empty_zero_total(self, mock_rbb):
+        """No recommendations → total_recs == 0 for no-data message."""
+        result = build_daily_slate({})
+        assert result["counts"]["total_recs"] == 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_stay_away_empty_when_all_pass(self, mock_rbb):
+        """When all recs are tier1/tier2, stay_away is empty."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=90, edge_pct=4.0,
+            quality_tier="Elite", confidence="High",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        assert len(result["stay_away"]) == 0

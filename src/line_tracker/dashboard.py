@@ -21,7 +21,6 @@ from line_tracker.bet_history import (
 )
 from line_tracker.bet_slip import (
     american_profit,
-    american_to_decimal as _slip_a2d,
     american_total_return,
     compute_standouts,
     format_american,
@@ -29,10 +28,13 @@ from line_tracker.bet_slip import (
     is_duplicate_leg,
     parlay_payout,
 )
+from line_tracker.bet_slip import (
+    american_to_decimal as _slip_a2d,
+)
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
 from line_tracker.scraper import OddsClient
-from line_tracker.slate import build_daily_slate
+from line_tracker.slate import build_daily_slate, passes_relaxed_tier2
 from line_tracker.storage import LineStore
 
 SPORTS = {
@@ -1785,7 +1787,7 @@ def _page_daily_slate():
         st.info("No data loaded yet. Fetch odds from the Dashboard first.")
         return
 
-    # --- Filters ---
+    # --- Display Filters ---
     fcols = st.columns(3)
     with fcols[0]:
         min_edge = st.slider(
@@ -1812,12 +1814,66 @@ def _page_daily_slate():
             key="slate_hide_low",
         )
 
+    # --- Slate Filters card ---
+    _debug_env = os.environ.get(
+        "LINE_TRACKER_DEBUG", ""
+    ).lower() in ("1", "true", "yes")
+
+    with st.expander("Slate Filters", expanded=False):
+        sf1, sf2 = st.columns(2)
+        with sf1:
+            strict_mode = st.toggle(
+                "Strict mode",
+                value=True,
+                key="slate_strict_mode",
+                help=(
+                    "ON: Tier 2 uses strict thresholds (edge >= 1.5%, "
+                    "edge_z >= 1.0). OFF: relaxed (edge >= 0.5%, "
+                    "edge_z >= 0.75, Low confidence allowed if quality "
+                    "tier >= Strong). Tier 1 is always strict."
+                ),
+            )
+            show_stay_away = st.checkbox(
+                "Show Stay Away",
+                value=True,
+                key="slate_show_stay_away",
+            )
+        with sf2:
+            max_per_section = st.slider(
+                "Max games per section",
+                min_value=5,
+                max_value=30,
+                value=10,
+                step=1,
+                key="slate_max_per_section",
+            )
+            _sort_options = [
+                "Best edge",
+                "Best edge_z",
+                "Best quality",
+                "Lowest hold",
+            ]
+            tier2_sort = st.selectbox(
+                "Tier 2 sort",
+                options=_sort_options,
+                index=0,
+                key="slate_tier2_sort",
+            )
+        if _debug_env:
+            show_debug_counts = st.checkbox(
+                "Show debug counts",
+                value=False,
+                key="slate_show_debug_counts",
+            )
+        else:
+            show_debug_counts = False
+
     # --- Build lines_by_event ---
     lines_by_event: dict[str, list] = defaultdict(list)
     for ln in lines:
         lines_by_event[ln.event].append(ln)
 
-    show_debug = st.session_state.get("slate_debug", False)
+    show_debug = show_debug_counts or st.session_state.get("slate_debug", False)
     filters = {
         "min_edge": min_edge,
         "min_quality": min_quality,
@@ -1828,14 +1884,46 @@ def _page_daily_slate():
     slate = build_daily_slate(dict(lines_by_event), filters=filters)
 
     tier1 = slate["tier1"]
-    tier2 = slate["tier2"]
-    avoid = slate["avoid"]
+    tier2 = list(slate["tier2"])
+    stay_away = list(slate["stay_away"])
+    counts = slate["counts"]
+
+    # ── Relaxed mode: promote qualifying stay_away → display tier2 ────
+    if not strict_mode:
+        promoted = [e for e in stay_away if passes_relaxed_tier2(e)]
+        stay_away = [e for e in stay_away if not passes_relaxed_tier2(e)]
+        tier2 = tier2 + promoted
+
+    # ── Tier 2 sorting (stable, deterministic) ────────────────────────
+    _tier2_sort_keys = {
+        "Best edge": lambda e: (-e["edge_pct"], -e["slate_score"], e["event"]),
+        "Best edge_z": lambda e: (-e.get("edge_z", 0.0), -e["slate_score"], e["event"]),
+        "Best quality": lambda e: (-e["quality_score"], -e["slate_score"], e["event"]),
+        "Lowest hold": lambda e: (
+            e.get("market_hold_median", 999.0),
+            -e["slate_score"],
+            e["event"],
+        ),
+    }
+    tier2.sort(key=_tier2_sort_keys.get(tier2_sort, _tier2_sort_keys["Best edge"]))
+
+    # ── Apply max-per-section cap ─────────────────────────────────────
+    tier1_display = tier1[:max_per_section]
+    tier2_display = tier2[:max_per_section]
+    stay_away_display = stay_away[:max_per_section] if show_stay_away else []
+
+    # ── No-data guard ─────────────────────────────────────────────────
+    if counts["total_recs"] == 0:
+        st.warning(
+            "No recommendations returned "
+            "(check API key, sport selection, or fetch)."
+        )
 
     # Summary metrics
     mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("Top Plays", len(tier1))
-    mc2.metric("More Plays", len(tier2))
-    mc3.metric("Stay Away", len(avoid))
+    mc1.metric("Top Plays", len(tier1_display))
+    mc2.metric("More Plays", len(tier2_display))
+    mc3.metric("Stay Away", len(stay_away_display))
 
     # Debug counters (behind toggle)
     debug = slate.get("debug")
@@ -1855,40 +1943,79 @@ def _page_daily_slate():
 
     st.divider()
 
-    # ── Tier 1: Top Plays (up to 3 cards) ─────────────────────────────────
+    # ── Tier 1: Top Plays ─────────────────────────────────────────────
     st.subheader("Top Plays (Tier 1)")
-    if not tier1:
-        st.info("No top plays match your filters.")
+    if not tier1_display:
+        st.info("No Tier 1 plays today under current thresholds.")
+        st.caption(
+            "Tier 1 requires **High** confidence + quality tier "
+            "**Elite/Strong** + edge >= (3.0 + 1.2 \u00d7 \u03c3)."
+        )
     else:
-        _render_slate_date_groups(tier1[:3], show_cards=True)
+        _render_slate_date_groups(tier1_display, show_cards=True)
 
     st.divider()
 
-    # ── Tier 2: More Plays (table, next 10) ───────────────────────────────
+    # ── Tier 2: More Plays ────────────────────────────────────────────
     st.subheader("More Plays (Tier 2)")
-    if not tier2:
-        st.info("No additional plays match your filters.")
+    if not tier2_display:
+        st.info("No Tier 2 plays meet current filters.")
+        st.caption(
+            "Try turning off Strict mode or lowering the Tier 2 edge floor."
+        )
     else:
-        _render_slate_table(tier2[:10])
+        _render_slate_table(tier2_display)
 
     st.divider()
 
-    # ── Avoid ─────────────────────────────────────────────────────────────
-    st.subheader("Stay Away")
-    if not avoid:
-        st.info("Nothing flagged to avoid.")
-    else:
-        for entry in avoid:
-            market_label = _slate_market_label(entry)
-            ct = entry.get("commence_time")
-            time_str = f" \u00b7 {_format_start_time(ct)}" if ct else ""
-            with st.container(border=True):
-                st.markdown(
-                    f"**{entry['event']}** \u2014 "
-                    f"{entry['selection']} ({market_label}){time_str}"
-                )
-                for reason in entry["avoid_reasons"]:
-                    st.markdown(f"- :red[{reason}]")
+    # ── Stay Away ─────────────────────────────────────────────────────
+    if show_stay_away:
+        st.subheader("Stay Away")
+        if not stay_away_display:
+            st.info("No games flagged to avoid (by current logic).")
+        else:
+            for entry in stay_away_display:
+                _render_stay_away_entry(entry)
+
+
+def _render_stay_away_entry(entry: dict) -> None:
+    """Render a single Stay Away entry."""
+    market_label = _slate_market_label(entry)
+    ct = entry.get("commence_time")
+    time_str = f" \u00b7 {_format_start_time(ct)}" if ct else ""
+    with st.container(border=True):
+        st.markdown(
+            f"**{entry['event']}** \u2014 "
+            f"{entry['selection']} ({market_label}){time_str}"
+        )
+        for reason in entry["avoid_reasons"]:
+            st.markdown(f"- :red[{reason}]")
+
+
+def _render_why_tooltip(entry: dict) -> None:
+    """Render a 'Why?' expander with transparency details for a slate entry."""
+    with st.expander("Why?", expanded=False):
+        sigma = entry.get("market_volatility_sigma", 0.0)
+        dyn_floor = entry.get("dynamic_edge_floor")
+        lines = [
+            f"- **Confidence:** {entry.get('confidence', 'N/A')}",
+            f"- **Quality tier:** {entry.get('quality_tier', 'N/A')}",
+            f"- **Quality score:** {entry.get('quality_score', 'N/A')}",
+            f"- **Edge:** {entry.get('edge_pct', 0.0):+.2f}%",
+            f"- **Edge Z-score:** {entry.get('edge_z', 0.0):.2f}",
+            f"- **Volatility \u03c3:** {sigma:.4f}",
+        ]
+        if dyn_floor is not None:
+            lines.append(
+                f"- **Dynamic Tier 1 floor:** {dyn_floor:.2f}%"
+            )
+        hold = entry.get("market_hold_median")
+        if hold is not None:
+            lines.append(f"- **Market hold (median):** {hold:.2f}%")
+        reasons = entry.get("avoid_reasons", [])
+        if reasons:
+            lines.append("- **Reasons:** " + "; ".join(reasons))
+        st.markdown("\n".join(lines))
 
 
 def _slate_market_label(entry: dict) -> str:
@@ -1999,10 +2126,11 @@ def _render_slate_card(entry: dict) -> None:
                 st.session_state["page"] = "detail"
                 st.session_state["selected_game"] = entry["event"]
                 st.rerun()
+        _render_why_tooltip(entry)
 
 
 def _render_slate_table(entries: list[dict]) -> None:
-    """Render Tier-2 slate entries as a table grouped by date."""
+    """Render Tier-2 slate entries as a table with per-row Why? expanders."""
     rows = []
     for entry in entries:
         ct = entry.get("commence_time")
@@ -2024,6 +2152,9 @@ def _render_slate_table(entries: list[dict]) -> None:
         use_container_width=True,
         hide_index=True,
     )
+    # Per-row Why? expanders below the table
+    for entry in entries:
+        _render_why_tooltip(entry)
 
 
 # ---------------------------------------------------------------------------
