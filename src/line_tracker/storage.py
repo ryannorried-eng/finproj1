@@ -16,6 +16,7 @@ class LineStore:
 
     def __init__(self, db_path: str | Path = DEFAULT_DB_PATH):
         self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),
             detect_types=sqlite3.PARSE_DECLTYPES,

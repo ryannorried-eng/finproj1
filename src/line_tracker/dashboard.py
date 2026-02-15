@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
+from pathlib import Path
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -76,7 +77,7 @@ _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
 # Sentinel used to sort games with missing commence_time to the bottom.
 _FAR_FUTURE = datetime.max.replace(tzinfo=None)
 
-DB_PATH = "lines.db"
+DB_PATH = str(Path(__file__).resolve().parent.parent.parent / "lines.db")
 
 
 # ---------------------------------------------------------------------------
