@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from pathlib import Path
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -46,7 +45,7 @@ from line_tracker.performance import (
 )
 from line_tracker.scraper import OddsClient
 from line_tracker.slate import build_daily_slate, passes_relaxed_tier2
-from line_tracker.storage import LineStore
+from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 
 SPORTS = {
     "NFL": "americanfootball_nfl",
@@ -77,7 +76,7 @@ _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
 # Sentinel used to sort games with missing commence_time to the bottom.
 _FAR_FUTURE = datetime.max.replace(tzinfo=None)
 
-DB_PATH = str(Path(__file__).resolve().parent.parent.parent / "lines.db")
+DB_PATH = str(DEFAULT_DB_PATH)
 
 
 # ---------------------------------------------------------------------------

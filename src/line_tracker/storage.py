@@ -8,7 +8,7 @@ from pathlib import Path
 
 from line_tracker.models import BettingLine, BetType
 
-DEFAULT_DB_PATH = Path("lines.db")
+DEFAULT_DB_PATH = Path.home() / ".line_tracker" / "lines.db"
 
 
 class LineStore:
