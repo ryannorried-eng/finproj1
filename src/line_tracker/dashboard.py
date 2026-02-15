@@ -819,8 +819,9 @@ def _detail_best_bet_section(game_lines):
                 f"**{top.consensus_prob * 100:.1f}%** | "
                 f"Breakeven: **{top.breakeven_prob * 100:.1f}%** | "
                 f"Edge: **{fmt_pct(top.edge_pct, sign=True)}** | "
-                f"EV: **{fmt_money(top.ev_per_100, sign=True).replace('$', '\\$')}"
-                f" per \\$100**"
+                "EV: **"
+                + fmt_money(top.ev_per_100, sign=True).replace("$", r"\$")
+                + r" per \$100**"
             )
             st.markdown(
                 f"Market confidence: **{top.confidence}** | "
@@ -853,7 +854,10 @@ def _detail_best_bet_section(game_lines):
                     f"Quality: {r.quality_score} ({r.quality_tier})"
                 )
     else:
-        st.info("No bets meet your edge + quality thresholds. Showing closest candidates:")
+        st.info(
+            "No bets meet your edge + quality thresholds."
+            " Showing closest candidates:"
+        )
         for r in recs[:3]:
             ml = _best_bet_market_label(r)
             ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
@@ -2138,12 +2142,14 @@ def _page_daily_slate():
 
             # Sigma + dynamic floor stats
             st.markdown("---")
-            _fmt_stat = (
-                lambda s: "—"
-                if s["min"] is None
-                else f"min={s['min']:.4f}  med={s['median']:.4f}  "
-                f"max={s['max']:.4f}"
-            )
+            def _fmt_stat(s):
+                if s["min"] is None:
+                    return "\u2014"
+                return (
+                    f"min={s['min']:.4f}  "
+                    f"med={s['median']:.4f}  "
+                    f"max={s['max']:.4f}"
+                )
             st.markdown(
                 f"**Sigma stats:** {_fmt_stat(ds['sigma_stats'])}"
             )

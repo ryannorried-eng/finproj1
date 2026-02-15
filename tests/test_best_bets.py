@@ -4,7 +4,6 @@ from datetime import datetime
 
 from line_tracker.best_bets import (
     BOOK_WEIGHTS,
-    RECENCY_HALF_LIFE_MIN,
     BetRecommendation,
     _agreement_score,
     _best_line_group,
@@ -557,7 +556,7 @@ class TestWeightedConsensusIntegration:
         home_rec = next(r for r in recs if r.side == "home")
 
         # Pinnacle's de-vigged home prob
-        pinnacle_prob = home_rec.unweighted_consensus_prob  # plain median of 2
+        _ = home_rec.unweighted_consensus_prob  # plain median of 2
         # Weighted consensus should be closer to Pinnacle's value
         # because Pinnacle has weight 3.0 vs DraftKings 1.0
         # With 2 values and weights 3:1, weighted median = Pinnacle's value
@@ -1488,7 +1487,8 @@ class TestQualityScoreIntegration:
                 f"tier={r.quality_tier} with only {r.books_used_count} books used"
             )
             assert r.quality_score <= 55, (
-                f"quality_score={r.quality_score} with only {r.books_used_count} books used"
+                f"quality_score={r.quality_score} with only "
+                f"{r.books_used_count} books used"
             )
 
     def test_books_used_ge_4_allows_strong(self):
@@ -1507,7 +1507,8 @@ class TestQualityScoreIntegration:
         recs = recommend_best_bets(lines, top_n=10, now=now)
         best = recs[0]
         assert best.quality_tier in ("Strong", "Elite"), (
-            f"tier={best.quality_tier} should allow Strong/Elite with {best.books_used_count} books"
+            f"tier={best.quality_tier} should allow Strong/Elite"
+            f" with {best.books_used_count} books"
         )
 
 

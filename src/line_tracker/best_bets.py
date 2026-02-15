@@ -504,7 +504,12 @@ def _quality_score(
     freshness: float,
 ) -> int:
     """Combine subscores into a single 0–100 integer quality score."""
-    raw = _QW_EDGE * edge + _QW_AGREEMENT * agreement + _QW_COVERAGE * coverage + _QW_FRESHNESS * freshness
+    raw = (
+        _QW_EDGE * edge
+        + _QW_AGREEMENT * agreement
+        + _QW_COVERAGE * coverage
+        + _QW_FRESHNESS * freshness
+    )
     return max(0, min(round(raw), 100))
 
 
@@ -743,7 +748,10 @@ def _moneyline_recommendations(
     away_team = lines[0].away_team
 
     f_lines = [lines[i] for i in keep_idx]
-    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in f_lines]
+    ages = [
+        (_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0
+        for ln in f_lines
+    ]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -866,7 +874,10 @@ def _spread_recommendations(
     home_team = lines[0].home_team
     away_team = lines[0].away_team
 
-    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in f_matching]
+    ages = [
+        (_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0
+        for ln in f_matching
+    ]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -983,7 +994,10 @@ def _total_recommendations(
     best_over = max(f_matching, key=lambda ln: ln.home_price)
     best_under = max(f_matching, key=lambda ln: ln.away_price)
 
-    ages = [(_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0 for ln in f_matching]
+    ages = [
+        (_strip_tz(now) - _strip_tz(ln.timestamp)).total_seconds() / 60.0
+        for ln in f_matching
+    ]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
 
@@ -1060,7 +1074,8 @@ def recommend_best_bets(
     top_n:
         Maximum number of recommendations to return (default 3).
     now:
-        Reference time for recency weighting.  Defaults to ``datetime.now(timezone.utc)``.
+        Reference time for recency weighting.  Defaults to
+        ``datetime.now(timezone.utc)``.
 
     Returns
     -------
