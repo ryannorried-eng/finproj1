@@ -7,8 +7,8 @@ from line_tracker.models import BettingLine
 
 
 # ── tier thresholds ────────────────────────────────────────────────
-_TIER1_QUALITY = 70
-_TIER1_EDGE = 2.0
+_TIER1_BASE_EDGE = 3.0
+_TIER1_SIGMA_MULT = 1.2
 _TIER2_QUALITY = 40
 _TIER2_EDGE = 1.0
 _MIN_BOOKS = 4
@@ -28,10 +28,14 @@ def _assign_tier(
     rec_market_unstable: bool,
     rec_books_used: int = 0,
     rec_oldest_age_min: float = 0.0,
+    rec_quality_tier: str = "",
+    rec_volatility_sigma: float = 0.0,
 ) -> tuple[str, list[str]]:
     """Return (tier, avoid_reasons).
 
-    tier1  – quality >= 70 AND edge >= 2.0
+    tier1  – edge >= dynamic_min_edge AND confidence == "High"
+             AND quality_tier in {"Elite", "Strong"}
+             where dynamic_min_edge = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
     tier2  – quality >= 40 AND edge >= 1.0
     avoid  – everything else (with reasons)
     """
@@ -57,7 +61,13 @@ def _assign_tier(
     if reasons:
         return "avoid", reasons
 
-    if rec_quality >= _TIER1_QUALITY and rec_edge >= _TIER1_EDGE:
+    # Dynamic edge floor for tier1
+    dyn_floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * rec_volatility_sigma
+    if (
+        rec_edge >= dyn_floor
+        and rec_confidence == "High"
+        and rec_quality_tier in ("Elite", "Strong")
+    ):
         return "tier1", []
 
     return "tier2", []
@@ -133,6 +143,8 @@ def build_daily_slate(
                 rec.market_unstable,
                 rec_books_used=rec.books_used_count,
                 rec_oldest_age_min=rec.oldest_update_age_min,
+                rec_quality_tier=rec.quality_tier,
+                rec_volatility_sigma=rec.market_volatility_sigma,
             )
 
             entry: dict = {
@@ -147,6 +159,8 @@ def build_daily_slate(
                 "edge_pct": rec.edge_pct,
                 "confidence": rec.confidence,
                 "quality_score": rec.quality_score,
+                "quality_tier": rec.quality_tier,
+                "market_volatility_sigma": rec.market_volatility_sigma,
                 "slate_score": score,
                 "books_used": rec.books_used_count,
                 "updated_age_min": rec.newest_update_age_min,

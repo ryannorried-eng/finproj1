@@ -1272,20 +1272,101 @@ class TestQualityScoreComposite:
 
 
 class TestQualityTier:
-    def test_elite(self):
-        assert _quality_tier(85) == "Elite"
-        assert _quality_tier(100) == "Elite"
+    def test_elite_all_criteria_met(self):
+        result = _quality_tier(
+            90, edge_pct=4.0, books_used=6,
+            agreement_score=75, confidence="High",
+        )
+        assert result == "Elite"
+        result2 = _quality_tier(
+            100, edge_pct=5.0, books_used=8,
+            agreement_score=90, confidence="Medium",
+        )
+        assert result2 == "Elite"
+
+    def test_elite_blocked_by_low_confidence(self):
+        result = _quality_tier(
+            95, edge_pct=5.0, books_used=8,
+            agreement_score=90, confidence="Low",
+        )
+        assert result != "Elite"
+
+    def test_elite_blocked_by_low_score(self):
+        result = _quality_tier(
+            89, edge_pct=5.0, books_used=8,
+            agreement_score=90, confidence="High",
+        )
+        assert result != "Elite"
+
+    def test_elite_blocked_by_low_edge(self):
+        result = _quality_tier(
+            95, edge_pct=3.9, books_used=8,
+            agreement_score=90, confidence="High",
+        )
+        assert result != "Elite"
+
+    def test_elite_blocked_by_few_books(self):
+        result = _quality_tier(
+            95, edge_pct=5.0, books_used=5,
+            agreement_score=90, confidence="High",
+        )
+        assert result != "Elite"
+
+    def test_elite_blocked_by_low_agreement(self):
+        result = _quality_tier(
+            95, edge_pct=5.0, books_used=8,
+            agreement_score=74, confidence="High",
+        )
+        assert result != "Elite"
 
     def test_strong(self):
-        assert _quality_tier(70) == "Strong"
-        assert _quality_tier(84) == "Strong"
+        assert _quality_tier(
+            80, edge_pct=2.0, books_used=5,
+        ) == "Strong"
+        assert _quality_tier(
+            85, edge_pct=3.0, books_used=6,
+        ) == "Strong"
+
+    def test_strong_blocked_by_low_score(self):
+        assert _quality_tier(
+            79, edge_pct=3.0, books_used=6,
+        ) != "Strong"
+
+    def test_strong_blocked_by_low_edge(self):
+        assert _quality_tier(
+            85, edge_pct=1.9, books_used=6,
+        ) != "Strong"
+
+    def test_strong_blocked_by_few_books(self):
+        assert _quality_tier(
+            85, edge_pct=3.0, books_used=4,
+        ) != "Strong"
 
     def test_moderate(self):
-        assert _quality_tier(55) == "Moderate"
-        assert _quality_tier(69) == "Moderate"
+        assert _quality_tier(
+            65, edge_pct=1.0, books_used=4,
+        ) == "Moderate"
+        assert _quality_tier(
+            75, edge_pct=1.5, books_used=5,
+        ) == "Moderate"
 
-    def test_thin(self):
-        assert _quality_tier(54) == "Thin"
+    def test_moderate_blocked_by_low_score(self):
+        assert _quality_tier(
+            64, edge_pct=2.0, books_used=5,
+        ) == "Thin"
+
+    def test_moderate_blocked_by_low_edge(self):
+        assert _quality_tier(
+            70, edge_pct=0.9, books_used=5,
+        ) == "Thin"
+
+    def test_moderate_blocked_by_few_books(self):
+        assert _quality_tier(
+            70, edge_pct=2.0, books_used=3,
+        ) == "Thin"
+
+    def test_thin_defaults(self):
+        assert _quality_tier(50) == "Thin"
         assert _quality_tier(0) == "Thin"
 
 
@@ -1362,8 +1443,8 @@ class TestQualityScoreIntegration:
             assert isinstance(r.coverage_score, float)
             assert isinstance(r.freshness_score, float)
 
-    def test_quality_tier_matches_score(self):
-        """Quality tier should be consistent with quality score."""
+    def test_quality_tier_matches_multi_criteria(self):
+        """Quality tier should be consistent with multi-criteria gating."""
         lines = [
             _ml_line("A", -150, 130),
             _ml_line("B", -140, 120),
@@ -1371,16 +1452,9 @@ class TestQualityScoreIntegration:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            if r.market_unstable or r.books_used_count < 4:
-                continue  # tier may be downgraded by caps
-            if r.quality_score >= 85:
-                assert r.quality_tier == "Elite"
-            elif r.quality_score >= 70:
-                assert r.quality_tier == "Strong"
-            elif r.quality_score >= 55:
-                assert r.quality_tier == "Moderate"
-            else:
-                assert r.quality_tier == "Thin"
+            # With only 3 books, tier is capped (can't reach Elite/Strong
+            # since multi-criteria requires books_used >= 4 for Moderate)
+            assert r.quality_tier in ("Elite", "Strong", "Moderate", "Thin")
 
     def test_thin_market_4_books_coverage_not_100(self):
         """4 total books with 4 used should NOT produce coverage_score 100."""

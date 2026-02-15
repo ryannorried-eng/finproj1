@@ -444,13 +444,32 @@ def _quality_score(
     return max(0, min(round(raw), 100))
 
 
-def _quality_tier(score: int) -> str:
-    """Map a 0–100 quality score to a human-readable tier label."""
-    if score >= 85:
+def _quality_tier(
+    score: int,
+    edge_pct: float = 0.0,
+    books_used: int = 0,
+    agreement_score: float = 0.0,
+    confidence: str = "Low",
+) -> str:
+    """Map quality score + market metrics to a tier label.
+
+    Elite:    quality>=90, edge>=4.0%, books>=6,
+              agreement>=75, confidence!="Low"
+    Strong:   quality>=80, edge>=2.0%, books>=5
+    Moderate: quality>=65, edge>=1.0%, books>=4
+    Thin:     everything else
+    """
+    if (
+        score >= 90
+        and edge_pct >= 4.0
+        and books_used >= 6
+        and agreement_score >= 75
+        and confidence != "Low"
+    ):
         return "Elite"
-    if score >= 70:
+    if score >= 80 and edge_pct >= 2.0 and books_used >= 5:
         return "Strong"
-    if score >= 55:
+    if score >= 65 and edge_pct >= 1.0 and books_used >= 4:
         return "Moderate"
     return "Thin"
 
@@ -490,24 +509,13 @@ def _build_rec(
         _freshness_score(newest_update_age_min, oldest_update_age_min), 1
     )
 
-    # If market is unstable, cap agreement_score and downgrade tier
+    # If market is unstable, cap agreement_score
     if market_unstable:
         a_score = min(a_score, 60.0)
 
     q_score = _quality_score(e_score, a_score, c_score, f_score)
-    q_tier = _quality_tier(q_score)
 
-    # Downgrade tier by one level when market is unstable
-    if market_unstable:
-        q_tier = _TIER_DOWNGRADE.get(q_tier, q_tier)
-
-    # Thin book usage: fewer than 4 books used → cap score and tier
-    if books_used_count < 4:
-        q_score = min(q_score, 55)
-        if q_tier in ("Elite", "Strong"):
-            q_tier = "Moderate"
-
-    # --- New consensus metrics ---
+    # --- Consensus metrics (must precede tier assignment) ---
     holds = book_holds or {}
     hold_values = list(holds.values())
     mkt_hold_med = round(median(hold_values), 2) if hold_values else 0.0
@@ -530,6 +538,17 @@ def _build_rec(
         confidence = "Medium"
     else:
         confidence = "Low"
+
+    # --- Tier assignment (uses confidence) ---
+    q_tier = _quality_tier(q_score, edge_pct_val, books_used_count, a_score, confidence)
+
+    # Downgrade tier by one level when market is unstable
+    if market_unstable:
+        q_tier = _TIER_DOWNGRADE.get(q_tier, q_tier)
+
+    # Thin book usage: fewer than 4 books used → cap score
+    if books_used_count < 4:
+        q_score = min(q_score, 55)
 
     return BetRecommendation(
         market=market,
