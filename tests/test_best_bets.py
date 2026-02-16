@@ -428,11 +428,13 @@ class TestRecommendBestBets:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            # edge_pct is now EV/$100 = 100 * edge_ev
-            expected_edge = 100 * r.edge_ev
-            assert abs(r.edge_pct - expected_edge) < 0.01
-            # edge_pct and ev_per_100 should be identical
-            assert abs(r.edge_pct - r.ev_per_100) < 0.01
+            # edge_pct = 100 * (p - 1/d) — prob-point edge %
+            if r.best_odds > 0:
+                dec_odds = r.best_odds / 100.0 + 1.0
+            else:
+                dec_odds = 1.0 - 100.0 / r.best_odds
+            expected_edge = 100.0 * (r.consensus_prob - 1.0 / dec_odds)
+            assert abs(r.edge_pct - expected_edge) < 0.5
             # Sign: positive when consensus > breakeven
             if r.consensus_prob > r.breakeven_prob:
                 assert r.edge_pct > 0
@@ -446,9 +448,9 @@ class TestRecommendBestBets:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            # ev_per_100 is now 100 * edge_ev (same as edge_pct)
-            assert abs(r.ev_per_100 - 100 * r.edge_ev) < 0.01
-            assert abs(r.ev_per_100 - r.edge_pct) < 0.01
+            # ev_per_100 = ev_100 = 100 * ev_roi = 100 * (p*d - 1)
+            assert abs(r.ev_per_100 - r.ev_100) < 0.01
+            assert abs(r.ev_per_100 - 100.0 * r.ev_roi) < 0.01
 
     def test_breakeven_prob_populated(self):
         lines = [
@@ -549,14 +551,13 @@ class TestBookWeights:
 
 
 class TestWeightedConsensusIntegration:
-    def test_weighted_consensus_shifts_toward_sharp_book(self):
-        """Pinnacle (weight 3.0) should pull consensus toward its probability.
+    def test_consensus_uses_trimmed_mean_or_median(self):
+        """With <5 books, consensus_prob uses median of vig-free probs.
 
-        Pinnacle posts -200/+180 → de-vigged home ≈ 0.6410
-        DraftKings posts -140/+120 → de-vigged home ≈ 0.5588
+        Pinnacle posts -200/+180 → de-vigged home ≈ 0.6512
+        DraftKings posts -140/+120 → de-vigged home ≈ 0.5620
 
-        Plain median of those two = ~0.60.
-        Weighted median should equal the Pinnacle value since it has 3x weight.
+        Median of 2 values = mean of those 2.
         """
         lines = [
             _ml_line("Pinnacle", -200, 180),
@@ -565,18 +566,16 @@ class TestWeightedConsensusIntegration:
         recs = recommend_best_bets(lines, top_n=10)
         home_rec = next(r for r in recs if r.side == "home")
 
-        # Pinnacle's de-vigged home prob
-        _ = home_rec.unweighted_consensus_prob  # plain median of 2
-        # Weighted consensus should be closer to Pinnacle's value
-        # because Pinnacle has weight 3.0 vs DraftKings 1.0
-        # With 2 values and weights 3:1, weighted median = Pinnacle's value
+        from statistics import median as std_median
+
         from line_tracker.best_bets import _remove_vig
 
         pin_h, _ = _remove_vig(-200, 180)
         dk_h, _ = _remove_vig(-140, 120)
 
-        # Weighted median with weights [3.0, 1.0] → should be Pinnacle's value
-        assert abs(home_rec.consensus_prob - pin_h) < 0.001
+        # With <5 books, consensus = median of vig-free probs
+        expected = std_median([pin_h, dk_h])
+        assert abs(home_rec.consensus_prob - expected) < 0.01
 
     def test_unweighted_consensus_is_plain_median(self):
         """unweighted_consensus_prob should be the simple median."""
@@ -599,23 +598,18 @@ class TestWeightedConsensusIntegration:
         expected = std_median(probs)
         assert abs(home_rec.unweighted_consensus_prob - round(expected, 4)) < 0.001
 
-    def test_weighted_differs_from_unweighted(self):
-        """When books have unequal weights, the two consensus values should differ.
-
-        With weight capping at 40%, we need 4+ books with varied probabilities
-        so that the cap doesn't collapse weighted to unweighted.
-        """
+    def test_consensus_uses_median_for_few_books(self):
+        """With <5 books, consensus uses median of vig-free probs."""
         lines = [
-            _ml_line("Pinnacle", -160, 140),   # weight 3.0, home ≈ 0.596
-            _ml_line("DraftKings", -145, 125),  # weight 1.0, home ≈ 0.571
-            _ml_line("FanDuel", -140, 120),     # weight 1.0, home ≈ 0.562
-            _ml_line("Caesars", -135, 115),      # weight 1.0, home ≈ 0.554
+            _ml_line("Pinnacle", -160, 140),   # home ≈ 0.596
+            _ml_line("DraftKings", -145, 125),  # home ≈ 0.571
+            _ml_line("FanDuel", -140, 120),     # home ≈ 0.562
+            _ml_line("Caesars", -135, 115),      # home ≈ 0.554
         ]
         recs = recommend_best_bets(lines, top_n=10)
         home_rec = next(r for r in recs if r.side == "home")
-        # Unweighted median of 4 values = average of middle two
-        # Weighted median should be pulled toward Pinnacle's higher prob
-        assert home_rec.consensus_prob != home_rec.unweighted_consensus_prob
+        # With 4 books (<5), consensus = median = average of middle two
+        assert abs(home_rec.consensus_prob - home_rec.unweighted_consensus_prob) < 0.001
 
     def test_equal_weight_books_match_unweighted(self):
         """If all books have equal weight, weighted == unweighted."""
@@ -639,12 +633,15 @@ class TestWeightedConsensusIntegration:
         assert len(spread_recs) == 2
 
         home_spread = next(r for r in spread_recs if r.side == "home")
-        # Pinnacle has -105 juice → higher de-vigged home prob
-        # With weight 3:1, consensus should match Pinnacle's prob
+        # With 2 books (<5), consensus = median of vig-free probs
         from line_tracker.best_bets import _remove_vig
 
         pin_h, _ = _remove_vig(-105, -115)
-        assert abs(home_spread.consensus_prob - pin_h) < 0.001
+        dk_h, _ = _remove_vig(-115, -105)
+        from statistics import median as std_median
+
+        expected = std_median([pin_h, dk_h])
+        assert abs(home_spread.consensus_prob - expected) < 0.01
 
     def test_total_weighted_consensus(self):
         """Weighted consensus also works for total markets."""
@@ -657,10 +654,15 @@ class TestWeightedConsensusIntegration:
         assert len(total_recs) == 2
 
         over_rec = next(r for r in total_recs if r.side == "over")
+        # With 2 books (<5), consensus = median of vig-free probs
         from line_tracker.best_bets import _remove_vig
 
         pin_over, _ = _remove_vig(-105, -115)
-        assert abs(over_rec.consensus_prob - pin_over) < 0.001
+        dk_over, _ = _remove_vig(-115, -105)
+        from statistics import median as std_median
+
+        expected = std_median([pin_over, dk_over])
+        assert abs(over_rec.consensus_prob - expected) < 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -829,8 +831,12 @@ class TestRecencyConsensusIntegration:
         home_rec = next(r for r in recs if r.side == "home")
 
         pin_h, _ = _remove_vig(-200, 180)
-        # Equal recency → only book weight matters → Pinnacle dominates
-        assert abs(home_rec.consensus_prob - pin_h) < 0.001
+        dk_h, _ = _remove_vig(-140, 120)
+        # With 2 books (<5), consensus = median of vig-free probs
+        from statistics import median as std_median
+
+        expected = std_median([pin_h, dk_h])
+        assert abs(home_rec.consensus_prob - expected) < 0.01
 
     def test_age_fields_populated(self):
         """newest_update_age_min and oldest_update_age_min should be set."""
@@ -849,7 +855,7 @@ class TestRecencyConsensusIntegration:
             assert abs(r.oldest_update_age_min - 30.0) < 0.1
 
     def test_recency_weakens_stale_equal_weight_books(self):
-        """Two equal-weight books, but one is stale — consensus shifts to fresh."""
+        """Two equal-weight books: consensus = median of their vig-free probs."""
         now = datetime(2025, 6, 1, 12, 0)
         fresh_ts = datetime(2025, 6, 1, 11, 58)
         stale_ts = datetime(2025, 6, 1, 8, 0)
@@ -865,9 +871,11 @@ class TestRecencyConsensusIntegration:
         dk_h, _ = _remove_vig(-150, 130)
         fd_h, _ = _remove_vig(-200, 180)
 
-        # DK is fresh (weight ≈ 1.0), FD is 4h stale (weight ≈ 0.018)
-        # Weighted median should pick DK's value
-        assert abs(home_rec.consensus_prob - dk_h) < 0.001
+        # With 2 books (<5), consensus = median of vig-free probs
+        from statistics import median as std_median
+
+        expected = std_median([dk_h, fd_h])
+        assert abs(home_rec.consensus_prob - expected) < 0.01
 
 
 # ---------------------------------------------------------------------------

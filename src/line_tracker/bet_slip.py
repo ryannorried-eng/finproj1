@@ -162,11 +162,19 @@ def compute_standouts(entries: list[dict], stake: float = 100.0) -> list[dict]:
         median_dec = _median(decs)
         median_american = decimal_to_american(median_dec)
 
+        # d_best / d_ref for execution advantage
+        sorted_decs = sorted(decs, reverse=True)
+        d_best = sorted_decs[0]
+        d_ref = sorted_decs[1] if len(sorted_decs) >= 2 else median_dec
+
         for it in items:
             bp = implied_prob_from_american(it["odds"])
             bd = american_to_decimal(it["odds"])
             edge = consensus - bp
             impact = round(stake * (bd - median_dec), 2)
+            exec_adv = round(
+                100.0 * consensus * (d_best - d_ref), 2,
+            )
 
             results.append({
                 "event": event,
@@ -181,6 +189,9 @@ def compute_standouts(entries: list[dict], stake: float = 100.0) -> list[dict]:
                 "dollar_impact": impact,
                 "median_odds": round(median_american, 1),
                 "sport": it.get("sport", ""),
+                "d_best": round(d_best, 4),
+                "d_ref": round(d_ref, 4),
+                "exec_adv_100": exec_adv,
             })
 
     results.sort(key=lambda x: x["edge"], reverse=True)

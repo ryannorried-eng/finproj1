@@ -98,7 +98,9 @@ def _make_rec(
     ev: float = 0.05,
     best_sportsbook: str = "FanDuel",
     best_odds: float = -110.0,
+    ev_100: float | None = None,
 ) -> BetRecommendation:
+    _ev_100 = ev_100 if ev_100 is not None else edge_pct
     return BetRecommendation(
         market=market,
         selection=selection,
@@ -110,8 +112,9 @@ def _make_rec(
         breakeven_prob=0.52,
         ev=ev,
         edge_pct=edge_pct,
-        ev_per_100=ev * 100,
+        ev_per_100=_ev_100,
         confidence=confidence,
+        ev_100=_ev_100,
         quality_score=quality_score,
         quality_tier=quality_tier,
         books_used_count=books_used_count,

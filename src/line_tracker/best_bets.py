@@ -200,6 +200,35 @@ def _cap_weights(weights: list[float]) -> list[float]:
     return normed
 
 
+def _trimmed_mean(
+    values: list[float],
+    trim: float = 0.2,
+) -> float:
+    """Trimmed mean: drop *trim* fraction from each tail, then average.
+
+    Falls back to plain median when len(values) < 5.
+    """
+    n = len(values)
+    if n == 0:
+        return 0.0
+    if n < 5:
+        return median(values)
+    k = int(n * trim)
+    if k < 1:
+        k = 1
+    s = sorted(values)
+    core = s[k: n - k]
+    return sum(core) / len(core) if core else median(values)
+
+
+def _consensus_prob(probs: list[float]) -> float:
+    """Aggregate per-book vig-free probs into a consensus probability.
+
+    Uses trimmed mean (trim=0.2) when >= 5 books; plain median otherwise.
+    """
+    return _trimmed_mean(probs)
+
+
 def _weighted_median(values: list[float], weights: list[float]) -> float:
     """Compute a weighted median of *values* using *weights*.
 
@@ -314,14 +343,19 @@ class BetRecommendation:
     selection: str  # team name or "Over"/"Under"
     side: str  # "home", "away", "over", "under"
     line: float | None  # spread/total number, None for ML
-    consensus_prob: float  # weighted consensus (used for EV)
+    consensus_prob: float  # vig-free consensus (trimmed mean / median)
     best_sportsbook: str
     best_odds: float  # American odds
-    breakeven_prob: float  # implied prob at best_odds (breakeven threshold)
-    ev: float  # expected value per $1 stake
-    edge_pct: float  # 100 * edge_ev  (EV% — matches EV per $100)
-    ev_per_100: float  # 100 * edge_ev  — dollar EV per $100 stake
+    breakeven_prob: float  # p_be = 1/d
+    ev: float  # ev_roi = p * d - 1
+    edge_pct: float  # 100 * (p - 1/d) — prob-point edge %
+    ev_per_100: float  # 100 * (p*d - 1) — EV per $100
     confidence: str  # "High", "Medium", or "Low" — book agreement level
+    # ── Spec-named aliases ──
+    ev_roi: float = 0.0  # p * d - 1
+    ev_100: float = 0.0  # 100 * (p * d - 1)
+    p_be: float = 0.0  # 1 / d
+    edge_pp: float = 0.0  # p - 1/d
     unweighted_consensus_prob: float = 0.0  # plain median for debugging
     consensus_prob_weighted: float = 0.0  # robust weighted consensus
     newest_update_age_min: float = 0.0  # minutes since most recent book update
@@ -653,24 +687,32 @@ def _build_rec(
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs.
 
-    Uses EV-based edge metrics:
-    - ``edge_ev = p_cons_weighted * decimal_odds - 1``
-    - ``edge_ev_shrunk`` via disagreement-aware shrinkage
-    - ``edge_z`` in EV space: ``edge_ev_shrunk / max(ev_sigma, 0.002)``
-    - ``edge_pct = 100 * edge_ev`` (EV% per $100)
+    Computes all spec-defined metrics:
+    - ``ev_roi = p * d - 1``
+    - ``ev_100 = 100 * ev_roi``
+    - ``p_be = 1 / d``
+    - ``edge_pp = p - p_be``
+    - ``edge_pct = 100 * edge_pp``
+    Plus internal EV-edge metrics (edge_ev, edge_ev_shrunk, edge_z).
     """
     dec_odds = american_to_decimal(best_odds)
     be_prob = breakeven_prob_from_american(best_odds)
     ev = ev_per_dollar(consensus_prob, best_odds)
 
+    # ── Spec metrics (use consensus_prob = p) ──────────────────────
+    _ev_roi = consensus_prob * dec_odds - 1.0
+    _ev_100 = round(100.0 * _ev_roi, 2)
+    _p_be = round(1.0 / dec_odds, 6) if dec_odds > 0 else 0.0
+    _edge_pp = round(consensus_prob - _p_be, 6)
+    _edge_pct_pp = round(100.0 * _edge_pp, 2)  # prob-point edge %
+
     # ── Robust weighted consensus ─────────────────────────────────
     _holds = side_holds or [0.0] * len(side_probs)
     p_cons_w = weighted_robust_consensus(side_probs, _holds)
 
-    # ── EV-based edge ─────────────────────────────────────────────
+    # ── EV-based edge (for shrinkage / edge_z) ────────────────────
     _edge_ev = compute_ev_edge(p_cons_w, dec_odds)
     _edge_ev_100 = round(100.0 * _edge_ev, 2)
-    edge_pct_val = _edge_ev_100  # unified: edge_pct == EV per $100
 
     # ── Outlier rate + effective sample size ───────────────────────
     outliers_removed = max(0, total_books_count - books_used_count)
@@ -690,8 +732,8 @@ def _build_rec(
     _ev_sigma = r_sigma * dec_odds
     ez = round(compute_edge_z(_edge_ev_shrunk, _ev_sigma), 2)
 
-    # Quality subscores (edge_score uses edge_pct = EV/$100)
-    e_score = round(_edge_score(edge_pct_val), 1)
+    # Quality subscores (edge_score uses EV/$100)
+    e_score = round(_edge_score(_ev_100), 1)
     a_score = round(
         _agreement_score(side_probs, books_used_count, oldest_update_age_min), 1
     )
@@ -720,7 +762,7 @@ def _build_rec(
         confidence = "Low"
 
     # --- Tier assignment (uses confidence) ---
-    q_tier = _quality_tier(q_score, edge_pct_val, books_used_count, a_score, confidence)
+    q_tier = _quality_tier(q_score, _ev_100, books_used_count, a_score, confidence)
 
     # Downgrade tier by one level when market is unstable
     if market_unstable:
@@ -745,8 +787,12 @@ def _build_rec(
         best_odds=best_odds,
         breakeven_prob=round(be_prob, 4),
         ev=round(ev, 4),
-        edge_pct=edge_pct_val,
-        ev_per_100=_edge_ev_100,
+        edge_pct=_edge_pct_pp,
+        ev_per_100=_ev_100,
+        ev_roi=round(_ev_roi, 6),
+        ev_100=_ev_100,
+        p_be=_p_be,
+        edge_pp=_edge_pp,
         confidence=confidence,
         unweighted_consensus_prob=round(unweighted_consensus_prob, 4),
         consensus_prob_weighted=round(p_cons_w, 4),
@@ -852,11 +898,10 @@ def _moneyline_recommendations(
     # Apply filter to both sides consistently
     f_home = [home_no_vig[i] for i in keep_idx]
     f_away = [away_no_vig[i] for i in keep_idx]
-    f_weights = _cap_weights([weights[i] for i in keep_idx])
 
-    # Weighted median — used for EV calculation (on filtered set)
-    consensus_home = _weighted_median(f_home, f_weights)
-    consensus_away = _weighted_median(f_away, f_weights)
+    # Consensus: trimmed mean (>=5 books) or median (<5)
+    consensus_home = _consensus_prob(f_home)
+    consensus_away = _consensus_prob(f_away)
 
     best_home_line = max(lines, key=lambda ln: ln.home_value)
     best_away_line = max(lines, key=lambda ln: ln.away_value)
@@ -985,13 +1030,12 @@ def _spread_recommendations(
 
     f_home = [home_no_vig[i] for i in keep_idx]
     f_away = [away_no_vig[i] for i in keep_idx]
-    f_weights = _cap_weights([weights[i] for i in keep_idx])
     f_matching = [matching[i] for i in keep_idx]
 
     books_used = len(keep_idx)
 
-    consensus_home = _weighted_median(f_home, f_weights)
-    consensus_away = _weighted_median(f_away, f_weights)
+    consensus_home = _consensus_prob(f_home)
+    consensus_away = _consensus_prob(f_away)
 
     best_home = max(f_matching, key=lambda ln: ln.home_price)
     best_away = max(f_matching, key=lambda ln: ln.away_price)
@@ -1115,13 +1159,12 @@ def _total_recommendations(
 
     f_over = [over_no_vig[i] for i in keep_idx]
     f_under = [under_no_vig[i] for i in keep_idx]
-    f_weights = _cap_weights([weights[i] for i in keep_idx])
     f_matching = [matching[i] for i in keep_idx]
 
     books_used = len(keep_idx)
 
-    consensus_over = _weighted_median(f_over, f_weights)
-    consensus_under = _weighted_median(f_under, f_weights)
+    consensus_over = _consensus_prob(f_over)
+    consensus_under = _consensus_prob(f_under)
 
     best_over = max(f_matching, key=lambda ln: ln.home_price)
     best_under = max(f_matching, key=lambda ln: ln.away_price)
