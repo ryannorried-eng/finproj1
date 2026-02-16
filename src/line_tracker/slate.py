@@ -116,6 +116,36 @@ PRO_THRESHOLDS = TierThresholds(
 )
 
 
+def thresholds_from_calibration(cal: dict) -> TierThresholds:
+    """Map a calibration result dict into a ``TierThresholds`` instance.
+
+    Calibration provides per-tier ``edge_ev_100``, ``edge_z``,
+    ``hold_max``, and ``books_min``.  Unspecified fields keep
+    Standard defaults.
+    """
+    t1a = cal.get("tier1a", {})
+    t1b = cal.get("tier1b", {})
+    t2 = cal.get("tier2", {})
+
+    return TierThresholds(
+        mode="Auto",
+        # Tier 1A
+        tier1a_base_edge=t1a.get("edge_ev_100", 2.0),
+        tier1a_hold_max=t1a.get("hold_max", 6.0),
+        tier1a_books_min=t1b.get("books_min", 6),
+        # Tier 1B
+        tier1b_base_edge=t1b.get("edge_ev_100", 0.5),
+        tier1b_floor_min=t1b.get("edge_ev_100", 1.0),
+        tier1b_hold_max=t1b.get("hold_max", 7.5),
+        tier1b_books_min=t1b.get("books_min", 5),
+        # Tier 2
+        tier2_edge_min=t2.get("edge_ev_100", 0.0),
+        tier2_edge_z_min=t2.get("edge_z", 0.0),
+        # Hard gates: use t2 hold_max as stay_away_hold_max if wider
+        min_books=t2.get("books_min", 4),
+    )
+
+
 def get_thresholds(mode: str = "Standard") -> TierThresholds:
     """Return the threshold pack for the given mode name."""
     if mode == "Pro":

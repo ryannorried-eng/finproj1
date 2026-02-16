@@ -84,6 +84,13 @@ class LineStore:
             CREATE INDEX IF NOT EXISTS idx_event_type_book
             ON lines (event, bet_type, sportsbook)
         """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS calibration_thresholds (
+                key TEXT PRIMARY KEY,
+                json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         self._conn.commit()
         self._migrate_commence_time()
         self._migrate_clv_metadata()
@@ -311,6 +318,28 @@ class LineStore:
             "ORDER BY closed_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Calibration thresholds
+    # ------------------------------------------------------------------
+
+    def save_calibration(self, key: str, json_str: str) -> None:
+        """Persist a calibration result keyed by scope (e.g. 'global')."""
+        self._conn.execute(
+            """INSERT OR REPLACE INTO calibration_thresholds
+               (key, json, created_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)""",
+            (key, json_str),
+        )
+        self._conn.commit()
+
+    def load_calibration(self, key: str) -> str | None:
+        """Load a calibration JSON string by key, or None."""
+        row = self._conn.execute(
+            "SELECT json FROM calibration_thresholds WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return row["json"] if row else None
 
     def close(self) -> None:
         self._conn.close()

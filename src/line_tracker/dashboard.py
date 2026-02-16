@@ -31,6 +31,13 @@ from line_tracker.bet_slip import (
 from line_tracker.bet_slip import (
     american_to_decimal as _slip_a2d,
 )
+from line_tracker.calibration import (
+    calibrate_thresholds,
+    calibration_from_json,
+    calibration_to_json,
+    format_calibration_report,
+    load_clv_training_df,
+)
 from line_tracker.market_structure import analyze_market
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
@@ -47,6 +54,7 @@ from line_tracker.scraper import OddsClient
 from line_tracker.slate import (
     build_daily_slate,
     passes_relaxed_tier2,
+    thresholds_from_calibration,
 )
 from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 
@@ -1987,13 +1995,13 @@ def _page_daily_slate():
         with sf1:
             mode = st.radio(
                 "Mode",
-                options=["Standard", "Pro"],
+                options=["Standard", "Pro", "Auto"],
                 index=0,
                 key="slate_mode",
                 help=(
                     "**Standard**: Top Plays = Tier 1A + 1B. "
-                    "**Pro**: Top Plays = Tier 1A only "
-                    "(Tier 1B shown under More Plays)."
+                    "**Pro**: Top Plays = Tier 1A only. "
+                    "**Auto**: Use CLV-calibrated thresholds."
                 ),
                 horizontal=True,
             )
@@ -2054,6 +2062,24 @@ def _page_daily_slate():
     for ln in lines:
         lines_by_event[ln.event].append(ln)
 
+    # --- Resolve thresholds for Auto mode ---
+    auto_thresholds = None
+    if mode == "Auto":
+        store = LineStore(DB_PATH)
+        cal_json = store.load_calibration("global")
+        if cal_json:
+            cal_dict = calibration_from_json(cal_json)
+            auto_thresholds = thresholds_from_calibration(cal_dict)
+            st.info(
+                "Using calibrated thresholds (global). "
+                "Run Calibrate on the Performance page to update."
+            )
+        else:
+            st.warning(
+                "No calibration found — using Standard defaults. "
+                "Run Calibrate on the Performance page first."
+            )
+
     show_debug = show_debug_counts or st.session_state.get("slate_debug", False)
     filters = {
         "min_edge": min_edge,
@@ -2065,6 +2091,7 @@ def _page_daily_slate():
     slate = build_daily_slate(
         dict(lines_by_event),
         filters=filters,
+        thresholds=auto_thresholds,
     )
 
     # ── Assemble display tiers based on mode ──────────────────────────
@@ -2891,6 +2918,38 @@ def _page_performance():
             "Not enough pick-time metadata for calibration "
             "(needs confidence, quality tier, and edge at pick)."
         )
+
+    # ---- Auto-Calibrate Button -------------------------------------------
+    st.divider()
+    st.subheader("Auto-Calibrate Thresholds")
+    st.caption(
+        "Derive tier thresholds from historical CLV. "
+        "Results are saved and used by **Auto** mode on the Daily Slate."
+    )
+    confirm_cal = st.checkbox(
+        "I understand this will update saved thresholds",
+        key="perf_cal_confirm",
+    )
+    if st.button(
+        "Calibrate",
+        key="perf_cal_btn",
+        disabled=not confirm_cal,
+    ):
+        train_df = load_clv_training_df(store)
+        result = calibrate_thresholds(train_df)
+        store.save_calibration("global", calibration_to_json(result))
+        st.success("Calibration saved (global).")
+        report = format_calibration_report(result)
+        st.code(report, language="text")
+
+    # Show current calibration if it exists
+    existing = store.load_calibration("global")
+    if existing:
+        with st.expander("Current saved calibration", expanded=False):
+            ex_dict = calibration_from_json(existing)
+            st.code(
+                format_calibration_report(ex_dict), language="text",
+            )
 
 
 # ---------------------------------------------------------------------------
