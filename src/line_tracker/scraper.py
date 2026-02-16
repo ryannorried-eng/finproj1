@@ -75,6 +75,11 @@ def _parse_events(events: list[dict], sport: str) -> list[BettingLine]:
         home_team = event["home_team"]
         away_team = event["away_team"]
         event_name = f"{away_team} @ {home_team}"
+        commence_time = (
+            _parse_timestamp(event["commence_time"])
+            if event.get("commence_time")
+            else None
+        )
 
         for bookmaker in event.get("bookmakers", []):
             sportsbook = bookmaker["title"]
@@ -94,6 +99,7 @@ def _parse_events(events: list[dict], sport: str) -> list[BettingLine]:
                     home_team=home_team,
                     away_team=away_team,
                     timestamp=updated,
+                    commence_time=commence_time,
                 )
                 if line is not None:
                     lines.append(line)
@@ -109,25 +115,30 @@ def _parse_market(
     home_team: str,
     away_team: str,
     timestamp: datetime,
+    commence_time: datetime | None = None,
 ) -> BettingLine | None:
     """Parse a single market's outcomes into a BettingLine."""
     if bet_type == BetType.MONEYLINE:
         return _parse_moneyline(
-            outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp
+            outcomes, sportsbook, sport, event_name, home_team, away_team,
+            timestamp, commence_time,
         )
     elif bet_type == BetType.SPREAD:
         return _parse_spread(
-            outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp
+            outcomes, sportsbook, sport, event_name, home_team, away_team,
+            timestamp, commence_time,
         )
     elif bet_type == BetType.TOTAL:
         return _parse_total(
-            outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp
+            outcomes, sportsbook, sport, event_name, home_team, away_team,
+            timestamp, commence_time,
         )
     return None
 
 
 def _parse_moneyline(
-    outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp
+    outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp,
+    commence_time=None,
 ) -> BettingLine | None:
     home_odds = _find_outcome(outcomes, home_team)
     away_odds = _find_outcome(outcomes, away_team)
@@ -143,11 +154,13 @@ def _parse_moneyline(
         home_value=home_odds["price"],
         away_value=away_odds["price"],
         timestamp=timestamp,
+        commence_time=commence_time,
     )
 
 
 def _parse_spread(
-    outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp
+    outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp,
+    commence_time=None,
 ) -> BettingLine | None:
     home = _find_outcome(outcomes, home_team)
     away = _find_outcome(outcomes, away_team)
@@ -165,11 +178,13 @@ def _parse_spread(
         home_price=home["price"],
         away_price=away["price"],
         timestamp=timestamp,
+        commence_time=commence_time,
     )
 
 
 def _parse_total(
-    outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp
+    outcomes, sportsbook, sport, event_name, home_team, away_team, timestamp,
+    commence_time=None,
 ) -> BettingLine | None:
     over = _find_outcome(outcomes, "Over")
     under = _find_outcome(outcomes, "Under")
@@ -187,6 +202,7 @@ def _parse_total(
         home_price=over["price"],
         away_price=under["price"],
         timestamp=timestamp,
+        commence_time=commence_time,
     )
 
 

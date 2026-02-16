@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -31,6 +31,8 @@ class Bet:
     status: Literal["active", "won", "lost", "push"]
     created_at: str
     settled_at: str | None = None
+    commence_time: str | None = None
+    clv: list[dict] | None = None
 
 
 def _now_iso() -> str:
@@ -122,8 +124,13 @@ def settle_bet(
     state: dict,
     bet_id: str,
     outcome: Literal["won", "lost", "push"],
+    store=None,
 ) -> Bet:
-    """Move a bet from active_bets to settled_bets with the given outcome."""
+    """Move a bet from active_bets to settled_bets with the given outcome.
+
+    If *store* (a :class:`LineStore`) is provided, closing-line value is
+    computed and attached to the bet.
+    """
     init_bet_state(state)
 
     if outcome not in ("won", "lost", "push"):
@@ -143,10 +150,40 @@ def settle_bet(
             else:  # won
                 bet.profit = float(bet.profit)
                 bet.total_payout = float(bet.total_payout)
+
+            # Compute CLV if store available
+            if store is not None:
+                _attach_clv(bet, store)
+
             state["settled_bets"].append(active.pop(i))
             return bet
 
     raise KeyError(f"No active bet with id {bet_id!r}")
+
+
+def _attach_clv(bet: Bet, store) -> None:
+    """Compute and attach CLV data to a settled bet."""
+    from line_tracker.best_bets import LegCLV, enrich_bet_with_clv
+
+    ct = None
+    if bet.commence_time:
+        ct = datetime.fromisoformat(bet.commence_time)
+
+    leg_clvs: list[LegCLV] = enrich_bet_with_clv(bet, store, commence_time=ct)
+    bet.clv = [
+        {
+            "best_close_odds": lc.best_close_odds,
+            "book_close_odds": lc.book_close_odds,
+            "clv_price_prob_best": lc.clv_price_prob_best,
+            "clv_price_prob_book": lc.clv_price_prob_book,
+            "clv_decimal_best": lc.clv_decimal_best,
+            "clv_decimal_book": lc.clv_decimal_book,
+            "classification_best": lc.classification_best,
+            "classification_book": lc.classification_book,
+            "close_estimated": lc.close_estimated,
+        }
+        for lc in leg_clvs
+    ]
 
 
 def delete_bet(state: dict, bet_id: str) -> Bet:

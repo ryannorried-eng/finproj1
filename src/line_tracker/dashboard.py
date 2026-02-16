@@ -1588,12 +1588,32 @@ def _bet_history_dialog():
             losses = sum(1 for b in settled if b.status == "lost")
             pushes = sum(1 for b in settled if b.status == "push")
 
-            mc1, mc2, mc3, mc4 = st.columns(4)
+            # CLV summary
+            clv_vals = []
+            for b in settled:
+                if b.clv:
+                    for lc in b.clv:
+                        v = lc.get("clv_price_prob_best")
+                        if v is not None:
+                            clv_vals.append(v)
+            avg_clv = sum(clv_vals) / len(clv_vals) if clv_vals else None
+            beat_count = sum(1 for v in clv_vals if v > 0.001)
+            beat_pct = (beat_count / len(clv_vals) * 100) if clv_vals else None
+
+            mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
             mc1.metric("Total Staked", fmt_money(total_staked))
             mc2.metric("Net Profit", fmt_money(total_profit, sign=True))
             mc3.metric("Record", f"{wins}W-{losses}L-{pushes}P")
             roi = (total_profit / total_staked * 100) if total_staked else 0
             mc4.metric("ROI", fmt_pct(roi, sign=True))
+            mc5.metric(
+                "Avg CLV (prob pts)",
+                f"{avg_clv * 100:+.2f}%" if avg_clv is not None else "\u2014",
+            )
+            mc6.metric(
+                "Beat Close %",
+                fmt_pct(beat_pct) if beat_pct is not None else "\u2014",
+            )
 
             st.divider()
 
@@ -1636,9 +1656,54 @@ def _bet_history_dialog():
                         if bet.settled_at:
                             st.caption(f"Settled {bet.settled_at[:16]}")
 
+                    # Per-leg CLV display
+                    if bet.clv:
+                        _render_bet_clv(bet)
+
     st.divider()
     if st.button("Close", key="hist_close", use_container_width=True):
         st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# CLV display helper
+# ---------------------------------------------------------------------------
+
+_CLV_COLORS = {"beat": ":green", "lost": ":red", "matched": ":orange", "no_close": ""}
+
+
+def _render_bet_clv(bet) -> None:
+    """Render CLV info for each leg of a settled bet."""
+    with st.expander("Closing Line Value", expanded=False):
+        for i, (leg, lc) in enumerate(zip(bet.legs, bet.clv)):
+            label = f"{leg['market']} {leg['selection']}"
+            clv_best = lc.get("clv_price_prob_best")
+            clv_book = lc.get("clv_price_prob_book")
+            cls_best = lc.get("classification_best", "no_close")
+            cls_book = lc.get("classification_book", "no_close")
+            est = lc.get("close_estimated", False)
+
+            cc = st.columns([3, 2, 2, 1])
+            with cc[0]:
+                st.markdown(f"**{label}**")
+                if est:
+                    st.caption("Close estimated (no pre-game snapshot)")
+            with cc[1]:
+                color = _CLV_COLORS.get(cls_best, "")
+                if clv_best is not None:
+                    val_str = f"{clv_best * 100:+.2f}% prob pts"
+                    st.markdown(f"vs Market: {color}[**{val_str}**]")
+                else:
+                    st.markdown("vs Market: \u2014")
+            with cc[2]:
+                color = _CLV_COLORS.get(cls_book, "")
+                if clv_book is not None:
+                    val_str = f"{clv_book * 100:+.2f}% prob pts"
+                    st.markdown(f"vs Book: {color}[**{val_str}**]")
+                else:
+                    st.markdown("vs Book: \u2014")
+            with cc[3]:
+                st.markdown(f"_{cls_best}_")
 
 
 # ---------------------------------------------------------------------------
@@ -1662,7 +1727,12 @@ def _render_legend():
             "| **Edge %** | "
             "How much better a line is vs the median across books |\n"
             "| **$ Impact** | "
-            "Extra payout vs median book for your stake (Best Lines page) |"
+            "Extra payout vs median book for your stake (Best Lines page) |\n"
+            "| **CLV (prob pts)** | "
+            "Closing Line Value in implied-probability points. "
+            "Positive = you beat the closing line |\n"
+            "| **Beat Close %** | "
+            "Percentage of settled legs where you got better odds than close |"
         )
 
 
