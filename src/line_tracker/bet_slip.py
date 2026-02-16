@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from statistics import median as _median
+
 
 def american_to_decimal(odds: float) -> float:
     """Convert American odds to decimal odds.
@@ -21,7 +23,10 @@ def decimal_to_american(dec: float) -> float:
     if dec >= 2.0:
         return round((dec - 1) * 100, 2)
     if dec <= 1.0:
+        # Decimal odds of 1.0 means zero profit; not a valid line.
+        # Return 0.0 as a sentinel (EVEN display).
         return 0.0
+    # 1.0 < dec < 2.0 → negative American favourite
     return round(-100 / (dec - 1), 2)
 
 
@@ -47,6 +52,25 @@ def implied_prob_from_american(odds: float) -> float:
     if odds > 0:
         return 100 / (odds + 100)
     return 0.5  # EVEN
+
+
+def breakeven_prob_from_american(odds: float) -> float:
+    """Return the breakeven probability for a bet at given American odds.
+
+    This is the minimum win probability needed for the bet to be +EV.
+    Numerically identical to implied_prob_from_american, but semantically
+    represents the breakeven threshold rather than market-implied probability.
+    """
+    return implied_prob_from_american(odds)
+
+
+def ev_per_dollar(prob: float, odds: float) -> float:
+    """Expected value per $1 staked given a win probability and American odds.
+
+    EV = p * (decimal - 1) - (1 - p)
+    """
+    d = american_to_decimal(odds)
+    return prob * (d - 1) - (1 - prob)
 
 
 def parlay_payout(stake: float, legs_american: list[float]) -> dict:
@@ -121,8 +145,6 @@ def compute_standouts(entries: list[dict], stake: float = 100.0) -> list[dict]:
 
     Returns list of dicts sorted by edge descending (best standouts first).
     """
-    from statistics import median as _median
-
     groups: dict[tuple[str, str, str], list[dict]] = {}
     for e in entries:
         key = (e["event"], e["market"], e["selection"])

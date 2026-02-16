@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
-from line_tracker.bet_history import init_bet_state, settle_bet, submit_bet
+from line_tracker.best_bets import recommend_best_bets
+from line_tracker.bet_history import (
+    close_bet_clv,
+    compute_clv,
+    init_bet_state,
+    settle_bet,
+    snapshot_pick,
+    submit_bet,
+)
 from line_tracker.bet_slip import (
     american_profit,
     american_total_return,
@@ -22,10 +31,21 @@ from line_tracker.bet_slip import (
 from line_tracker.bet_slip import (
     american_to_decimal as _slip_a2d,
 )
+from line_tracker.market_structure import analyze_market
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
+from line_tracker.performance import (
+    all_breakdowns,
+    apply_filters,
+    build_clv_dataframe,
+    calibration_stats,
+    clv_distribution,
+    rolling_clv_series,
+    summary_kpis,
+)
 from line_tracker.scraper import OddsClient
-from line_tracker.storage import LineStore
+from line_tracker.slate import build_daily_slate, passes_relaxed_tier2
+from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 
 SPORTS = {
     "NFL": "americanfootball_nfl",
@@ -53,7 +73,10 @@ BET_TYPE_SHORT = {
 # Mapping from label back to bet_type value for filters
 _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
 
-DB_PATH = "lines.db"
+# Sentinel used to sort games with missing commence_time to the bottom.
+_FAR_FUTURE = datetime.max.replace(tzinfo=None)
+
+DB_PATH = str(DEFAULT_DB_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -107,11 +130,27 @@ def _format_clock_time(dt: datetime) -> str:
     return local.strftime("%I:%M %p").lstrip("0")
 
 
+def _format_start_time(dt: datetime) -> str:
+    """Format commence_time as 'Fri 12:15 PM'."""
+    local = dt.astimezone() if dt.tzinfo else dt
+    return local.strftime("%a %I:%M %p").replace(" 0", " ")
+
+
+def _relative_date_label(dt: datetime) -> str:
+    """Return 'Today', 'Tomorrow', or short date like 'Sat Feb 15'."""
+    local = dt.astimezone() if dt.tzinfo else dt
+    local_date = local.date()
+    today = date.today()
+    if local_date == today:
+        return "Today"
+    if local_date == today + timedelta(days=1):
+        return "Tomorrow"
+    return local_date.strftime("%a %b %-d")
+
+
 def _american_to_decimal(american: float) -> float:
     """Convert American odds to decimal odds."""
-    if american >= 0:
-        return american / 100 + 1
-    return 100 / abs(american) + 1
+    return _slip_a2d(american)
 
 
 def _max_display_rows() -> int:
@@ -140,6 +179,29 @@ def fmt_pct(x: float, sign: bool = False) -> str:
 def fmt_odds(x: float) -> str:
     """Format American odds: '+120' or '-110'."""
     return format_american(x)
+
+
+def _bankroll() -> float:
+    """Return the user's bankroll setting, or 0 if unset."""
+    return st.session_state.get("bankroll", 0.0)
+
+
+def _kelly_line(rec, prefix: str = "Sizing") -> str:
+    """Build a markdown string showing Kelly sizing info for *rec*.
+
+    If a bankroll is set, also shows the dollar stake.
+    """
+    if rec.kelly_suggested <= 0:
+        return ""
+    pct = rec.kelly_suggested * 100
+    br = _bankroll()
+    if br > 0:
+        stake = br * rec.kelly_suggested
+        return (
+            f"{prefix}: **{pct:.1f}%** "
+            f"({fmt_money(stake)}) — {rec.sizing_note}"
+        )
+    return f"{prefix}: **{pct:.1f}%** — {rec.sizing_note}"
 
 
 def _get_slip_book() -> str | None:
@@ -326,7 +388,7 @@ def _sidebar():
         # --- Page navigation ---
         st.radio(
             "Page",
-            ["Dashboard", "Best Lines to Shop"],
+            ["Dashboard", "Best Lines to Shop", "Daily Slate", "Performance"],
             key="nav_page",
             horizontal=True,
         )
@@ -337,7 +399,7 @@ def _sidebar():
 
         st.text_input(
             "API Key",
-            value=os.environ.get("ODDS_API_KEY", ""),
+            value=os.environ.get("ODDS_API_KEY", "09d11879822c9c7bd81c7eb210c82d92"),
             type="password",
             key="api_key",
             help=(
@@ -351,6 +413,18 @@ def _sidebar():
             list(SPORTS.keys()),
             key="sport_name",
             help="Pick the league you want to track.",
+        )
+
+        st.number_input(
+            "Bankroll ($)",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            key="bankroll",
+            help=(
+                "Enter your total bankroll to see Kelly-based "
+                "suggested stake amounts alongside recommendations."
+            ),
         )
 
         st.divider()
@@ -371,6 +445,12 @@ def _sidebar():
                     "Hides juice columns and uses shorter bet-type labels "
                     "for a denser view."
                 ),
+            )
+            st.toggle(
+                "Slate debug counters",
+                value=False,
+                key="slate_debug",
+                help="Show classification breakdown on the Daily Slate page.",
             )
 
         with st.expander("Glossary"):
@@ -479,12 +559,16 @@ def _build_game_index(lines) -> dict[str, dict]:
                 "away_team": ln.away_team,
                 "sport": ln.sport,
                 "bet_types": set(),
+                "commence_time": getattr(ln, "commence_time", None),
             }
         g = games[ln.event]
         g["books"].add(ln.sportsbook)
         g["bet_types"].add(ln.bet_type)
         if ln.timestamp > g["last_updated"]:
             g["last_updated"] = ln.timestamp
+        # Prefer non-None commence_time
+        if g["commence_time"] is None:
+            g["commence_time"] = getattr(ln, "commence_time", None)
     return games
 
 
@@ -540,9 +624,12 @@ def _page_dashboard():
         placeholder="Search teams...",
     )
 
-    # Sort by last_updated descending (proxy for start time)
+    # Sort by commence_time ascending (soonest first); missing at bottom
     sorted_games = sorted(
-        games.items(), key=lambda x: x[1]["last_updated"], reverse=True,
+        games.items(),
+        key=lambda x: (
+            x[1]["commence_time"].astimezone() if x[1]["commence_time"] else _FAR_FUTURE
+        ),
     )
 
     # Apply search filter
@@ -562,11 +649,14 @@ def _page_dashboard():
         with st.container(border=True):
             # Time-first layout: time | matchup+badges | books/updated | view
             cols = st.columns([1.2, 5, 2, 1])
+            ct = info["commence_time"]
             with cols[0]:
-                st.markdown(
-                    f"**{_format_clock_time(info['last_updated'])}**"
-                )
-                st.caption(_relative_time(info["last_updated"]))
+                if ct:
+                    st.markdown(f"**{_format_start_time(ct)}**")
+                    st.caption(_relative_date_label(ct))
+                else:
+                    st.markdown("**TBD**")
+                    st.caption(f"Updated {_relative_time(info['last_updated'])}")
             with cols[1]:
                 badges = []
                 if event_name in arb_events:
@@ -582,6 +672,7 @@ def _page_dashboard():
                 st.caption(sport)
             with cols[2]:
                 st.markdown(f"{len(info['books'])} books")
+                st.caption(f"Updated {_relative_time(info['last_updated'])}")
             with cols[3]:
                 if st.button("View", key=f"view_{event_name}"):
                     st.session_state["page"] = "detail"
@@ -653,6 +744,12 @@ def _page_detail():
         # --- Summary strip: best lines at a glance ---
         _detail_summary_strip(game_lines)
 
+        # --- Best Bet (Consensus EV) ---
+        _detail_best_bet_section(game_lines)
+
+        # --- Market Structure ---
+        _detail_market_structure(game_lines)
+
     tabs = st.tabs([
         "Odds Comparison", "Arbitrage", "Line Movements", "History",
     ])
@@ -665,6 +762,286 @@ def _page_detail():
         _detail_movements(event_name)
     with tabs[3]:
         _detail_history(event_name)
+
+
+# -- Detail: Best Bet (Consensus EV) ---------------------------------------
+
+def _detail_best_bet_section(game_lines):
+    """Show the 'Best Bet (Consensus EV)' section above tabs."""
+    recs = recommend_best_bets(game_lines, top_n=6)
+    if not recs:
+        return
+
+    st.divider()
+    st.subheader("Best Bet (Market Consensus EV)")
+    st.caption(
+        "Based on vig-free consensus probabilities from the books \u00b7 "
+        "Informational only, not financial advice"
+    )
+
+    slider_cols = st.columns(2)
+    with slider_cols[0]:
+        min_edge = st.slider(
+            "Min edge (%)",
+            min_value=0.0,
+            max_value=5.0,
+            value=0.5,
+            step=0.1,
+            key=f"min_edge_{id(game_lines)}",
+        )
+    with slider_cols[1]:
+        min_quality = st.slider(
+            "Min quality",
+            min_value=0,
+            max_value=100,
+            value=60,
+            step=5,
+            key=f"min_quality_{id(game_lines)}",
+        )
+
+    qualified = [
+        r for r in recs
+        if r.edge_pct >= min_edge and r.quality_score >= min_quality
+    ]
+
+    if qualified:
+        top = qualified[0]
+        market_label = _best_bet_market_label(top)
+
+        with st.container(border=True):
+            st.markdown(
+                f"**Best Bet: {top.selection} ({market_label}) "
+                f"at {format_american(top.best_odds)} "
+                f"on {top.best_sportsbook}**"
+            )
+            st.markdown(
+                f"Consensus (weighted, vig-free): "
+                f"**{top.consensus_prob * 100:.1f}%** | "
+                f"Breakeven: **{top.breakeven_prob * 100:.1f}%** | "
+                f"Edge: **{fmt_pct(top.edge_pct, sign=True)}** | "
+                "EV: **"
+                + fmt_money(top.ev_per_100, sign=True).replace("$", r"\$")
+                + r" per \$100**"
+            )
+            st.markdown(
+                f"Market confidence: **{top.confidence}** | "
+                f"Quality: **{top.quality_score}/100 ({top.quality_tier})**",
+                help=(
+                    "Confidence measures sportsbook disagreement. "
+                    "Quality is a composite score of edge, agreement, "
+                    "coverage, and data freshness."
+                ),
+            )
+
+            kelly_str = _kelly_line(top)
+            if kelly_str:
+                st.markdown(kelly_str)
+
+            _render_best_bet_why(top)
+
+        others = qualified[1:3]
+        if others:
+            st.markdown("**Other +EV bets:**")
+            for r in others:
+                ml = _best_bet_market_label(r)
+                ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
+                st.markdown(
+                    f"- {r.selection} ({ml}) at "
+                    f"{format_american(r.best_odds)} "
+                    f"on {r.best_sportsbook} — "
+                    f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
+                    f"EV: {ev_str} per \\$100 — "
+                    f"Quality: {r.quality_score} ({r.quality_tier})"
+                )
+    else:
+        st.info(
+            "No bets meet your edge + quality thresholds."
+            " Showing closest candidates:"
+        )
+        for r in recs[:3]:
+            ml = _best_bet_market_label(r)
+            ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
+            st.markdown(
+                f"- {r.selection} ({ml}) at "
+                f"{format_american(r.best_odds)} "
+                f"on {r.best_sportsbook} — "
+                f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
+                f"EV: {ev_str} per \\$100 — "
+                f"Quality: {r.quality_score} ({r.quality_tier})"
+            )
+
+
+def _render_best_bet_why(rec) -> None:
+    """Render a compact 'Why this bet?' breakdown inside the Best Bet card."""
+    with st.expander("Why this bet?", expanded=False):
+        books_line = ""
+        if rec.books_used_count and rec.total_books_count:
+            line_label = ""
+            if rec.line is not None:
+                line_label = f" at line {rec.line:g}"
+            books_line = (
+                f"- **Consensus built from** "
+                f"{rec.books_used_count} / {rec.total_books_count} "
+                f"books{line_label}\n"
+            )
+        ev_str = fmt_money(rec.ev_per_100, sign=True).replace("$", "\\$")
+        st.markdown(
+            f"{books_line}"
+            f"- **Weighted consensus (vig-free):** "
+            f"{rec.consensus_prob * 100:.1f}%\n"
+            f"- **Unweighted consensus (vig-free):** "
+            f"{rec.unweighted_consensus_prob * 100:.1f}%\n"
+            f"- **Newest book update:** {rec.newest_update_age_min:.0f}m ago\n"
+            f"- **Oldest book update:** {rec.oldest_update_age_min:.0f}m ago\n"
+            f"- **Best price:** {format_american(rec.best_odds)} "
+            f"at {rec.best_sportsbook}\n"
+            f"- **Breakeven prob (at that price):** "
+            f"{rec.breakeven_prob * 100:.1f}%\n"
+            f"- **Edge:** ({rec.consensus_prob * 100:.1f}% \u2212 "
+            f"{rec.breakeven_prob * 100:.1f}%) = "
+            f"{fmt_pct(rec.edge_pct, sign=True)}\n"
+            f"- **EV:** {ev_str} per \\$100 "
+            f"({rec.ev * 100:+.1f}% per \\$1)\n"
+            f"- **Quality:** {rec.quality_score}/100 ({rec.quality_tier})"
+        )
+        st.caption(
+            f"Edge Score: {rec.edge_score:.0f} | "
+            f"Agreement: {rec.agreement_score:.0f} | "
+            f"Coverage: {rec.coverage_score:.0f} | "
+            f"Freshness: {rec.freshness_score:.0f}"
+        )
+
+        # Market volatility & hold metrics
+        st.markdown(
+            f"- **Market hold median:** {rec.market_hold_median:.2f}%\n"
+            f"- **Volatility (sigma):** {rec.market_volatility_sigma:.4f} | "
+            f"**Robust sigma (IQR/1.349):** {rec.robust_sigma:.4f}\n"
+            f"- **Edge Z-score:** {rec.edge_z:+.2f} "
+            f"(confidence: {rec.confidence})"
+        )
+
+        if rec.book_holds:
+            holds_str = " | ".join(
+                f"{book}: {hold:.2f}%"
+                for book, hold in sorted(
+                    rec.book_holds.items(), key=lambda kv: kv[1]
+                )
+            )
+            st.caption(f"Book holds: {holds_str}")
+
+
+def _best_bet_market_label(rec) -> str:
+    """Format the market name with line info for display."""
+    if rec.market == "spread" and rec.line is not None:
+        return f"Spread ({rec.line:+.1f})"
+    if rec.market == "total" and rec.line is not None:
+        return f"Total ({rec.line:.1f})"
+    return rec.market.title()
+
+
+# -- Detail: Market Structure -----------------------------------------------
+
+_TAG_COLORS = {
+    "Efficient": "green",
+    "Normal": "blue",
+    "Noisy": "orange",
+}
+
+_MKT_LABELS = {
+    "moneyline": "Moneyline",
+    "spread": "Spread",
+    "total": "Total",
+}
+
+
+def _detail_market_structure(game_lines):
+    """Show a Market Structure card with efficiency metrics."""
+    ml = [ln for ln in game_lines if ln.bet_type == BetType.MONEYLINE]
+    sp = [ln for ln in game_lines if ln.bet_type == BetType.SPREAD]
+    tot = [ln for ln in game_lines if ln.bet_type == BetType.TOTAL]
+
+    analyses = {}
+    for label, subset in [("moneyline", ml), ("spread", sp), ("total", tot)]:
+        a = analyze_market(subset)
+        if a:
+            analyses[label] = a
+
+    if not analyses:
+        return
+
+    st.divider()
+    st.subheader("Market Structure")
+    st.caption("Efficiency and stability metrics across sportsbooks")
+
+    for mkt_key, info in analyses.items():
+        mkt_name = _MKT_LABELS.get(mkt_key, mkt_key)
+        tag = info["tag"]
+        tag_color = _TAG_COLORS.get(tag, "gray")
+
+        with st.container(border=True):
+            hdr = (
+                f"**{mkt_name}** — "
+                f":{tag_color}-background[**{tag}**]"
+            )
+            st.markdown(hdr)
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric(
+                "Books",
+                f"{info['books_with_holds']}/{info['books_total']}",
+            )
+            c2.metric("Hold (median)", f"{info['market_hold_median']:.1f}%")
+            h_spr = info["hold_spread"]
+            c3.metric(
+                "Hold Spread",
+                f"{h_spr:.1f}%" if h_spr is not None else "N/A",
+                help="IQR (p75-p25) of book hold percentages",
+            )
+            c4.metric(
+                "Volatility",
+                f"{info['volatility_sigma']:.4f}",
+                help="Std dev of de-vigged probabilities",
+            )
+
+            # Sharp vs retail divergence
+            div = info["divergence"]
+            if div is not None:
+                d1, d2, d3 = st.columns(3)
+                d1.metric(
+                    "Sharp Consensus",
+                    f"{info['sharp_consensus'] * 100:.1f}%",
+                )
+                d2.metric(
+                    "Retail Consensus",
+                    f"{info['retail_consensus'] * 100:.1f}%",
+                )
+                d3.metric(
+                    "Divergence",
+                    f"{div * 100:.1f} pp",
+                    help=(
+                        "Absolute difference between sharp and "
+                        "retail consensus probabilities"
+                    ),
+                )
+                sharp_str = ", ".join(info["sharp_books"]) or "—"
+                retail_str = ", ".join(info["retail_books"]) or "—"
+                st.caption(
+                    f"Sharp: {sharp_str} | Retail: {retail_str}"
+                )
+            else:
+                st.caption(
+                    "Sharp/retail divergence: insufficient books "
+                    "in one or both groups"
+                )
+
+            # Line dispersion (spread/total)
+            disp = info.get("line_dispersion")
+            if disp:
+                parts = [
+                    f"{val:g} ({cnt})"
+                    for val, cnt in disp.items()
+                ]
+                st.caption(f"Line dispersion: {', '.join(parts)}")
 
 
 # -- Detail: Summary strip -------------------------------------------------
@@ -1158,7 +1535,10 @@ def _bet_slip_add_controls(
     if slip_book:
         st.caption(f"Locked to {slip_book}")
 
-    ln = next(x for x in bt_lines if x.sportsbook == selected_book)
+    ln = next((x for x in bt_lines if x.sportsbook == selected_book), None)
+    if ln is None:
+        st.warning(f"No line found for {selected_book}")
+        return
 
     # Determine odds and line based on market + side
     odds: float | None = None
@@ -1337,8 +1717,13 @@ def _slip_dialog():
             use_container_width=True,
         ):
             try:
-                submit_bet(st.session_state, stake)
+                bet = submit_bet(st.session_state, stake)
                 st.session_state["_slip_submitted"] = True
+                try:
+                    with LineStore() as _s:
+                        snapshot_pick(bet, _s)
+                except Exception:
+                    pass  # CLV snapshot is best-effort
             except ValueError as exc:
                 st.error(str(exc))
             st.rerun()
@@ -1431,65 +1816,593 @@ def _page_best_lines():
 
     slip_book = _get_slip_book()
 
-    for rank, s in enumerate(standouts, 1):
-        with st.container(border=True):
-            rcols = st.columns([0.5, 3, 1.5, 1.5, 1.5, 1.5, 2])
-            with rcols[0]:
-                st.markdown(f"**{rank}**")
-            with rcols[1]:
-                line_str = ""
-                if s["line"] is not None and s["market"] == "Spread":
-                    line_str = f" ({s['line']:+.1f})"
-                elif s["line"] is not None:
-                    line_str = f" ({s['line']:.1f})"
-                st.markdown(
-                    f"**{s['event']}**  \n"
-                    f"{s['market']} \u00b7 {s['selection']}{line_str}"
-                )
-            with rcols[2]:
-                st.markdown(
-                    f"**{s['sportsbook']}**  \n"
-                    f"{format_american(s['odds'])}"
-                )
-            with rcols[3]:
-                st.markdown(
-                    f"Median  \n"
-                    f"{format_american(s['median_odds'])}"
-                )
-            with rcols[4]:
-                edge_pp = s["edge"] * 100
-                st.metric("Edge", fmt_pct(edge_pp, sign=True))
-            with rcols[5]:
-                st.metric(
-                    "$ Impact",
-                    fmt_money(s['dollar_impact'], sign=True),
-                )
-            with rcols[6]:
-                # View game button
-                if st.button("View", key=f"bl_view_{rank}"):
-                    st.session_state["page"] = "detail"
-                    st.session_state["selected_game"] = s["event"]
-                    st.rerun()
+    # Build event → commence_time map from fetched lines
+    commence_map: dict[str, datetime] = {}
+    for ln in lines:
+        ct = getattr(ln, "commence_time", None)
+        if ct is not None and ln.event not in commence_map:
+            commence_map[ln.event] = ct
 
-                # Add to slip (respects lock)
-                can_add = not slip_book or s["sportsbook"] == slip_book
-                if can_add:
-                    if st.button(
-                        "\u2795 Slip", key=f"bl_add_{rank}", type="secondary",
-                    ):
-                        leg = {
-                            "sport": _sport_name(),
-                            "event_name": s["event"],
-                            "sportsbook": s["sportsbook"],
-                            "market": s["market"],
-                            "selection": s["selection"],
-                            "line": s["line"],
-                            "odds": s["odds"],
-                            "fetched_at": "",
-                        }
-                        _try_add_leg(leg)
-                elif slip_book:
-                    st.caption(f"Locked to {slip_book}")
+    # Group standouts by local date
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    groups: dict[date | None, list[tuple[int, dict]]] = defaultdict(list)
+    for rank, s in enumerate(standouts, 1):
+        ct = commence_map.get(s["event"])
+        if ct is not None:
+            local_date = ct.astimezone().date()
+        else:
+            local_date = None
+        groups[local_date].append((rank, s))
+
+    # Sort within each group by commence_time ascending, then edge descending
+    for items in groups.values():
+        items.sort(key=lambda x: (
+            commence_map.get(x[1]["event"], _FAR_FUTURE),
+            -x[1]["edge"],
+        ))
+
+    # Order: dated groups sorted ascending, None ("Unknown time") last
+    dated_keys: list[date] = sorted(k for k in groups if k is not None)
+    ordered_keys: list[date | None] = list(dated_keys)
+    if None in groups:
+        ordered_keys.append(None)
+
+    for group_date in ordered_keys:
+        count = len(groups[group_date])
+        date_str = (
+            group_date.strftime("%a %b %-d") if group_date is not None else ""
+        )
+        if group_date is None:
+            header = f"Unknown time ({count})"
+        elif group_date == today:
+            header = f"Today \u2014 {date_str} ({count})"
+        elif group_date == tomorrow:
+            header = f"Tomorrow \u2014 {date_str} ({count})"
+        else:
+            header = f"{date_str} ({count})"
+
+        st.subheader(header)
+
+        for rank, s in groups[group_date]:
+            with st.container(border=True):
+                rcols = st.columns([0.5, 3, 1.5, 1.5, 1.5, 1.5, 2])
+                with rcols[0]:
+                    st.markdown(f"**{rank}**")
+                with rcols[1]:
+                    line_str = ""
+                    if s["line"] is not None and s["market"] == "Spread":
+                        line_str = f" ({s['line']:+.1f})"
+                    elif s["line"] is not None:
+                        line_str = f" ({s['line']:.1f})"
+                    ev_ct = commence_map.get(s["event"])
+                    time_str = (
+                        f" \u00b7 {_format_start_time(ev_ct)}"
+                        if ev_ct else ""
+                    )
+                    st.markdown(
+                        f"**{s['event']}**  \n"
+                        f"{s['market']} \u00b7 {s['selection']}{line_str}{time_str}"
+                    )
+                with rcols[2]:
+                    st.markdown(
+                        f"**{s['sportsbook']}**  \n"
+                        f"{format_american(s['odds'])}"
+                    )
+                with rcols[3]:
+                    st.markdown(
+                        f"Median  \n"
+                        f"{format_american(s['median_odds'])}"
+                    )
+                with rcols[4]:
+                    edge_pp = s["edge"] * 100
+                    st.metric("Edge", fmt_pct(edge_pp, sign=True))
+                with rcols[5]:
+                    st.metric(
+                        "$ Impact",
+                        fmt_money(s['dollar_impact'], sign=True),
+                    )
+                with rcols[6]:
+                    # View game button
+                    if st.button("View", key=f"bl_view_{rank}"):
+                        st.session_state["page"] = "detail"
+                        st.session_state["selected_game"] = s["event"]
+                        st.rerun()
+
+                    # Add to slip (respects lock)
+                    can_add = not slip_book or s["sportsbook"] == slip_book
+                    if can_add:
+                        if st.button(
+                            "\u2795 Slip", key=f"bl_add_{rank}", type="secondary",
+                        ):
+                            leg = {
+                                "sport": _sport_name(),
+                                "event_name": s["event"],
+                                "sportsbook": s["sportsbook"],
+                                "market": s["market"],
+                                "selection": s["selection"],
+                                "line": s["line"],
+                                "odds": s["odds"],
+                                "fetched_at": "",
+                            }
+                            _try_add_leg(leg)
+                    elif slip_book:
+                        st.caption(f"Locked to {slip_book}")
+
+
+# ---------------------------------------------------------------------------
+# PAGE 4: Daily Slate
+# ---------------------------------------------------------------------------
+
+def _page_daily_slate():
+    """Aggregated daily slate with tier-based recommendations."""
+    st.title("Daily Slate")
+    st.caption(
+        "Today's best bets across all events, ranked and tiered by "
+        "consensus edge and quality score."
+    )
+
+    lines = st.session_state.get("last_fetch")
+    if not lines:
+        st.info("No data loaded yet. Fetch odds from the Dashboard first.")
+        return
+
+    # --- Display Filters ---
+    fcols = st.columns(3)
+    with fcols[0]:
+        min_edge = st.slider(
+            "Min edge (%)",
+            min_value=0.0,
+            max_value=5.0,
+            value=0.5,
+            step=0.1,
+            key="slate_min_edge",
+        )
+    with fcols[1]:
+        min_quality = st.slider(
+            "Min quality",
+            min_value=0,
+            max_value=100,
+            value=65,
+            step=5,
+            key="slate_min_quality",
+        )
+    with fcols[2]:
+        hide_low = st.toggle(
+            "Hide low confidence",
+            value=True,
+            key="slate_hide_low",
+        )
+
+    # --- Slate Filters card ---
+    _debug_env = os.environ.get(
+        "LINE_TRACKER_DEBUG", ""
+    ).lower() in ("1", "true", "yes")
+
+    with st.expander("Slate Filters", expanded=False):
+        sf1, sf2 = st.columns(2)
+        with sf1:
+            pro_mode = st.toggle(
+                "Pro Mode",
+                value=False,
+                key="slate_pro_mode",
+                help=(
+                    "Tighter Tier 1: edge >= 3.5%, edge_z >= 2.8, "
+                    "books >= 6, hold <= 6%. Fewer top plays, higher "
+                    "conviction. Tier 2 / Stay Away unchanged."
+                ),
+            )
+            strict_mode = st.toggle(
+                "Strict mode",
+                value=True,
+                key="slate_strict_mode",
+                help=(
+                    "ON: Tier 2 uses strict thresholds (edge >= 1.5%, "
+                    "edge_z >= 1.0). OFF: relaxed (edge >= 0.5%, "
+                    "edge_z >= 0.75, Low confidence allowed if quality "
+                    "tier >= Strong). Tier 1 is always strict."
+                ),
+            )
+            show_stay_away = st.checkbox(
+                "Show Stay Away",
+                value=True,
+                key="slate_show_stay_away",
+            )
+        with sf2:
+            max_per_section = st.slider(
+                "Max games per section",
+                min_value=5,
+                max_value=30,
+                value=10,
+                step=1,
+                key="slate_max_per_section",
+            )
+            _sort_options = [
+                "Best edge",
+                "Best edge_z",
+                "Best quality",
+                "Lowest hold",
+            ]
+            tier2_sort = st.selectbox(
+                "Tier 2 sort",
+                options=_sort_options,
+                index=0,
+                key="slate_tier2_sort",
+            )
+        if _debug_env:
+            show_debug_counts = st.checkbox(
+                "Show debug counts",
+                value=False,
+                key="slate_show_debug_counts",
+            )
+        else:
+            show_debug_counts = False
+
+    # --- Build lines_by_event ---
+    lines_by_event: dict[str, list] = defaultdict(list)
+    for ln in lines:
+        lines_by_event[ln.event].append(ln)
+
+    show_debug = show_debug_counts or st.session_state.get("slate_debug", False)
+    filters = {
+        "min_edge": min_edge,
+        "min_quality": min_quality,
+        "hide_low_confidence": hide_low,
+        "max_per_event": 2,
+        "debug": show_debug,
+    }
+    slate = build_daily_slate(
+        dict(lines_by_event),
+        filters=filters,
+        settings={"pro_mode": pro_mode},
+    )
+
+    tier1 = slate["tier1"]
+    tier2 = list(slate["tier2"])
+    stay_away = list(slate["stay_away"])
+    counts = slate["counts"]
+
+    # ── Relaxed mode: promote qualifying stay_away → display tier2 ────
+    if not strict_mode:
+        promoted = [e for e in stay_away if passes_relaxed_tier2(e)]
+        stay_away = [e for e in stay_away if not passes_relaxed_tier2(e)]
+        tier2 = tier2 + promoted
+
+    # ── Tier 2 sorting (stable, deterministic) ────────────────────────
+    _tier2_sort_keys = {
+        "Best edge": lambda e: (-e["edge_pct"], -e["slate_score"], e["event"]),
+        "Best edge_z": lambda e: (-e.get("edge_z", 0.0), -e["slate_score"], e["event"]),
+        "Best quality": lambda e: (-e["quality_score"], -e["slate_score"], e["event"]),
+        "Lowest hold": lambda e: (
+            e.get("market_hold_median", 999.0),
+            -e["slate_score"],
+            e["event"],
+        ),
+    }
+    tier2.sort(key=_tier2_sort_keys.get(tier2_sort, _tier2_sort_keys["Best edge"]))
+
+    # ── Apply max-per-section cap ─────────────────────────────────────
+    tier1_display = tier1[:max_per_section]
+    tier2_display = tier2[:max_per_section]
+    stay_away_display = stay_away[:max_per_section] if show_stay_away else []
+
+    # ── No-data guard ─────────────────────────────────────────────────
+    if counts["total_recs"] == 0:
+        st.warning(
+            "No recommendations returned "
+            "(check API key, sport selection, or fetch)."
+        )
+
+    # Summary metrics
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Top Plays", len(tier1_display))
+    mc2.metric("More Plays", len(tier2_display))
+    mc3.metric("Stay Away", len(stay_away_display))
+
+    # Sanity-check warnings (shown when debug env is on)
+    if _debug_env:
+        for w in slate.get("debug_stats", {}).get("warnings", []):
+            st.warning(f"Slate Debug: {w}")
+
+    # Debug counters (behind toggle)
+    debug = slate.get("debug")
+    ds = slate.get("debug_stats")
+    if debug and ds:
+        with st.expander("Debug: Classification Breakdown", expanded=False):
+            dc1, dc2, dc3, dc4 = st.columns(4)
+            dc1.metric("Total Recs", debug["total_recs"])
+            dc2.metric("Tier 1", debug["tier1_count"])
+            dc3.metric("Tier 2", debug["tier2_count"])
+            dc4.metric("Stay Away", debug["stay_away_count"])
+            st.markdown("**By Confidence:** " + ", ".join(
+                f"{k}: {v}" for k, v in sorted(debug["by_confidence"].items())
+            ))
+            st.markdown("**By Quality Tier:** " + ", ".join(
+                f"{k}: {v}" for k, v in sorted(debug["by_quality_tier"].items())
+            ))
+
+            # Gate failure counts
+            st.markdown("---")
+            st.markdown("**Tier 1 gate failures**")
+            t1g = ds["tier1_gate_failures"]
+            gc1, gc2, gc3, gc4 = st.columns(4)
+            gc1.metric("Conf != High", t1g["confidence_not_high"])
+            gc2.metric("QT != Elite/Strong", t1g["quality_tier_not_elite_strong"])
+            gc3.metric("< Dyn Floor", t1g["below_dynamic_floor"])
+            gc4.metric("Edge <= 0", t1g["edge_not_positive"])
+
+            st.markdown("**Tier 2 gate failures**")
+            t2g = ds["tier2_gate_failures"]
+            gc5, gc6, gc7, gc8 = st.columns(4)
+            gc5.metric("Conf != H/M", t2g["confidence_not_high_medium"])
+            gc6.metric("QT != E/S/M", t2g["quality_tier_not_elite_strong_moderate"])
+            gc7.metric("< Edge Floor", t2g["below_edge_floor"])
+            gc8.metric("Edge Z Low", t2g["edge_z_too_low"])
+
+            # Sigma + dynamic floor stats
+            st.markdown("---")
+            def _fmt_stat(s):
+                if s["min"] is None:
+                    return "\u2014"
+                return (
+                    f"min={s['min']:.4f}  "
+                    f"med={s['median']:.4f}  "
+                    f"max={s['max']:.4f}"
+                )
+            st.markdown(
+                f"**Sigma stats:** {_fmt_stat(ds['sigma_stats'])}"
+            )
+            if ds["robust_sigma_stats"]["min"] is not None:
+                st.markdown(
+                    f"**Robust sigma:** {_fmt_stat(ds['robust_sigma_stats'])}"
+                )
+            st.markdown(
+                f"**Dynamic floor stats:** {_fmt_stat(ds['dynamic_floor_stats'])}"
+            )
+
+            # Warnings
+            for w in ds.get("warnings", []):
+                st.warning(w)
+
+    st.divider()
+
+    # ── Tier 1: Top Plays ─────────────────────────────────────────────
+    st.subheader("Top Plays (Tier 1)")
+    if not tier1_display:
+        st.info("No Tier 1 plays today under current thresholds.")
+        st.caption(
+            "Tier 1 requires **High** confidence + quality tier "
+            "**Elite/Strong** + edge >= (3.0 + 1.2 \u00d7 \u03c3)."
+        )
+    else:
+        _render_slate_date_groups(tier1_display, show_cards=True)
+
+    st.divider()
+
+    # ── Tier 2: More Plays ────────────────────────────────────────────
+    st.subheader("More Plays (Tier 2)")
+    if not tier2_display:
+        st.info("No Tier 2 plays meet current filters.")
+        st.caption(
+            "Try turning off Strict mode or lowering the Tier 2 edge floor."
+        )
+    else:
+        _render_slate_table(tier2_display)
+
+    st.divider()
+
+    # ── Stay Away ─────────────────────────────────────────────────────
+    if show_stay_away:
+        st.subheader("Stay Away")
+        if not stay_away_display:
+            st.info("No games flagged to avoid (by current logic).")
+        else:
+            for entry in stay_away_display:
+                _render_stay_away_entry(entry)
+
+
+def _render_stay_away_entry(entry: dict) -> None:
+    """Render a single Stay Away entry with risk score and reasons."""
+    market_label = _slate_market_label(entry)
+    ct = entry.get("commence_time")
+    time_str = f" \u00b7 {_format_start_time(ct)}" if ct else ""
+    score = entry.get("avoid_score", 0.0)
+    with st.container(border=True):
+        hcol, scol = st.columns([5, 1])
+        with hcol:
+            st.markdown(
+                f"**{entry['event']}** \u2014 "
+                f"{entry['selection']} ({market_label}){time_str}"
+            )
+        with scol:
+            st.metric("Risk", f"{score:.0f}")
+        for reason in entry["avoid_reasons"]:
+            st.markdown(f"- :red[{reason}]")
+
+
+def _render_why_tooltip(entry: dict) -> None:
+    """Render a 'Why?' expander with transparency details for a slate entry."""
+    with st.expander("Why?", expanded=False):
+        sigma = entry.get("market_volatility_sigma", 0.0)
+        dyn_floor = entry.get("dynamic_edge_floor")
+        lines = [
+            f"- **Confidence:** {entry.get('confidence', 'N/A')}",
+            f"- **Quality tier:** {entry.get('quality_tier', 'N/A')}",
+            f"- **Quality score:** {entry.get('quality_score', 'N/A')}",
+            f"- **Edge:** {entry.get('edge_pct', 0.0):+.2f}%",
+            f"- **Edge Z-score:** {entry.get('edge_z', 0.0):.2f}",
+            f"- **Volatility \u03c3:** {sigma:.4f}",
+        ]
+        if dyn_floor is not None:
+            lines.append(
+                f"- **Dynamic Tier 1 floor:** {dyn_floor:.2f}%"
+            )
+        hold = entry.get("market_hold_median")
+        if hold is not None:
+            lines.append(f"- **Market hold (median):** {hold:.2f}%")
+        reasons = entry.get("avoid_reasons", [])
+        if reasons:
+            lines.append("- **Reasons:** " + "; ".join(reasons))
+        st.markdown("\n".join(lines))
+
+
+def _slate_market_label(entry: dict) -> str:
+    """Format market + line for a slate entry."""
+    market = entry["market"]
+    line = entry.get("line")
+    if market == "spread" and line is not None:
+        return f"Spread ({line:+.1f})"
+    if market == "total" and line is not None:
+        return f"Total ({line:.1f})"
+    return market.title()
+
+
+def _render_slate_date_groups(entries: list[dict], *, show_cards: bool) -> None:
+    """Render slate entries grouped by commence date."""
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    # Check if any entry has commence_time
+    has_dates = any(e.get("commence_time") is not None for e in entries)
+
+    if not has_dates:
+        # No grouping — render flat
+        if show_cards:
+            for entry in entries:
+                _render_slate_card(entry)
+        return
+
+    # Group by local date
+    groups: dict[date | None, list[dict]] = defaultdict(list)
+    for entry in entries:
+        ct = entry.get("commence_time")
+        if ct is not None:
+            local_date = ct.astimezone().date() if ct.tzinfo else ct.date()
+        else:
+            local_date = None
+        groups[local_date].append(entry)
+
+    dated_keys = sorted(k for k in groups if k is not None)
+    ordered_keys: list[date | None] = list(dated_keys)
+    if None in groups:
+        ordered_keys.append(None)
+
+    for group_date in ordered_keys:
+        if group_date is None:
+            label = "Time TBD"
+        elif group_date == today:
+            label = f"Today \u2014 {group_date.strftime('%a %b %-d')}"
+        elif group_date == tomorrow:
+            label = f"Tomorrow \u2014 {group_date.strftime('%a %b %-d')}"
+        else:
+            label = group_date.strftime("%a %b %-d")
+
+        st.markdown(f"**{label}**")
+
+        if show_cards:
+            for entry in groups[group_date]:
+                _render_slate_card(entry)
+
+
+def _render_slate_card(entry: dict) -> None:
+    """Render a single Tier-1 slate card with Add-to-slip."""
+    slip_book = _get_slip_book()
+    market_label = _slate_market_label(entry)
+    ct = entry.get("commence_time")
+    time_str = _format_start_time(ct) if ct else "TBD"
+
+    with st.container(border=True):
+        cols = st.columns([4, 2, 2, 1.5])
+        with cols[0]:
+            st.markdown(
+                f"**{entry['event']}**  \n"
+                f"{entry['selection']} ({market_label}) at "
+                f"{format_american(entry['best_odds'])} on "
+                f"**{entry['best_sportsbook']}**"
+            )
+            st.caption(f"Start: {time_str}")
+        with cols[1]:
+            st.metric("Edge", fmt_pct(entry["edge_pct"], sign=True))
+            st.caption(f"Quality: {entry['quality_score']}/100")
+        with cols[2]:
+            st.metric("Slate Score", f"{entry['slate_score']:.0f}")
+            st.caption(f"Confidence: {entry['confidence']}")
+            k_sugg = entry.get("kelly_suggested", 0)
+            if k_sugg and k_sugg > 0:
+                br = _bankroll()
+                if br > 0:
+                    st.caption(
+                        f"Size: {k_sugg * 100:.1f}% "
+                        f"({fmt_money(br * k_sugg)})"
+                    )
+                else:
+                    st.caption(f"Size: {k_sugg * 100:.1f}%")
+        with cols[3]:
+            can_add = not slip_book or entry["best_sportsbook"] == slip_book
+            safe_key = entry["event_id"].replace(" ", "_")
+            if can_add:
+                if st.button(
+                    "\u2795 Slip",
+                    key=f"slate_add_{safe_key}_{entry['market']}",
+                    type="primary",
+                ):
+                    leg = {
+                        "sport": _sport_name(),
+                        "event_name": entry["event"],
+                        "sportsbook": entry["best_sportsbook"],
+                        "market": BET_TYPE_SHORT.get(entry["market"], entry["market"]),
+                        "selection": entry["selection"],
+                        "line": entry.get("line"),
+                        "odds": entry["best_odds"],
+                        "fetched_at": "",
+                    }
+                    _try_add_leg(leg)
+            elif slip_book:
+                st.caption(f"Locked to {slip_book}")
+
+            if st.button("View", key=f"slate_view_{safe_key}_{entry['market']}"):
+                st.session_state["page"] = "detail"
+                st.session_state["selected_game"] = entry["event"]
+                st.rerun()
+        _render_why_tooltip(entry)
+
+
+def _render_slate_table(entries: list[dict]) -> None:
+    """Render Tier-2 slate entries as a table with per-row Why? expanders."""
+    rows = []
+    for entry in entries:
+        ct = entry.get("commence_time")
+        time_str = _format_start_time(ct) if ct else "TBD"
+        market_label = _slate_market_label(entry)
+        k_sugg = entry.get("kelly_suggested", 0)
+        br = _bankroll()
+        if k_sugg and k_sugg > 0 and br > 0:
+            sizing_str = f"{k_sugg * 100:.1f}% ({fmt_money(br * k_sugg)})"
+        elif k_sugg and k_sugg > 0:
+            sizing_str = f"{k_sugg * 100:.1f}%"
+        else:
+            sizing_str = ""
+        rows.append({
+            "Event": entry["event"],
+            "Start": time_str,
+            "Pick": f"{entry['selection']} ({market_label})",
+            "Odds": format_american(entry["best_odds"]),
+            "Book": entry["best_sportsbook"],
+            "Edge": fmt_pct(entry["edge_pct"], sign=True),
+            "Quality": entry["quality_score"],
+            "Score": f"{entry['slate_score']:.0f}",
+            "Confidence": entry["confidence"],
+            "Sizing": sizing_str,
+        })
+    st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+    # Per-row Why? expanders below the table
+    for entry in entries:
+        _render_why_tooltip(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -1548,30 +2461,35 @@ def _bet_history_dialog():
                 # Settlement controls
                 st.markdown("**Settle this bet:**")
                 scols = st.columns(3)
+
+                def _settle(bid, outcome, _key=""):
+                    try:
+                        with LineStore() as _s:
+                            close_bet_clv(bid, _s)
+                    except Exception:
+                        pass  # CLV close is best-effort
+                    settle_bet(st.session_state, bid, outcome)
+                    st.session_state["_reopen_history"] = True
+                    st.rerun()
+
                 with scols[0]:
                     if st.button(
                         "Won", key=f"hist_won_{bet.id}",
                         type="primary", use_container_width=True,
                     ):
-                        settle_bet(st.session_state, bet.id, "won")
-                        st.session_state["_reopen_history"] = True
-                        st.rerun()
+                        _settle(bet.id, "won")
                 with scols[1]:
                     if st.button(
                         "Lost", key=f"hist_lost_{bet.id}",
                         use_container_width=True,
                     ):
-                        settle_bet(st.session_state, bet.id, "lost")
-                        st.session_state["_reopen_history"] = True
-                        st.rerun()
+                        _settle(bet.id, "lost")
                 with scols[2]:
                     if st.button(
                         "Push", key=f"hist_push_{bet.id}",
                         use_container_width=True,
                     ):
-                        settle_bet(st.session_state, bet.id, "push")
-                        st.session_state["_reopen_history"] = True
-                        st.rerun()
+                        _settle(bet.id, "push")
 
     with tab_settled:
         if not settled:
@@ -1628,13 +2546,45 @@ def _bet_history_dialog():
                     with hcols[2]:
                         if bet.status == "won":
                             pnl = bet.total_payout - bet.stake
-                            st.metric("Profit", f":green[+{fmt_money(pnl)}]")
+                            st.metric(
+                                "Profit",
+                                f":green[+{fmt_money(pnl)}]",
+                            )
                         elif bet.status == "push":
                             st.metric("Profit", fmt_money(0))
                         else:
-                            st.metric("Profit", f":red[-{fmt_money(bet.stake)}]")
+                            st.metric(
+                                "Profit",
+                                f":red[-{fmt_money(bet.stake)}]",
+                            )
                         if bet.settled_at:
-                            st.caption(f"Settled {bet.settled_at[:16]}")
+                            st.caption(
+                                f"Settled {bet.settled_at[:16]}",
+                            )
+
+                    # -- CLV metrics (best-effort) --
+                    try:
+                        with LineStore() as _s:
+                            clv_rows = _s.get_clv(bet.id)
+                    except Exception:
+                        clv_rows = []
+                    if clv_rows:
+                        parts: list[str] = []
+                        for cr in clv_rows:
+                            m = compute_clv(cr)
+                            if m is None:
+                                continue
+                            cd = m["clv_decimal"]
+                            cp = m["clv_prob"]
+                            color = "green" if cd >= 0 else "red"
+                            parts.append(
+                                f"Leg {cr['leg_index']+1}: "
+                                f":{color}[CLV "
+                                f"{cd:+.3f} dec "
+                                f"/ {cp*100:+.2f}pp]"
+                            )
+                        if parts:
+                            st.caption(" | ".join(parts))
 
     st.divider()
     if st.button("Close", key="hist_close", use_container_width=True):
@@ -1663,6 +2613,220 @@ def _render_legend():
             "How much better a line is vs the median across books |\n"
             "| **$ Impact** | "
             "Extra payout vs median book for your stake (Best Lines page) |"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Performance page
+# ---------------------------------------------------------------------------
+
+_BREAKDOWN_LABELS: dict[str, str] = {
+    "confidence_at_pick": "Confidence",
+    "quality_tier_at_pick": "Quality Tier",
+    "market": "Market Type",
+    "sport": "Sport",
+    "pick_sportsbook": "Sportsbook",
+}
+
+
+def _page_performance():
+    st.title("Performance")
+    st.caption("Closing Line Value (CLV) analytics across all settled legs.")
+
+    store = LineStore(DB_PATH)
+    rows = store.get_all_clv()
+
+    if not rows:
+        st.info("No settled legs with CLV data yet. Settle some bets first!")
+        return
+
+    df_full = build_clv_dataframe(rows)
+    if df_full.empty:
+        st.info("No CLV data available.")
+        return
+
+    # ---- Filters ----
+    with st.expander("Filters", expanded=False):
+        fcols = st.columns(5)
+        with fcols[0]:
+            date_start = st.date_input("From", value=None, key="perf_date_start")
+        with fcols[1]:
+            date_end = st.date_input("To", value=None, key="perf_date_end")
+        with fcols[2]:
+            sports = ["All"] + sorted(
+                df_full["sport"].dropna().unique().tolist()
+            )
+            sport_filter = st.selectbox("Sport", sports, key="perf_sport")
+        with fcols[3]:
+            markets = ["All"] + sorted(
+                df_full["market"].dropna().unique().tolist()
+            )
+            market_filter = st.selectbox("Market", markets, key="perf_market")
+        with fcols[4]:
+            confs = ["All"] + sorted(
+                df_full["confidence_at_pick"].dropna().unique().tolist()
+            )
+            conf_filter = st.selectbox(
+                "Confidence", confs, key="perf_confidence",
+            )
+
+        tiers = ["All"] + sorted(
+            df_full["quality_tier_at_pick"].dropna().unique().tolist()
+        )
+        tier_filter = st.selectbox(
+            "Quality Tier", tiers, key="perf_tier",
+        )
+
+    df = apply_filters(
+        df_full,
+        date_start=str(date_start) if date_start else None,
+        date_end=str(date_end) if date_end else None,
+        sport=sport_filter if sport_filter != "All" else None,
+        market=market_filter if market_filter != "All" else None,
+        confidence=conf_filter if conf_filter != "All" else None,
+        quality_tier=tier_filter if tier_filter != "All" else None,
+    )
+
+    if df.empty:
+        st.warning("No data matches the selected filters.")
+        return
+
+    # ---- KPI cards ----
+    kpis = summary_kpis(df)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Legs (Closed)", kpis["total_legs"])
+    k2.metric("Beating Close %", f"{kpis['beating_close_pct']}%")
+    k3.metric("Avg CLV (prob pts)", f"{kpis['avg_clv_prob']:+.4f}")
+
+    k4, k5, k6 = st.columns(3)
+    k4.metric("Median CLV (prob pts)", f"{kpis['median_clv_prob']:+.4f}")
+    k5.metric("Avg CLV (decimal)", f"{kpis['avg_clv_decimal']:+.4f}")
+    k6.metric("Median CLV (decimal)", f"{kpis['median_clv_decimal']:+.4f}")
+
+    st.divider()
+
+    # ---- Breakdown tables ----
+    st.subheader("Breakdowns")
+    breakdowns = all_breakdowns(df)
+
+    if breakdowns:
+        tabs = st.tabs([
+            _BREAKDOWN_LABELS.get(col, col) for col in breakdowns
+        ])
+        for tab, (col, tbl) in zip(tabs, breakdowns.items()):
+            with tab:
+                display_tbl = tbl.rename(columns={
+                    col: _BREAKDOWN_LABELS.get(col, col),
+                    "legs": "Legs",
+                    "beating_pct": "Beating %",
+                    "avg_clv_decimal": "Avg CLV (dec)",
+                    "avg_clv_prob": "Avg CLV (prob)",
+                })
+                st.dataframe(
+                    display_tbl,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+    else:
+        st.info("Not enough metadata for breakdowns.")
+
+    st.divider()
+
+    # ---- Charts ----
+    chart_left, chart_right = st.columns(2)
+
+    with chart_left:
+        st.subheader("30-Day Rolling CLV")
+        rolling = rolling_clv_series(df)
+        if not rolling.empty:
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.plot(
+                rolling["date"],
+                rolling["rolling_clv_prob"],
+                linewidth=1.5,
+            )
+            ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+            ax.set_ylabel("Rolling CLV (prob)")
+            ax.set_xlabel("")
+            fig.autofmt_xdate(rotation=30)
+            fig.tight_layout()
+            st.pyplot(fig)
+        else:
+            st.info("Not enough data for rolling chart.")
+
+    with chart_right:
+        st.subheader("CLV Distribution")
+        dist = clv_distribution(df)
+        if not dist.empty:
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(6, 3))
+            colors = [
+                "#d9534f" if "< " in lbl or lbl.startswith("[-")
+                else "#5cb85c"
+                for lbl in dist["bin_label"]
+            ]
+            ax.bar(
+                range(len(dist)),
+                dist["count"],
+                color=colors,
+                edgecolor="white",
+                linewidth=0.5,
+            )
+            ax.set_xticks(range(len(dist)))
+            ax.set_xticklabels(dist["bin_label"], rotation=45, ha="right", fontsize=7)
+            ax.set_ylabel("Count")
+            fig.tight_layout()
+            st.pyplot(fig)
+        else:
+            st.info("Not enough data for distribution chart.")
+
+    # ---- Calibration Panel ------------------------------------------------
+    st.divider()
+    st.subheader("Tier Calibration")
+    st.caption(
+        "Compares CLV performance across proxy tier groups "
+        "(Tier 1 / Tier 2 / Stay Away based on pick-time metadata)."
+    )
+
+    cal = calibration_stats(df)
+    if cal:
+        cc1, cc2, cc3 = st.columns(3)
+        for col, tier in zip((cc1, cc2, cc3), ("Tier 1", "Tier 2", "Stay Away")):
+            stats = cal.get(tier, {})
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{tier}**")
+                    st.metric("Legs", stats.get("legs", 0))
+                    st.metric(
+                        "Beating Close %",
+                        f"{stats.get('beating_pct', 0.0)}%",
+                    )
+                    st.metric(
+                        "Avg CLV (prob)",
+                        f"{stats.get('avg_clv_prob', 0.0):+.4f}",
+                    )
+
+        # Advisory message when Tier 1 does not outperform Tier 2
+        t1 = cal.get("Tier 1", {})
+        t2 = cal.get("Tier 2", {})
+        if (
+            t1.get("legs", 0) >= 5
+            and t2.get("legs", 0) >= 5
+            and t1.get("avg_clv_prob", 0.0) <= t2.get("avg_clv_prob", 0.0)
+        ):
+            st.warning(
+                "Tier 1 is not outperforming Tier 2 on average CLV. "
+                "Consider enabling **Pro Mode** on the Daily Slate to "
+                "tighten Tier 1 criteria, or review your edge thresholds."
+            )
+    else:
+        st.info(
+            "Not enough pick-time metadata for calibration "
+            "(needs confidence, quality tier, and edge at pick)."
         )
 
 
@@ -1713,6 +2877,10 @@ def main():
         nav = st.session_state.get("nav_page", "Dashboard")
         if nav == "Best Lines to Shop":
             _page_best_lines()
+        elif nav == "Daily Slate":
+            _page_daily_slate()
+        elif nav == "Performance":
+            _page_performance()
         else:
             _page_dashboard()
 

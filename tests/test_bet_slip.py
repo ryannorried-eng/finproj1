@@ -4,8 +4,10 @@ from line_tracker.bet_slip import (
     american_profit,
     american_to_decimal,
     american_total_return,
+    breakeven_prob_from_american,
     compute_standouts,
     decimal_to_american,
+    ev_per_dollar,
     format_american,
     has_conflicting_leg,
     implied_prob_from_american,
@@ -86,6 +88,44 @@ def test_implied_prob_underdog():
 
 def test_implied_prob_even():
     assert implied_prob_from_american(0) == 0.5
+
+
+# --- breakeven_prob_from_american ---
+
+def test_breakeven_favourite():
+    # -200 → 200/300 ≈ 0.6667
+    assert round(breakeven_prob_from_american(-200), 4) == 0.6667
+
+
+def test_breakeven_underdog():
+    # +150 → 100/250 = 0.4
+    assert breakeven_prob_from_american(150) == 0.4
+
+
+def test_breakeven_even():
+    assert breakeven_prob_from_american(0) == 0.5
+
+
+# --- ev_per_dollar ---
+
+def test_ev_positive():
+    # prob 0.55, odds +100 (dec 2.0) → EV = 0.55*1 - 0.45 = 0.10
+    assert abs(ev_per_dollar(0.55, 100) - 0.10) < 0.001
+
+
+def test_ev_negative():
+    # prob 0.45, odds -110 (dec ≈ 1.909) → negative EV
+    assert ev_per_dollar(0.45, -110) < 0
+
+
+def test_ev_breakeven():
+    # prob 0.50, odds +100 → EV = 0
+    assert abs(ev_per_dollar(0.50, 100)) < 0.001
+
+
+def test_ev_big_underdog():
+    # prob 0.30, odds +400 (dec 5.0) → EV = 0.30*4 - 0.70 = 0.50
+    assert abs(ev_per_dollar(0.30, 400) - 0.50) < 0.001
 
 
 # --- parlay_payout ---

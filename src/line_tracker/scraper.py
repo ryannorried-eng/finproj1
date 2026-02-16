@@ -32,10 +32,15 @@ class OddsClient:
 
     def get_sports(self) -> list[dict]:
         """List available sports (does not count against quota)."""
-        resp = self._client.get(
-            f"{BASE_URL}/sports/", params={"apiKey": self.api_key}
-        )
-        resp.raise_for_status()
+        try:
+            resp = self._client.get(
+                f"{BASE_URL}/sports/", params={"apiKey": self.api_key}
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                raise ValueError("Invalid API key or access denied.") from exc
+            raise
         return resp.json()
 
     def get_odds(
@@ -46,16 +51,25 @@ class OddsClient:
         odds_format: str = "american",
     ) -> list[BettingLine]:
         """Fetch live odds for a sport and return as BettingLine objects."""
-        resp = self._client.get(
-            f"{BASE_URL}/sports/{sport}/odds/",
-            params={
-                "apiKey": self.api_key,
-                "regions": regions,
-                "markets": markets,
-                "oddsFormat": odds_format,
-            },
-        )
-        resp.raise_for_status()
+        try:
+            resp = self._client.get(
+                f"{BASE_URL}/sports/{sport}/odds/",
+                params={
+                    "apiKey": self.api_key,
+                    "regions": regions,
+                    "markets": markets,
+                    "oddsFormat": odds_format,
+                },
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                raise ValueError("Invalid API key or access denied.") from exc
+            if exc.response.status_code == 422:
+                raise ValueError(
+                    f"Invalid sport key: {sport!r}"
+                ) from exc
+            raise
         return _parse_events(resp.json(), sport)
 
     def close(self):
@@ -75,6 +89,8 @@ def _parse_events(events: list[dict], sport: str) -> list[BettingLine]:
         home_team = event["home_team"]
         away_team = event["away_team"]
         event_name = f"{away_team} @ {home_team}"
+        ct_raw = event.get("commence_time")
+        commence_time = _parse_timestamp(ct_raw) if ct_raw else None
 
         for bookmaker in event.get("bookmakers", []):
             sportsbook = bookmaker["title"]
@@ -96,6 +112,7 @@ def _parse_events(events: list[dict], sport: str) -> list[BettingLine]:
                     timestamp=updated,
                 )
                 if line is not None:
+                    line.commence_time = commence_time
                     lines.append(line)
     return lines
 

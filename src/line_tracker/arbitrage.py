@@ -111,6 +111,8 @@ def find_spread_arbs(
 
 def _implied_probability(american_odds: float) -> float:
     """Convert American odds to implied probability (0-1)."""
+    if american_odds == 0:
+        return 0.5  # EVEN
     if american_odds < 0:
         return abs(american_odds) / (abs(american_odds) + 100)
     return 100 / (american_odds + 100)
