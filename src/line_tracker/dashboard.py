@@ -15,7 +15,10 @@ from line_tracker.bet_history import (
     close_bet_clv,
     compute_clv,
     init_bet_state,
+    load_bets_from_db,
+    persist_bet,
     settle_bet,
+    settle_bet_persistent,
     snapshot_pick,
     submit_bet,
 )
@@ -385,8 +388,15 @@ def _sidebar():
             st.caption(f"Locked to {slip_book}")
 
         # --- Bet History button ---
-        active_count = len(st.session_state.get("active_bets", []))
-        settled_count = len(st.session_state.get("settled_bets", []))
+        try:
+            with LineStore() as _db:
+                active_count = len(_db.get_bets(status="active"))
+                settled_count = len(
+                    [b for b in _db.get_bets() if b["status"] != "active"],
+                )
+        except Exception:
+            active_count = len(st.session_state.get("active_bets", []))
+            settled_count = len(st.session_state.get("settled_bets", []))
         total_bets = active_count + settled_count
         hist_label = (
             f"Bet History ({total_bets})" if total_bets else "Bet History"
@@ -1734,9 +1744,10 @@ def _slip_dialog():
                 st.session_state["_slip_submitted"] = True
                 try:
                     with LineStore() as _s:
+                        persist_bet(bet, _s)
                         snapshot_pick(bet, _s)
                 except Exception:
-                    pass  # CLV snapshot is best-effort
+                    pass  # DB + CLV snapshot is best-effort
             except ValueError as exc:
                 st.error(str(exc))
             st.rerun()
@@ -2576,10 +2587,16 @@ def _render_slate_table(entries: list[dict]) -> None:
 
 @st.dialog("Bet History", width="large")
 def _bet_history_dialog():
-    """Modal showing Active and Settled bets."""
+    """Modal showing Active and Settled bets (loaded from SQLite)."""
     init_bet_state(st.session_state)
-    active: list = st.session_state["active_bets"]
-    settled: list = st.session_state["settled_bets"]
+    try:
+        with LineStore() as _db:
+            active = load_bets_from_db(_db, status="active")
+            settled = load_bets_from_db(_db, status=None)
+        settled = [b for b in settled if b.status in ("won", "lost", "push")]
+    except Exception:
+        active = st.session_state["active_bets"]
+        settled = st.session_state["settled_bets"]
 
     tab_active, tab_settled = st.tabs([
         f"Active ({len(active)})",
@@ -2631,8 +2648,9 @@ def _bet_history_dialog():
                     try:
                         with LineStore() as _s:
                             close_bet_clv(bid, _s)
+                            settle_bet_persistent(bid, outcome, _s)
                     except Exception:
-                        pass  # CLV close is best-effort
+                        pass  # CLV close + DB settle is best-effort
                     settle_bet(st.session_state, bid, outcome)
                     st.session_state["_reopen_history"] = True
                     st.rerun()

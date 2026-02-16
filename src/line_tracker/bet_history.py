@@ -1,4 +1,4 @@
-"""Bet history data layer: Bet model and session-state helpers."""
+"""Bet history data layer: Bet model, session-state helpers, and DB persistence."""
 
 from __future__ import annotations
 
@@ -160,6 +160,125 @@ def delete_bet(state: dict, bet_id: str) -> Bet:
                 return lst.pop(i)
 
     raise KeyError(f"No bet with id {bet_id!r}")
+
+
+# ---------------------------------------------------------------------------
+# DB persistence helpers
+# ---------------------------------------------------------------------------
+
+def persist_bet(bet: Bet, store) -> str:
+    """Write a Bet and its legs to SQLite in a single transaction.
+
+    *store* is a ``LineStore`` instance.  Returns the bet_id.
+    """
+    bet_row = {
+        "bet_id": bet.id,
+        "created_at": bet.created_at,
+        "sportsbook": bet.sportsbook,
+        "stake": bet.stake,
+        "total_odds_american": bet.combined_american,
+        "total_odds_decimal": bet.combined_decimal,
+        "potential_payout": bet.total_payout,
+        "profit": bet.profit,
+        "status": bet.status,
+        "settled_at": bet.settled_at,
+        "outcome": None,
+    }
+    leg_rows = []
+    for lg in bet.legs:
+        odds = lg["odds"]
+        leg_rows.append({
+            "leg_id": uuid.uuid4().hex,
+            "sport": lg.get("sport"),
+            "market": lg.get("market"),
+            "event_name": lg.get("event_name"),
+            "selection": lg.get("selection"),
+            "line_value": lg.get("line"),
+            "odds_american": int(odds),
+            "odds_decimal": round(american_to_decimal(odds), 4),
+            "sportsbook": lg.get("sportsbook"),
+            "pick_timestamp": lg.get("fetched_at"),
+            "commence_time": lg.get("commence_time"),
+        })
+    return store.insert_bet_with_legs(bet_row, leg_rows)
+
+
+def load_bets_from_db(store, status: str | None = None) -> list[Bet]:
+    """Read bets (and their legs) from SQLite and return Bet objects.
+
+    *store* is a ``LineStore`` instance.
+    """
+    bet_rows = store.get_bets(status=status)
+    bets: list[Bet] = []
+    for br in bet_rows:
+        leg_rows = store.get_bet_legs(br["bet_id"])
+        legs = [
+            {
+                "sport": lr.get("sport", ""),
+                "event_name": lr.get("event_name", ""),
+                "sportsbook": lr.get("sportsbook", ""),
+                "market": lr.get("market", ""),
+                "selection": lr.get("selection", ""),
+                "line": lr.get("line_value"),
+                "odds": lr["odds_american"],
+                "fetched_at": lr.get("pick_timestamp", ""),
+            }
+            for lr in leg_rows
+        ]
+        # Map DB status to Bet status literal
+        db_status = br["status"]
+        if db_status in ("won", "lost", "push"):
+            bet_status = db_status
+        else:
+            bet_status = "active"
+        bets.append(Bet(
+            id=br["bet_id"],
+            sportsbook=br["sportsbook"],
+            legs=legs,
+            combined_decimal=br["total_odds_decimal"],
+            combined_american=int(br["total_odds_american"]),
+            stake=br["stake"],
+            profit=br["profit"],
+            total_payout=br["potential_payout"],
+            status=bet_status,
+            created_at=br["created_at"],
+            settled_at=br.get("settled_at"),
+        ))
+    return bets
+
+
+def settle_bet_persistent(
+    bet_id: str,
+    outcome: Literal["won", "lost", "push"],
+    store,
+) -> None:
+    """Write settlement to DB (call *after* session-state settle)."""
+    # Fetch the bet to compute final P&L
+    rows = store.get_bets()
+    bet_row = None
+    for r in rows:
+        if r["bet_id"] == bet_id:
+            bet_row = r
+            break
+    if bet_row is None:
+        return
+    stake = bet_row["stake"]
+    settled_at = _now_iso()
+    if outcome == "won":
+        profit = bet_row["profit"]
+        payout = bet_row["potential_payout"]
+    elif outcome == "lost":
+        profit = -stake
+        payout = 0.0
+    else:  # push
+        profit = 0.0
+        payout = stake
+    store.settle_bet_db(bet_id, outcome, settled_at, profit, payout)
+
+
+def delete_bet_persistent(bet_id: str, store) -> None:
+    """Remove a bet and its legs from the database."""
+    store.delete_bet_db(bet_id)
 
 
 # ---------------------------------------------------------------------------

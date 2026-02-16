@@ -91,6 +91,45 @@ class LineStore:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS bets (
+                bet_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                sportsbook TEXT NOT NULL,
+                stake REAL NOT NULL,
+                total_odds_american INTEGER NOT NULL,
+                total_odds_decimal REAL NOT NULL,
+                potential_payout REAL NOT NULL,
+                profit REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                settled_at TEXT,
+                outcome TEXT
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS bet_legs (
+                leg_id TEXT PRIMARY KEY,
+                bet_id TEXT NOT NULL REFERENCES bets(bet_id),
+                sport TEXT,
+                market TEXT,
+                event_name TEXT,
+                selection TEXT,
+                line_value REAL,
+                odds_american INTEGER NOT NULL,
+                odds_decimal REAL NOT NULL,
+                sportsbook TEXT,
+                pick_timestamp TEXT,
+                commence_time TEXT
+            )
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bet_legs_bet_id
+            ON bet_legs (bet_id)
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bets_status
+            ON bets (status)
+        """)
         self._conn.commit()
         self._migrate_commence_time()
         self._migrate_clv_metadata()
@@ -318,6 +357,170 @@ class LineStore:
             "ORDER BY closed_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Bet persistence
+    # ------------------------------------------------------------------
+
+    def insert_bet(self, bet_row: dict) -> str:
+        """Persist a placed bet. Returns the bet_id."""
+        self._conn.execute(
+            """INSERT INTO bets
+               (bet_id, created_at, sportsbook, stake,
+                total_odds_american, total_odds_decimal,
+                potential_payout, profit, status, settled_at, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bet_row["bet_id"],
+                bet_row["created_at"],
+                bet_row["sportsbook"],
+                bet_row["stake"],
+                bet_row["total_odds_american"],
+                bet_row["total_odds_decimal"],
+                bet_row["potential_payout"],
+                bet_row["profit"],
+                bet_row.get("status", "active"),
+                bet_row.get("settled_at"),
+                bet_row.get("outcome"),
+            ),
+        )
+        self._conn.commit()
+        return bet_row["bet_id"]
+
+    def insert_legs(self, bet_id: str, legs: list[dict]) -> None:
+        """Persist all legs for a bet in one batch."""
+        rows = [
+            (
+                lg["leg_id"],
+                bet_id,
+                lg.get("sport"),
+                lg.get("market"),
+                lg.get("event_name"),
+                lg.get("selection"),
+                lg.get("line_value"),
+                lg["odds_american"],
+                lg["odds_decimal"],
+                lg.get("sportsbook"),
+                lg.get("pick_timestamp"),
+                lg.get("commence_time"),
+            )
+            for lg in legs
+        ]
+        self._conn.executemany(
+            """INSERT INTO bet_legs
+               (leg_id, bet_id, sport, market, event_name,
+                selection, line_value, odds_american, odds_decimal,
+                sportsbook, pick_timestamp, commence_time)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        self._conn.commit()
+
+    def insert_bet_with_legs(
+        self, bet_row: dict, legs: list[dict],
+    ) -> str:
+        """Persist a bet + legs in a single transaction. Returns bet_id."""
+        try:
+            self._conn.execute("BEGIN")
+            self._conn.execute(
+                """INSERT INTO bets
+                   (bet_id, created_at, sportsbook, stake,
+                    total_odds_american, total_odds_decimal,
+                    potential_payout, profit, status, settled_at, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    bet_row["bet_id"],
+                    bet_row["created_at"],
+                    bet_row["sportsbook"],
+                    bet_row["stake"],
+                    bet_row["total_odds_american"],
+                    bet_row["total_odds_decimal"],
+                    bet_row["potential_payout"],
+                    bet_row["profit"],
+                    bet_row.get("status", "active"),
+                    bet_row.get("settled_at"),
+                    bet_row.get("outcome"),
+                ),
+            )
+            for lg in legs:
+                self._conn.execute(
+                    """INSERT INTO bet_legs
+                       (leg_id, bet_id, sport, market, event_name,
+                        selection, line_value, odds_american, odds_decimal,
+                        sportsbook, pick_timestamp, commence_time)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        lg["leg_id"],
+                        bet_row["bet_id"],
+                        lg.get("sport"),
+                        lg.get("market"),
+                        lg.get("event_name"),
+                        lg.get("selection"),
+                        lg.get("line_value"),
+                        lg["odds_american"],
+                        lg["odds_decimal"],
+                        lg.get("sportsbook"),
+                        lg.get("pick_timestamp"),
+                        lg.get("commence_time"),
+                    ),
+                )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return bet_row["bet_id"]
+
+    def get_bets(
+        self,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Fetch bets, optionally filtered by status."""
+        query = "SELECT * FROM bets WHERE 1=1"
+        params: list = []
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_bet_legs(self, bet_id: str) -> list[dict]:
+        """Fetch all legs for a given bet."""
+        rows = self._conn.execute(
+            "SELECT * FROM bet_legs WHERE bet_id = ? ORDER BY leg_id",
+            (bet_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def settle_bet_db(
+        self,
+        bet_id: str,
+        outcome: str,
+        settled_at: str,
+        profit: float,
+        potential_payout: float,
+    ) -> None:
+        """Update a bet's status to settled with outcome and final P&L."""
+        self._conn.execute(
+            """UPDATE bets
+               SET status = ?, outcome = ?, settled_at = ?,
+                   profit = ?, potential_payout = ?
+               WHERE bet_id = ?""",
+            (outcome, outcome, settled_at, profit, potential_payout, bet_id),
+        )
+        self._conn.commit()
+
+    def delete_bet_db(self, bet_id: str) -> None:
+        """Delete a bet and its legs from the database."""
+        self._conn.execute(
+            "DELETE FROM bet_legs WHERE bet_id = ?", (bet_id,),
+        )
+        self._conn.execute(
+            "DELETE FROM bets WHERE bet_id = ?", (bet_id,),
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Calibration thresholds
