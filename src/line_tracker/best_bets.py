@@ -225,6 +225,87 @@ def _weighted_median(values: list[float], weights: list[float]) -> float:
     return pairs[-1][0]
 
 
+# ---------------------------------------------------------------------------
+# Weighted robust consensus + EV-based edge helpers
+# ---------------------------------------------------------------------------
+_SHRINKAGE_K = 5.0  # Bayesian shrinkage constant for n_eff
+_MIN_EV_SIGMA = 0.002  # 0.2% EV floor for edge_z denominator
+
+
+def weighted_robust_consensus(
+    probs: list[float],
+    holds: list[float],
+    *,
+    eps: float = 1e-6,
+) -> float:
+    """Compute a robust, weighted consensus probability.
+
+    Weights combine inverse hold (sharp books) and inverse deviation from
+    the median (outlier resistance):
+
+        w_i = 1 / (eps + hold_i) * 1 / (eps + |p_i - p_med|)
+
+    Parameters
+    ----------
+    probs : list[float]
+        Per-book de-vigged probabilities.
+    holds : list[float]
+        Per-book implied hold percentages (higher = more vig).
+    eps : float
+        Small constant to avoid division by zero.
+
+    Returns
+    -------
+    float
+        Weighted robust consensus probability.
+    """
+    if not probs:
+        return 0.0
+    if len(probs) == 1:
+        return probs[0]
+
+    p_med = median(probs)
+    weights = [
+        (1.0 / (eps + abs(h))) * (1.0 / (eps + abs(p - p_med)))
+        for p, h in zip(probs, holds)
+    ]
+    total_w = sum(weights)
+    if total_w == 0:
+        return p_med
+    return sum(w * p for w, p in zip(weights, probs)) / total_w
+
+
+def compute_ev_edge(
+    consensus_prob: float,
+    decimal_odds: float,
+) -> float:
+    """EV-based edge: p_cons * d - 1."""
+    return consensus_prob * decimal_odds - 1.0
+
+
+def compute_shrinkage(
+    edge_ev: float,
+    n_eff: float,
+    k: float = _SHRINKAGE_K,
+) -> float:
+    """Shrink edge_ev toward zero based on effective sample size.
+
+    edge_ev_shrunk = edge_ev * n_eff / (n_eff + k)
+    """
+    if n_eff <= 0:
+        return 0.0
+    return edge_ev * (n_eff / (n_eff + k))
+
+
+def compute_edge_z(
+    edge_ev_shrunk: float,
+    ev_sigma: float,
+    min_ev_sigma: float = _MIN_EV_SIGMA,
+) -> float:
+    """Edge z-score in EV space: edge_ev_shrunk / max(ev_sigma, floor)."""
+    return edge_ev_shrunk / max(ev_sigma, min_ev_sigma)
+
+
 @dataclass
 class BetRecommendation:
     """A single best-bet recommendation."""
@@ -238,10 +319,11 @@ class BetRecommendation:
     best_odds: float  # American odds
     breakeven_prob: float  # implied prob at best_odds (breakeven threshold)
     ev: float  # expected value per $1 stake
-    edge_pct: float  # (consensus_prob - breakeven_prob) * 100
-    ev_per_100: float  # ev * 100 — dollar EV per $100 stake
+    edge_pct: float  # 100 * edge_ev  (EV% — matches EV per $100)
+    ev_per_100: float  # 100 * edge_ev  — dollar EV per $100 stake
     confidence: str  # "High", "Medium", or "Low" — book agreement level
     unweighted_consensus_prob: float = 0.0  # plain median for debugging
+    consensus_prob_weighted: float = 0.0  # robust weighted consensus
     newest_update_age_min: float = 0.0  # minutes since most recent book update
     oldest_update_age_min: float = 0.0  # minutes since oldest book update
     books_used_count: int = 0  # books in the chosen line group
@@ -258,8 +340,14 @@ class BetRecommendation:
     book_holds: dict[str, float] = field(default_factory=dict)  # implied hold% per book
     market_hold_median: float = 0.0  # median hold% across books
     market_volatility_sigma: float = 0.0  # std dev of devigged probs
-    robust_sigma: float = 0.0  # IQR / 1.349
-    edge_z: float = 0.0  # edge / max(robust_sigma, 0.01)
+    robust_sigma: float = 0.0  # IQR / 1.349 (prob space)
+    edge_z: float = 0.0  # edge_ev_shrunk / max(ev_sigma, MIN_EV_SIGMA)
+    edge_ev: float = 0.0  # p_cons * decimal_odds - 1
+    edge_ev_shrunk: float = 0.0  # edge_ev * n_eff / (n_eff + k)
+    edge_ev_100: float = 0.0  # 100 * edge_ev
+    n_eff: float = 0.0  # books_used * (1 - outlier_rate)
+    outlier_rate: float = 0.0  # outliers_removed / total_books
+    ev_sigma: float = 0.0  # robust_sigma * decimal_odds
     kelly_base: float = 0.0  # raw Kelly fraction (capped at 25%)
     kelly_suggested: float = 0.0  # Kelly × confidence multiplier
     sizing_note: str = ""  # human-readable sizing label
@@ -554,6 +642,7 @@ def _build_rec(
     best_sportsbook: str,
     best_odds: float,
     side_probs: list[float],
+    side_holds: list[float] | None = None,
     newest_update_age_min: float = 0.0,
     oldest_update_age_min: float = 0.0,
     books_used_count: int = 0,
@@ -562,13 +651,46 @@ def _build_rec(
     market_unstable: bool = False,
     book_holds: dict[str, float] | None = None,
 ) -> BetRecommendation:
-    """Build a fully-populated BetRecommendation from core inputs."""
+    """Build a fully-populated BetRecommendation from core inputs.
+
+    Uses EV-based edge metrics:
+    - ``edge_ev = p_cons_weighted * decimal_odds - 1``
+    - ``edge_ev_shrunk`` via disagreement-aware shrinkage
+    - ``edge_z`` in EV space: ``edge_ev_shrunk / max(ev_sigma, 0.002)``
+    - ``edge_pct = 100 * edge_ev`` (EV% per $100)
+    """
+    dec_odds = american_to_decimal(best_odds)
     be_prob = breakeven_prob_from_american(best_odds)
     ev = ev_per_dollar(consensus_prob, best_odds)
-    edge = consensus_prob - be_prob
-    edge_pct_val = round(edge * 100, 2)
 
-    # Quality subscores
+    # ── Robust weighted consensus ─────────────────────────────────
+    _holds = side_holds or [0.0] * len(side_probs)
+    p_cons_w = weighted_robust_consensus(side_probs, _holds)
+
+    # ── EV-based edge ─────────────────────────────────────────────
+    _edge_ev = compute_ev_edge(p_cons_w, dec_odds)
+    _edge_ev_100 = round(100.0 * _edge_ev, 2)
+    edge_pct_val = _edge_ev_100  # unified: edge_pct == EV per $100
+
+    # ── Outlier rate + effective sample size ───────────────────────
+    outliers_removed = max(0, total_books_count - books_used_count)
+    _outlier_rate = outliers_removed / max(total_books_count, 1)
+    _n_eff = books_used_count * (1.0 - _outlier_rate)
+    _edge_ev_shrunk = compute_shrinkage(_edge_ev, _n_eff)
+
+    # ── Volatility / sigma ────────────────────────────────────────
+    if len(side_probs) >= 2:
+        vol_sigma = round(stdev(side_probs), 4)
+        q1, _, q3 = quantiles(side_probs, n=4)
+        r_sigma = round((q3 - q1) / 1.349, 4)
+    else:
+        vol_sigma = 0.0
+        r_sigma = 0.0
+
+    _ev_sigma = r_sigma * dec_odds
+    ez = round(compute_edge_z(_edge_ev_shrunk, _ev_sigma), 2)
+
+    # Quality subscores (edge_score uses edge_pct = EV/$100)
     e_score = round(_edge_score(edge_pct_val), 1)
     a_score = round(
         _agreement_score(side_probs, books_used_count, oldest_update_age_min), 1
@@ -589,18 +711,7 @@ def _build_rec(
     hold_values = list(holds.values())
     mkt_hold_med = round(median(hold_values), 2) if hold_values else 0.0
 
-    # Volatility of devigged probabilities (filtered set)
-    if len(side_probs) >= 2:
-        vol_sigma = round(stdev(side_probs), 4)
-        q1, _, q3 = quantiles(side_probs, n=4)
-        r_sigma = round((q3 - q1) / 1.349, 4)
-    else:
-        vol_sigma = 0.0
-        r_sigma = 0.0
-
-    ez = round(edge / max(r_sigma, 0.01), 2)
-
-    # Confidence derived from edge_z thresholds
+    # Confidence derived from edge_z thresholds (EV-space)
     if ez >= 2.5:
         confidence = "High"
     elif ez >= 1.5:
@@ -620,9 +731,8 @@ def _build_rec(
         q_score = min(q_score, 55)
 
     # Kelly sizing
-    dec_odds = american_to_decimal(best_odds)
-    k_base = kelly_fraction(consensus_prob, dec_odds)
-    k_sugg = kelly_suggested(consensus_prob, dec_odds, confidence)
+    k_base = kelly_fraction(p_cons_w, dec_odds)
+    k_sugg = kelly_suggested(p_cons_w, dec_odds, confidence)
     s_note = _sizing_note(k_sugg)
 
     return BetRecommendation(
@@ -636,9 +746,10 @@ def _build_rec(
         breakeven_prob=round(be_prob, 4),
         ev=round(ev, 4),
         edge_pct=edge_pct_val,
-        ev_per_100=round(ev * 100, 2),
+        ev_per_100=_edge_ev_100,
         confidence=confidence,
         unweighted_consensus_prob=round(unweighted_consensus_prob, 4),
+        consensus_prob_weighted=round(p_cons_w, 4),
         newest_update_age_min=round(newest_update_age_min, 1),
         oldest_update_age_min=round(oldest_update_age_min, 1),
         books_used_count=books_used_count,
@@ -656,6 +767,12 @@ def _build_rec(
         market_volatility_sigma=vol_sigma,
         robust_sigma=r_sigma,
         edge_z=ez,
+        edge_ev=round(_edge_ev, 6),
+        edge_ev_shrunk=round(_edge_ev_shrunk, 6),
+        edge_ev_100=_edge_ev_100,
+        n_eff=round(_n_eff, 2),
+        outlier_rate=round(_outlier_rate, 4),
+        ev_sigma=round(_ev_sigma, 6),
         kelly_base=round(k_base, 6),
         kelly_suggested=round(k_sugg, 6),
         sizing_note=s_note,
@@ -757,10 +874,16 @@ def _moneyline_recommendations(
 
     # Implied hold% per sportsbook (all books, pre-filter)
     book_holds: dict[str, float] = {}
+    all_holds: list[float] = []
     for ln in lines:
         pa_raw = implied_prob_from_american(ln.home_value)
         pb_raw = implied_prob_from_american(ln.away_value)
-        book_holds[ln.sportsbook] = round((pa_raw + pb_raw - 1) * 100, 2)
+        h = round((pa_raw + pb_raw - 1) * 100, 2)
+        book_holds[ln.sportsbook] = h
+        all_holds.append(h)
+
+    # Per-book holds aligned with filtered probs (for weighted consensus)
+    f_holds = [all_holds[i] for i in keep_idx]
 
     results: list[BetRecommendation] = []
 
@@ -778,6 +901,7 @@ def _moneyline_recommendations(
             best_sportsbook=best_home_line.sportsbook,
             best_odds=best_home_line.home_value,
             side_probs=f_home,
+            side_holds=f_holds,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=n_used,
@@ -799,6 +923,7 @@ def _moneyline_recommendations(
             best_sportsbook=best_away_line.sportsbook,
             best_odds=best_away_line.away_value,
             side_probs=f_away,
+            side_holds=f_holds,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=n_used,
@@ -883,10 +1008,15 @@ def _spread_recommendations(
 
     # Implied hold% per sportsbook (matching lines, pre-filter)
     book_holds: dict[str, float] = {}
+    all_holds: list[float] = []
     for ln in matching:
         pa_raw = implied_prob_from_american(ln.home_price)
         pb_raw = implied_prob_from_american(ln.away_price)
-        book_holds[ln.sportsbook] = round((pa_raw + pb_raw - 1) * 100, 2)
+        h = round((pa_raw + pb_raw - 1) * 100, 2)
+        book_holds[ln.sportsbook] = h
+        all_holds.append(h)
+
+    f_holds = [all_holds[i] for i in keep_idx]
 
     results: list[BetRecommendation] = []
 
@@ -901,6 +1031,7 @@ def _spread_recommendations(
             best_sportsbook=best_home.sportsbook,
             best_odds=best_home.home_price,
             side_probs=f_home,
+            side_holds=f_holds,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,
@@ -923,6 +1054,7 @@ def _spread_recommendations(
             best_sportsbook=best_away.sportsbook,
             best_odds=best_away.away_price,
             side_probs=f_away,
+            side_holds=f_holds,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,
@@ -1003,10 +1135,15 @@ def _total_recommendations(
 
     # Implied hold% per sportsbook (matching lines, pre-filter)
     book_holds: dict[str, float] = {}
+    all_holds: list[float] = []
     for ln in matching:
         pa_raw = implied_prob_from_american(ln.home_price)
         pb_raw = implied_prob_from_american(ln.away_price)
-        book_holds[ln.sportsbook] = round((pa_raw + pb_raw - 1) * 100, 2)
+        h = round((pa_raw + pb_raw - 1) * 100, 2)
+        book_holds[ln.sportsbook] = h
+        all_holds.append(h)
+
+    f_holds = [all_holds[i] for i in keep_idx]
 
     results: list[BetRecommendation] = []
 
@@ -1021,6 +1158,7 @@ def _total_recommendations(
             best_sportsbook=best_over.sportsbook,
             best_odds=best_over.home_price,
             side_probs=f_over,
+            side_holds=f_holds,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,
@@ -1042,6 +1180,7 @@ def _total_recommendations(
             best_sportsbook=best_under.sportsbook,
             best_odds=best_under.away_price,
             side_probs=f_under,
+            side_holds=f_holds,
             newest_update_age_min=newest_age,
             oldest_update_age_min=oldest_age,
             books_used_count=books_used,

@@ -11,14 +11,16 @@ from line_tracker.best_bets import recommend_best_bets
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
 from line_tracker.models import BettingLine, BetType
 
-# ── tier thresholds ────────────────────────────────────────────────
-_TIER1_BASE_EDGE = 2.5   # Tier 1A base edge floor (relaxed from 3.0)
-_TIER1_SIGMA_MULT = 1.0  # Tier 1A sigma multiplier (relaxed from 1.2)
-_TIER2_EDGE = 1.0         # Tier 2 static edge floor (relaxed from 1.5)
-_TIER2_EDGE_Z_MIN = 1.0
+# ── tier thresholds (EV/$100 space) ───────────────────────────────
+# edge_pct is now EV per $100 (= 100 * edge_ev).  All edge thresholds
+# below are in that same unit (dollars of EV per $100 wagered).
+_TIER1_BASE_EDGE = 2.0   # Tier 1A base edge floor (EV/$100)
+_TIER1_SIGMA_MULT = 100.0  # sigma is in prob-space; ×100 → EV/$100
+_TIER2_EDGE = 0.0         # Tier 2: any positive EV
+_TIER2_EDGE_Z_MIN = 0.0
 _MIN_BOOKS = 4
 _STALE_THRESHOLD_MIN = 120.0
-_EDGE_OUTLIER_THRESHOLD = 4.0
+_EDGE_OUTLIER_THRESHOLD = 8.0  # EV/$100 outlier (was 4.0 in prob-space)
 _STAY_AWAY_LIMIT = 15
 _STAY_AWAY_HOLD_MAX = 8.0  # hold >= 8% is hard Stay Away
 
@@ -27,20 +29,20 @@ _TIER1A_BOOKS_MIN = 6
 _TIER1A_HOLD_MAX = 6.0
 
 # ── Tier 1B (Standard / Aggressive) thresholds ──────────────────────
-_TIER1B_FLOOR_MIN = 1.75   # minimum 1B edge floor (relaxed from 2.0)
-_TIER1B_BASE_EDGE = 0.75   # (relaxed from 1.0)
-_TIER1B_SIGMA_MULT = 0.9   # (relaxed from 1.0)
+_TIER1B_FLOOR_MIN = 1.0    # minimum 1B edge floor (EV/$100)
+_TIER1B_BASE_EDGE = 0.5    # 1B base edge (EV/$100)
+_TIER1B_SIGMA_MULT = 100.0 # sigma-in-prob → EV/$100 scale
 _TIER1B_BOOKS_MIN = 5
 _TIER1B_HOLD_MAX = 7.5
 
 # ── market-quality avoid thresholds ───────────────────────────────────
 _AVOID_HOLD_MAX = 7.0  # median book hold% above which market is suspect
 _AVOID_NOISE_SIGMA_MIN = 0.05  # volatility sigma for "noisy" flag
-_AVOID_NOISE_EDGE_MAX = 2.0  # edge% below which noise matters
+_AVOID_NOISE_EDGE_MAX = 2.0  # EV/$100 below which noise matters
 _AVOID_DIVERGENCE_MIN = 0.04  # sharp-retail divergence threshold
 
 # ── relaxed Tier 2 display thresholds (used when strict mode OFF) ─────
-_RELAXED_TIER2_EDGE = 0.5
+_RELAXED_TIER2_EDGE = 0.3  # EV/$100
 _RELAXED_TIER2_EDGE_Z_MIN = 0.75
 
 
@@ -51,29 +53,32 @@ _RELAXED_TIER2_EDGE_Z_MIN = 0.75
 class TierThresholds:
     """Configurable thresholds for the tier classification cascade.
 
+    All edge thresholds are in **EV/$100** space (= 100 * edge_ev).
+    ``edge_pct`` in entry dicts now equals ``edge_ev_100``.
+
     Use ``STANDARD_THRESHOLDS`` for default behaviour (broader volume)
     or ``PRO_THRESHOLDS`` for stricter curation.
     """
 
     mode: str = "Standard"
 
-    # Tier 1A (Institutional)
+    # Tier 1A (Institutional)  — all edge values in EV/$100
     tier1a_books_min: int = 6
     tier1a_hold_max: float = 6.0
-    tier1a_base_edge: float = 2.5
-    tier1a_sigma_mult: float = 1.0
+    tier1a_base_edge: float = 2.0     # $2 EV per $100
+    tier1a_sigma_mult: float = 100.0  # prob-sigma × 100 → EV/$100
 
     # Tier 1B (Standard / Aggressive)
     tier1b_books_min: int = 5
     tier1b_hold_max: float = 7.5
-    tier1b_base_edge: float = 0.75
-    tier1b_sigma_mult: float = 0.9
-    tier1b_floor_min: float = 1.75
+    tier1b_base_edge: float = 0.5     # $0.50 EV per $100
+    tier1b_sigma_mult: float = 100.0
+    tier1b_floor_min: float = 1.0     # $1 EV per $100 minimum
     # Low-confidence override for Tier 1B
     tier1b_low_conf_edge_z_min: float = 2.0
-    tier1b_low_conf_edge_pct_min: float = 2.5
+    tier1b_low_conf_edge_pct_min: float = 2.0  # $2 EV per $100
     # Thin-quality override for Tier 1B
-    tier1b_thin_edge_pct_min: float = 3.0
+    tier1b_thin_edge_pct_min: float = 3.0      # $3 EV per $100
     tier1b_thin_hold_max: float = 6.5
     tier1b_thin_books_min: int = 6
 
@@ -81,28 +86,30 @@ class TierThresholds:
     tier2_edge_min: float = 0.0  # >0 effectively (avoid gate ensures edge>0)
     tier2_edge_z_min: float = 0.0  # 0 = disabled
     tier2_low_conf_edge_z_min: float = 1.5
-    tier2_low_conf_edge_pct_min: float = 1.0
+    tier2_low_conf_edge_pct_min: float = 0.5  # $0.50 EV per $100
 
     # Hard gates (Stay Away)
     min_books: int = 4
     stay_away_hold_max: float = 8.0
     stale_threshold_min: float = 120.0
-    edge_outlier_threshold: float = 4.0
+    edge_outlier_threshold: float = 8.0  # EV/$100 outlier threshold
 
 
 STANDARD_THRESHOLDS = TierThresholds()
 
 PRO_THRESHOLDS = TierThresholds(
     mode="Pro",
+    # Tier 1A: stricter
+    tier1a_base_edge=3.0,
     # Tier 1B: stricter floor, no confidence/quality overrides
     tier1b_base_edge=1.0,
-    tier1b_sigma_mult=1.0,
-    tier1b_floor_min=2.0,
+    tier1b_sigma_mult=100.0,
+    tier1b_floor_min=1.5,
     tier1b_low_conf_edge_z_min=float("inf"),
     tier1b_low_conf_edge_pct_min=float("inf"),
     tier1b_thin_edge_pct_min=float("inf"),
     # Tier 2: stricter edge floor and edge_z gate, no overrides
-    tier2_edge_min=1.0,
+    tier2_edge_min=0.5,
     tier2_edge_z_min=1.0,
     tier2_low_conf_edge_z_min=float("inf"),
     tier2_low_conf_edge_pct_min=float("inf"),
@@ -120,13 +127,21 @@ def get_thresholds(mode: str = "Standard") -> TierThresholds:
 
 
 def dyn_floor_1a(sigma: float) -> float:
-    """Dynamic edge floor for Tier 1A: base + mult * sigma."""
-    return _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
+    """Dynamic edge floor for Tier 1A in EV/$100.
+
+    ``sigma`` is robust_sigma in probability space.
+    Floor = max(base, 100 * sigma) — ensures Tier 1A edge clears
+    at least one sigma in EV-space.
+    """
+    return max(_TIER1_BASE_EDGE, _TIER1_SIGMA_MULT * sigma)
 
 
 def dyn_floor_1b(sigma: float) -> float:
-    """Dynamic edge floor for Tier 1B: max(floor_min, base + mult * sigma)."""
-    return max(_TIER1B_FLOOR_MIN, _TIER1B_BASE_EDGE + _TIER1B_SIGMA_MULT * sigma)
+    """Dynamic edge floor for Tier 1B in EV/$100.
+
+    Floor = max(floor_min, 100 * sigma).
+    """
+    return max(_TIER1B_FLOOR_MIN, _TIER1B_SIGMA_MULT * sigma)
 
 
 def compute_distance_to_1b(
@@ -152,7 +167,7 @@ def compute_distance_to_1b(
 
     floor = max(
         th.tier1b_floor_min,
-        th.tier1b_base_edge + th.tier1b_sigma_mult * sigma,
+        th.tier1b_sigma_mult * sigma,
     )
 
     distance = 0.0
@@ -293,7 +308,7 @@ def classify_rec(
     oldest_age = entry.get("oldest_update_age_min", 0.0)
     hold_median = entry.get("market_hold_median", 0.0)
 
-    floor_1a = th.tier1a_base_edge + th.tier1a_sigma_mult * sigma
+    floor_1a = max(th.tier1a_base_edge, th.tier1a_sigma_mult * sigma)
 
     # ── Hard disqualifiers (block ALL tiers → Stay Away) ──────────
     hard_reasons: list[str] = []
@@ -363,7 +378,7 @@ def classify_rec(
 
     floor_1b = max(
         th.tier1b_floor_min,
-        th.tier1b_base_edge + th.tier1b_sigma_mult * sigma,
+        th.tier1b_sigma_mult * sigma,
     )
     if (
         t1b_conf
@@ -701,10 +716,18 @@ def build_daily_slate(
                 "best_odds": rec.best_odds,
                 "best_sportsbook": rec.best_sportsbook,
                 "edge_pct": rec.edge_pct,
+                "edge_ev": rec.edge_ev,
+                "edge_ev_shrunk": rec.edge_ev_shrunk,
+                "edge_ev_100": rec.edge_ev_100,
+                "n_eff": rec.n_eff,
+                "outlier_rate": rec.outlier_rate,
+                "ev_sigma": rec.ev_sigma,
+                "consensus_prob_weighted": rec.consensus_prob_weighted,
                 "confidence": rec.confidence,
                 "quality_score": rec.quality_score,
                 "quality_tier": rec.quality_tier,
                 "market_volatility_sigma": rec.market_volatility_sigma,
+                "robust_sigma": rec.robust_sigma,
                 "edge_z": rec.edge_z,
                 "market_unstable": rec.market_unstable,
                 "slate_score": score,
@@ -925,8 +948,8 @@ def suggest_thresholds(
         th,
         tier1a_books_min=max(5, th.tier1a_books_min - 1),
         tier1a_hold_max=min(7.0, th.tier1a_hold_max + 0.5),
-        tier1a_base_edge=max(2.0, th.tier1a_base_edge - 0.25),
-        tier1a_sigma_mult=max(0.7, th.tier1a_sigma_mult - 0.1),
+        tier1a_base_edge=max(1.5, th.tier1a_base_edge - 0.25),
+        tier1a_sigma_mult=max(50.0, th.tier1a_sigma_mult - 10.0),
     )
 
 

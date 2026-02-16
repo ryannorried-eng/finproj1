@@ -817,14 +817,13 @@ def _detail_best_bet_section(game_lines):
                 f"at {format_american(top.best_odds)} "
                 f"on {top.best_sportsbook}**"
             )
+            _top_ev = fmt_money(top.ev_per_100, sign=True).replace("$", r"\$")
             st.markdown(
-                f"Consensus (weighted, vig-free): "
-                f"**{top.consensus_prob * 100:.1f}%** | "
-                f"Breakeven: **{top.breakeven_prob * 100:.1f}%** | "
-                f"Edge: **{fmt_pct(top.edge_pct, sign=True)}** | "
-                "EV: **"
-                + fmt_money(top.ev_per_100, sign=True).replace("$", r"\$")
-                + r" per \$100**"
+                f"EV: **{_top_ev} per \\$100** | "
+                f"Edge Z: **{top.edge_z:+.2f}** | "
+                f"Consensus (weighted): "
+                f"**{top.consensus_prob_weighted * 100:.1f}%** | "
+                f"Breakeven: **{top.breakeven_prob * 100:.1f}%**"
             )
             st.markdown(
                 f"Market confidence: **{top.confidence}** | "
@@ -852,8 +851,8 @@ def _detail_best_bet_section(game_lines):
                     f"- {r.selection} ({ml}) at "
                     f"{format_american(r.best_odds)} "
                     f"on {r.best_sportsbook} — "
-                    f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
-                    f"EV: {ev_str} per \\$100 — "
+                    f"EV: {ev_str} per \\$100, "
+                    f"Z: {r.edge_z:+.2f} — "
                     f"Quality: {r.quality_score} ({r.quality_tier})"
                 )
     else:
@@ -868,8 +867,8 @@ def _detail_best_bet_section(game_lines):
                 f"- {r.selection} ({ml}) at "
                 f"{format_american(r.best_odds)} "
                 f"on {r.best_sportsbook} — "
-                f"Edge {fmt_pct(r.edge_pct, sign=True)}, "
-                f"EV: {ev_str} per \\$100 — "
+                f"EV: {ev_str} per \\$100, "
+                f"Z: {r.edge_z:+.2f} — "
                 f"Quality: {r.quality_score} ({r.quality_tier})"
             )
 
@@ -890,8 +889,8 @@ def _render_best_bet_why(rec) -> None:
         ev_str = fmt_money(rec.ev_per_100, sign=True).replace("$", "\\$")
         st.markdown(
             f"{books_line}"
-            f"- **Weighted consensus (vig-free):** "
-            f"{rec.consensus_prob * 100:.1f}%\n"
+            f"- **Consensus (weighted, vig-free):** "
+            f"{rec.consensus_prob_weighted * 100:.1f}%\n"
             f"- **Unweighted consensus (vig-free):** "
             f"{rec.unweighted_consensus_prob * 100:.1f}%\n"
             f"- **Newest book update:** {rec.newest_update_age_min:.0f}m ago\n"
@@ -900,11 +899,11 @@ def _render_best_bet_why(rec) -> None:
             f"at {rec.best_sportsbook}\n"
             f"- **Breakeven prob (at that price):** "
             f"{rec.breakeven_prob * 100:.1f}%\n"
-            f"- **Edge:** ({rec.consensus_prob * 100:.1f}% \u2212 "
-            f"{rec.breakeven_prob * 100:.1f}%) = "
-            f"{fmt_pct(rec.edge_pct, sign=True)}\n"
-            f"- **EV:** {ev_str} per \\$100 "
-            f"({rec.ev * 100:+.1f}% per \\$1)\n"
+            f"- **EV:** {ev_str} per \\$100\n"
+            f"- **Edge Z:** {rec.edge_z:+.2f} "
+            f"(confidence: {rec.confidence})\n"
+            f"- **n_eff:** {rec.n_eff:.1f} "
+            f"(books: {rec.books_used_count})\n"
             f"- **Quality:** {rec.quality_score}/100 ({rec.quality_tier})"
         )
         st.caption(
@@ -917,10 +916,10 @@ def _render_best_bet_why(rec) -> None:
         # Market volatility & hold metrics
         st.markdown(
             f"- **Market hold median:** {rec.market_hold_median:.2f}%\n"
-            f"- **Volatility (sigma):** {rec.market_volatility_sigma:.4f} | "
-            f"**Robust sigma (IQR/1.349):** {rec.robust_sigma:.4f}\n"
-            f"- **Edge Z-score:** {rec.edge_z:+.2f} "
-            f"(confidence: {rec.confidence})"
+            f"- **Sigma (prob):** {rec.robust_sigma:.4f} | "
+            f"**Sigma (EV):** {rec.ev_sigma:.4f}\n"
+            f"- **Edge EV:** {rec.edge_ev:+.6f} | "
+            f"**Shrunk:** {rec.edge_ev_shrunk:+.6f}"
         )
 
         if rec.book_holds:
@@ -2004,10 +2003,10 @@ def _page_daily_slate():
                 value=True,
                 key="slate_strict_mode",
                 help=(
-                    "ON: Tier 2 uses strict thresholds (edge >= 1.0%, "
-                    "edge_z >= 1.0). OFF: relaxed (edge >= 0.5%, "
-                    "edge_z >= 0.75, Low confidence allowed if quality "
-                    "tier >= Strong). Tier 1 is always strict."
+                    "ON: Tier 2 uses strict thresholds (positive EV). "
+                    "OFF: relaxed (EV >= $0.30, edge_z >= 0.75, "
+                    "Low confidence allowed if quality tier >= Strong). "
+                    "Tier 1 is always strict."
                 ),
             )
             show_stay_away = st.checkbox(
@@ -2030,7 +2029,7 @@ def _page_daily_slate():
                 key="slate_max_per_section",
             )
             _sort_options = [
-                "Best edge",
+                "Best EV",
                 "Best edge_z",
                 "Best quality",
                 "Lowest hold",
@@ -2088,7 +2087,7 @@ def _page_daily_slate():
 
     # ── Tier 2 sorting (stable, deterministic) ────────────────────────
     _tier2_sort_keys = {
-        "Best edge": lambda e: (-e["edge_pct"], -e["slate_score"], e["event"]),
+        "Best EV": lambda e: (-e["edge_pct"], -e["slate_score"], e["event"]),
         "Best edge_z": lambda e: (-e.get("edge_z", 0.0), -e["slate_score"], e["event"]),
         "Best quality": lambda e: (-e["quality_score"], -e["slate_score"], e["event"]),
         "Lowest hold": lambda e: (
@@ -2097,7 +2096,7 @@ def _page_daily_slate():
             e["event"],
         ),
     }
-    more_plays.sort(key=_tier2_sort_keys.get(tier2_sort, _tier2_sort_keys["Best edge"]))
+    more_plays.sort(key=_tier2_sort_keys.get(tier2_sort, _tier2_sort_keys["Best EV"]))
 
     # ── Apply max-per-section cap ─────────────────────────────────────
     top_display = top_plays[:max_per_section]
@@ -2185,6 +2184,32 @@ def _page_daily_slate():
             for w in ds.get("warnings", []):
                 st.warning(w)
 
+        # EV distribution stats (from volume_tuning)
+        vt = slate.get("volume_tuning")
+        if vt and vt.get("total", 0) > 0:
+            with st.expander("Debug: EV Distribution", expanded=False):
+                def _fmt_pctiles(d):
+                    if d.get("p50") is None:
+                        return "\u2014"
+                    return (
+                        f"p10={d['p10']:.2f}  "
+                        f"p50={d['p50']:.2f}  "
+                        f"p90={d['p90']:.2f}"
+                    )
+                _p = _fmt_pctiles
+                st.markdown(f"**Total recs:** {vt['total']}")
+                st.markdown(
+                    f"**EV/$100:** {_p(vt.get('edge_pct', {}))}"
+                )
+                st.markdown(f"**edge_z:** {_p(vt.get('edge_z', {}))}")
+                st.markdown(f"**sigma:** {_p(vt.get('sigma', {}))}")
+                st.markdown(
+                    f"**hold:** {_p(vt.get('hold_median', {}))}"
+                )
+                st.markdown(
+                    f"**books:** {_p(vt.get('books_used', {}))}"
+                )
+
     st.divider()
 
     # ── Top Plays (Tier 1A, or 1A+1B in Standard mode) ───────────────
@@ -2258,19 +2283,22 @@ def _render_stay_away_entry(entry: dict) -> None:
 def _render_why_tooltip(entry: dict) -> None:
     """Render a 'Why?' expander with transparency details for a slate entry."""
     with st.expander("Why?", expanded=False):
-        sigma = entry.get("market_volatility_sigma", 0.0)
         dyn_floor = entry.get("dynamic_edge_floor")
+        r_sigma = entry.get("robust_sigma", 0.0)
+        ev_sigma = entry.get("ev_sigma", 0.0)
         lines = [
             f"- **Confidence:** {entry.get('confidence', 'N/A')}",
             f"- **Quality tier:** {entry.get('quality_tier', 'N/A')}",
             f"- **Quality score:** {entry.get('quality_score', 'N/A')}",
-            f"- **Edge:** {entry.get('edge_pct', 0.0):+.2f}%",
-            f"- **Edge Z-score:** {entry.get('edge_z', 0.0):.2f}",
-            f"- **Volatility \u03c3:** {sigma:.4f}",
+            f"- **EV/$100:** ${entry.get('edge_pct', 0.0):+.2f}",
+            f"- **Edge Z:** {entry.get('edge_z', 0.0):+.2f}",
+            f"- **n_eff:** {entry.get('n_eff', 0.0):.1f}",
+            f"- **Sigma (prob):** {r_sigma:.4f} | "
+            f"**Sigma (EV):** {ev_sigma:.4f}",
         ]
         if dyn_floor is not None:
             lines.append(
-                f"- **Dynamic Tier 1 floor:** {dyn_floor:.2f}%"
+                f"- **Dynamic Tier 1 floor:** ${dyn_floor:.2f}"
             )
         hold = entry.get("market_hold_median")
         if hold is not None:
@@ -2357,8 +2385,9 @@ def _render_slate_card(entry: dict) -> None:
             )
             st.caption(f"Start: {time_str}")
         with cols[1]:
-            st.metric("Edge", fmt_pct(entry["edge_pct"], sign=True))
-            st.caption(f"Quality: {entry['quality_score']}/100")
+            st.metric("EV/$100", f"${entry['edge_pct']:+.2f}")
+            ez = entry.get('edge_z', 0.0)
+            st.caption(f"Z: {ez:+.2f} | Q: {entry['quality_score']}")
         with cols[2]:
             st.metric("Slate Score", f"{entry['slate_score']:.0f}")
             st.caption(f"Confidence: {entry['confidence']}")
@@ -2423,9 +2452,9 @@ def _render_slate_table(entries: list[dict]) -> None:
             "Pick": f"{entry['selection']} ({market_label})",
             "Odds": format_american(entry["best_odds"]),
             "Book": entry["best_sportsbook"],
-            "Edge": fmt_pct(entry["edge_pct"], sign=True),
+            "EV/$100": f"${entry['edge_pct']:+.2f}",
+            "Edge Z": f"{entry.get('edge_z', 0.0):+.2f}",
             "Quality": entry["quality_score"],
-            "Score": f"{entry['slate_score']:.0f}",
             "Confidence": entry["confidence"],
             "Sizing": sizing_str,
         })

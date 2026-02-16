@@ -428,8 +428,16 @@ class TestRecommendBestBets:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            expected_edge = (r.consensus_prob - r.breakeven_prob) * 100
+            # edge_pct is now EV/$100 = 100 * edge_ev
+            expected_edge = 100 * r.edge_ev
             assert abs(r.edge_pct - expected_edge) < 0.01
+            # edge_pct and ev_per_100 should be identical
+            assert abs(r.edge_pct - r.ev_per_100) < 0.01
+            # Sign: positive when consensus > breakeven
+            if r.consensus_prob > r.breakeven_prob:
+                assert r.edge_pct > 0
+            elif r.consensus_prob < r.breakeven_prob:
+                assert r.edge_pct < 0
 
     def test_ev_per_100_matches_ev(self):
         lines = [
@@ -438,7 +446,9 @@ class TestRecommendBestBets:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            assert abs(r.ev_per_100 - r.ev * 100) < 0.01
+            # ev_per_100 is now 100 * edge_ev (same as edge_pct)
+            assert abs(r.ev_per_100 - 100 * r.edge_ev) < 0.01
+            assert abs(r.ev_per_100 - r.edge_pct) < 0.01
 
     def test_breakeven_prob_populated(self):
         lines = [
@@ -2099,7 +2109,7 @@ class TestBookHoldsAndVolatility:
 
 class TestEdgeZ:
     def test_edge_z_formula(self):
-        """edge_z should equal edge / max(robust_sigma, 0.01)."""
+        """edge_z should equal edge_ev_shrunk / max(ev_sigma, 0.002)."""
         lines = [
             _ml_line("A", -150, 130),
             _ml_line("B", -140, 120),
@@ -2107,8 +2117,7 @@ class TestEdgeZ:
         ]
         recs = recommend_best_bets(lines, top_n=10)
         for r in recs:
-            edge = r.consensus_prob - r.breakeven_prob
-            expected_z = round(edge / max(r.robust_sigma, 0.01), 2)
+            expected_z = round(r.edge_ev_shrunk / max(r.ev_sigma, 0.002), 2)
             assert abs(r.edge_z - expected_z) < 0.01
 
     def test_edge_z_high_confidence(self):

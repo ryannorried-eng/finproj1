@@ -105,7 +105,7 @@ class TestTier1AGating:
 
     def test_tier1a_edge_below_floor(self):
         """Edge below dyn_floor_1a fails Tier 1A."""
-        result = classify_rec(_entry(edge_pct=2.0))
+        result = classify_rec(_entry(edge_pct=1.9))
         assert result["tier"] != "tier1a"
 
 
@@ -130,8 +130,8 @@ class TestTier1BGating:
         assert result["tier"] == "tier1b"
 
     def test_tier1b_rejects_low_confidence(self):
-        """Low confidence fails Tier 1B."""
-        result = classify_rec(_entry(confidence="Low"))
+        """Low conf fails 1B (edge/edge_z below override)."""
+        result = classify_rec(_entry(confidence="Low", edge_pct=1.9, edge_z=1.9))
         assert result["tier"] not in ("tier1a", "tier1b")
 
     def test_tier1b_thin_quality_override(self):
@@ -192,9 +192,9 @@ class TestTier1ADynamicFloor:
         assert result["dynamic_edge_floor"] == dyn_floor_1a(1.0)
 
     def test_edge_above_raised_floor(self):
-        """sigma=1.0 → floor_1a = 3.5; edge=3.6 >= 3.5 → tier1a."""
+        """sigma=0.02 → floor=max(2.0,2.0)=2.0; 2.1>=2.0 → 1a."""
         result = classify_rec(_entry(
-            edge_pct=3.6, market_volatility_sigma=1.0,
+            edge_pct=2.1, market_volatility_sigma=0.02,
         ))
         assert result["tier"] == "tier1a"
 
@@ -413,9 +413,9 @@ class TestTierThresholds:
         """STANDARD_THRESHOLDS has expected default values."""
         th = STANDARD_THRESHOLDS
         assert th.mode == "Standard"
-        assert th.tier1b_base_edge == 0.75
-        assert th.tier1b_sigma_mult == 0.9
-        assert th.tier1b_floor_min == 1.75
+        assert th.tier1b_base_edge == 0.5
+        assert th.tier1b_sigma_mult == 100.0
+        assert th.tier1b_floor_min == 1.0
         assert th.tier2_edge_min == 0.0
         assert th.tier2_edge_z_min == 0.0
 
@@ -424,8 +424,8 @@ class TestTierThresholds:
         th = PRO_THRESHOLDS
         assert th.mode == "Pro"
         assert th.tier1b_base_edge == 1.0
-        assert th.tier1b_floor_min == 2.0
-        assert th.tier2_edge_min == 1.0
+        assert th.tier1b_floor_min == 1.5
+        assert th.tier2_edge_min == 0.5
         assert th.tier2_edge_z_min == 1.0
 
     def test_get_thresholds_standard(self):
@@ -483,10 +483,10 @@ class TestTier1BLowConfOverride:
         assert result["tier"] == "tier2"
 
     def test_low_conf_insufficient_edge_pct(self):
-        """Low conf + edge_pct < 2.5 → fails 1B override → falls to tier2
-        (T2 low-conf override: edge_z=3.0 >= 1.5 and edge=2.4 >= 1.0)."""
+        """Low conf + edge_pct < 2.0 → fails 1B override → falls to tier2
+        (T2 low-conf override: edge_z=3.0 >= 1.5 and edge=1.9 >= 0.5)."""
         result = classify_rec(_entry(
-            confidence="Low", edge_pct=2.4, edge_z=3.0,
+            confidence="Low", edge_pct=1.9, edge_z=3.0,
             quality_tier="Strong", books_used=5,
         ))
         assert result["tier"] != "tier1b"
@@ -571,9 +571,9 @@ class TestTier2LowConfOverride:
         assert result["tier"] == "tier3"
 
     def test_low_conf_insufficient_edge_for_tier2(self):
-        """Low conf + edge < 1.0 → no override → tier3."""
+        """Low conf + edge < 0.5 → no override → tier3."""
         result = classify_rec(_entry(
-            confidence="Low", edge_pct=0.9, edge_z=2.0,
+            confidence="Low", edge_pct=0.4, edge_z=2.0,
             quality_tier="Strong", books_used=5,
         ))
         assert result["tier"] == "tier3"
@@ -624,8 +624,8 @@ class TestStayAwayExplicitOnly:
         assert result["tier"] == "avoid"
 
     def test_stay_away_edge_outlier_low_conf(self):
-        """edge >= 4.0 + Low conf → stay away."""
-        result = classify_rec(_entry(edge_pct=4.0, confidence="Low"))
+        """edge >= 8.0 + Low conf → stay away."""
+        result = classify_rec(_entry(edge_pct=8.0, confidence="Low"))
         assert result["tier"] == "avoid"
 
     def test_positive_edge_never_stay_away(self):
@@ -656,24 +656,24 @@ class TestSuggestThresholds:
         result = suggest_thresholds(stats)
         assert result.tier1a_books_min == 5  # 6 - 1
         assert result.tier1a_hold_max == 6.5  # 6.0 + 0.5
-        assert result.tier1a_base_edge == 2.25  # 2.5 - 0.25
-        assert result.tier1a_sigma_mult == 0.9  # 1.0 - 0.1
+        assert result.tier1a_base_edge == 1.75  # 2.0 - 0.25
+        assert result.tier1a_sigma_mult == 90.0  # 100.0 - 10.0
 
     def test_floors_respected(self):
         """Relaxation floors prevent excessive loosening."""
-        # Start with already-relaxed thresholds
+        # Start with already-relaxed thresholds at their floors
         base = TierThresholds(
             tier1a_books_min=5,
             tier1a_hold_max=7.0,
-            tier1a_base_edge=2.0,
-            tier1a_sigma_mult=0.7,
+            tier1a_base_edge=1.5,
+            tier1a_sigma_mult=50.0,
         )
         stats = {"counts_by_tier": {"tier1b": 1}}
         result = suggest_thresholds(stats, base=base)
         assert result.tier1a_books_min == 5  # floor 5
         assert result.tier1a_hold_max == 7.0  # cap 7.0
-        assert result.tier1a_base_edge == 2.0  # floor 2.0
-        assert result.tier1a_sigma_mult == 0.7  # floor 0.7
+        assert result.tier1a_base_edge == 1.5  # floor 1.5
+        assert result.tier1a_sigma_mult == 50.0  # floor 50.0
 
     def test_tier1b_unchanged(self):
         """suggest_thresholds only relaxes Tier 1A, not 1B."""

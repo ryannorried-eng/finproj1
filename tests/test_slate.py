@@ -309,7 +309,8 @@ class TestClassifyRec:
 
     def test_dynamic_edge_floor_returned(self):
         result = classify_rec(_entry(market_volatility_sigma=0.5))
-        expected = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * 0.5
+        # floor_1a = max(base, mult * sigma) = max(2.0, 100*0.5) = 50.0
+        expected = max(_TIER1_BASE_EDGE, _TIER1_SIGMA_MULT * 0.5)
         assert result["dynamic_edge_floor"] == expected
 
     def test_tier1a_dynamic_floor_fail_falls_to_1b(self):
@@ -569,13 +570,14 @@ class TestBuildDailySlate:
     def test_filter_min_edge_does_not_change_classification(self, mock_rbb):
         """min_edge display-filter hides tier2 but doesn't drop classification."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=80, edge_pct=1.0, quality_tier="Strong",
+            quality_score=80, edge_pct=0.5, quality_tier="Strong",
             confidence="High",
+            books_used_count=4,  # < 5 → fails 1B books gate
         )]
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"min_edge": 2.0}
         )
-        # Entry is classified as tier2 (edge=1.0 >= _TIER2_EDGE=1.0),
+        # Entry is classified as tier2 (edge=0.5 > 0, books >= 4),
         # display-filtered from tier2 list, but counts still reflect it.
         assert result["counts"]["tier2"] == 1
         assert len(result["tier2"]) == 0  # filtered out of display
@@ -703,7 +705,7 @@ class TestBuildDailySlate:
     def test_avoid_edge_outlier_integration(self, mock_rbb):
         """High edge + low confidence triggers edge outlier reason."""
         mock_rbb.return_value = [
-            _make_rec(quality_score=80, edge_pct=5.0, confidence="Low",
+            _make_rec(quality_score=80, edge_pct=9.0, confidence="Low",
                       quality_tier="Thin")
         ]
         result = build_daily_slate({"evt1": _event_lines()})
@@ -801,13 +803,14 @@ class TestStayAwayAlwaysPopulated:
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_moderate_recs_with_edge_at_tier2_threshold(self, mock_rbb):
-        """Moderate recs with edge=1.0 reach tier2 (relaxed edge floor)."""
+        """Moderate recs with small positive edge reach tier2."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=55, edge_pct=1.0,
+            quality_score=55, edge_pct=0.5,
             quality_tier="Moderate", confidence="Medium",
+            books_used_count=4,  # < 5 → fails 1B books gate
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        # edge=1.0 >= _TIER2_EDGE=1.0 → tier2
+        # edge=0.5 > 0, books >= 4, Moderate quality → tier2
         assert len(result["tier2"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -848,43 +851,46 @@ class TestDynamicEdgeFloor:
         assert result["tier"] == "tier1b"
 
     def test_sigma_raises_1a_floor(self):
-        """sigma=0.5 → floor_1a=3.0; edge=2.9 < 3.0 → not tier1a."""
+        """sigma=0.03 → floor_1a=max(2.0, 100*0.03)=3.0; edge=2.9 → not 1A."""
         result = classify_rec(_entry(
             edge_pct=2.9, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=0.5, books_used=6,
+            market_volatility_sigma=0.03, books_used=6,
         ))
-        # Misses 1A, but 2.9 >= floor_1b(0.5)=max(2.0,1.5)=2.0 → tier1b
-        assert result["tier"] == "tier1b"
+        # Misses 1A, but 2.9 >= floor_1b(0.03)=max(1.0,3.0)=3.0 → fails 1B too
+        # 2.9 > 0 and books >= 4 → tier2
+        assert result["tier"] == "tier2"
 
     def test_edge_above_raised_1a_floor(self):
-        """sigma=0.5 → floor_1a=3.0; edge=3.0 >= 3.0 → tier1a."""
+        """sigma=0.03 → floor_1a=3.0; edge=3.0 >= 3.0 → tier1a."""
         result = classify_rec(_entry(
             edge_pct=3.0, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=0.5, books_used=6,
+            market_volatility_sigma=0.03, books_used=6,
         ))
         assert result["tier"] == "tier1a"
 
     def test_high_sigma_needs_large_edge(self):
-        """sigma=1.0 → floor_1a=3.5; edge=3.4 < 3.5 → not tier1a."""
+        """sigma=0.05 → floor_1a=5.0; edge=4.9 < 5.0 → not tier1a."""
         result = classify_rec(_entry(
-            edge_pct=3.4, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=1.0, books_used=6,
+            edge_pct=4.9, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=0.05, books_used=6,
         ))
-        # 3.4 >= floor_1b(1.0)=max(2.0,2.0)=2.0 → tier1b
-        assert result["tier"] == "tier1b"
+        # 4.9 >= floor_1b(0.05)=max(1.0,5.0)=5.0 → fails 1B too
+        # 4.9 > 0 → tier2
+        assert result["tier"] == "tier2"
 
     def test_high_sigma_edge_above(self):
-        """sigma=1.0 → floor_1a=3.5; edge=3.5 >= 3.5 → tier1a."""
+        """sigma=0.05 → floor_1a=5.0; edge=5.0 >= 5.0 → tier1a."""
         result = classify_rec(_entry(
-            edge_pct=3.5, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=1.0, books_used=6,
+            edge_pct=5.0, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=0.05, books_used=6,
         ))
         assert result["tier"] == "tier1a"
 
     def test_dynamic_floor_formula(self):
-        """Verify the formula: floor_1a = base + mult * sigma."""
-        sigma = 0.05
-        expected_floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
+        """Verify the formula: floor_1a = max(base, mult * sigma)."""
+        sigma = 0.025
+        expected_floor = max(_TIER1_BASE_EDGE, _TIER1_SIGMA_MULT * sigma)
+        # expected_floor = max(2.0, 100*0.025) = max(2.0, 2.5) = 2.5
         # edge just at the floor with books=6 → tier1a
         r_at = classify_rec(_entry(
             edge_pct=expected_floor, confidence="High",
@@ -892,27 +898,29 @@ class TestDynamicEdgeFloor:
             books_used=6,
         ))
         assert r_at["tier"] == "tier1a"
-        # edge just below the floor → not tier1a (tier1b since >= 2.0)
+        # edge just below the floor → not tier1a (tier1b if >= 1b floor)
         r_below = classify_rec(_entry(
             edge_pct=expected_floor - 0.001, confidence="High",
             quality_tier="Strong", market_volatility_sigma=sigma,
             books_used=6,
         ))
-        assert r_below["tier"] == "tier1b"
+        assert r_below["tier"] != "tier1a"
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_dynamic_floor_integration(self, mock_rbb):
-        """Integration: high sigma pushes a borderline rec from tier1a to tier1b."""
+        """Integration: sigma pushes a borderline rec from tier1a to tier2."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=80, edge_pct=2.55,
+            quality_score=80, edge_pct=2.5,
             quality_tier="Strong", confidence="High",
-            market_volatility_sigma=0.1,  # floor_1a = 2.5 + 1.0*0.1 = 2.6
+            market_volatility_sigma=0.03,  # floor_1a = max(2.0, 100*0.03) = 3.0
             books_used_count=6,
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        # 2.55 < 2.6 → fails 1A, but >= floor_1b(0.1)=2.0 → tier1b
-        assert len(result["tier1b"]) == 1
+        # 2.5 < 3.0 → fails 1A; floor_1b(0.03)=max(1.0,3.0)=3.0 → fails 1B
+        # 2.5 > 0 → tier2
         assert len(result["tier1a"]) == 0
+        assert len(result["tier1b"]) == 0
+        assert len(result["tier2"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1045,9 +1053,9 @@ class TestRelaxedTier2:
         assert passes_relaxed_tier2(e) is False
 
     def test_relaxed_rejects_below_edge_floor(self):
-        """Edge below 0.5% fails relaxed mode."""
+        """Edge below $0.30 EV/$100 fails relaxed mode."""
         e = _entry(
-            edge_pct=0.4, confidence="Medium", quality_tier="Moderate",
+            edge_pct=0.2, confidence="Medium", quality_tier="Moderate",
             edge_z=0.0, books_used=5,
         )
         assert passes_relaxed_tier2(e) is False
@@ -1194,8 +1202,9 @@ class TestComputeSlateDebugStats:
         assert t1g["edge_not_positive"] == 0
 
     def test_tier2_gate_failure_counts(self):
+        # edge_pct=-0.5 to trigger below_edge_floor (edge <= 0)
         entries = [
-            {**_entry(edge_pct=0.5, confidence="Low", quality_tier="Thin", edge_z=0.3),
+            {**_entry(edge_pct=-0.5, confidence="Low", quality_tier="Thin", edge_z=0.3),
              "tier": "avoid", "dynamic_edge_floor": 3.0},
         ]
         ds = compute_slate_debug_stats(entries)
@@ -1203,7 +1212,7 @@ class TestComputeSlateDebugStats:
         assert t2g["confidence_not_high_medium"] == 1
         assert t2g["quality_tier_not_elite_strong_moderate"] == 1
         assert t2g["below_edge_floor"] == 1
-        assert t2g["edge_z_too_low"] == 1
+        assert t2g["edge_z_too_low"] == 0  # edge_z gate disabled (min=0)
 
     def test_sigma_stats(self):
         entries = [
@@ -1466,24 +1475,25 @@ class TestGateFailureCountersIntegration:
 
 class TestSigmaUnitSanity:
     def test_small_sigma_correct_floor(self):
-        """sigma=0.02 → floor_1a = 2.5 + 1.0*0.02 = 2.52."""
+        """sigma=0.02 → floor_1a = max(2.0, 100*0.02) = 2.0."""
         result = classify_rec(_entry(
-            edge_pct=2.52, confidence="High", quality_tier="Strong",
+            edge_pct=2.0, confidence="High", quality_tier="Strong",
             market_volatility_sigma=0.02, books_used=6,
         ))
         assert result["tier"] == "tier1a"
-        assert abs(result["dynamic_edge_floor"] - 2.52) < 1e-9
+        expected_floor = max(_TIER1_BASE_EDGE, _TIER1_SIGMA_MULT * 0.02)
+        assert abs(result["dynamic_edge_floor"] - expected_floor) < 1e-9
 
     def test_large_sigma_triggers_warning(self):
-        """sigma=2.0 → floor = 4.5; debug_stats should warn."""
+        """sigma=2.0 → floor = 200.0; debug_stats should warn."""
         entries = [
             {**_entry(market_volatility_sigma=2.0),
-             "tier": "avoid", "dynamic_edge_floor": 4.5},
+             "tier": "avoid", "dynamic_edge_floor": 200.0},
         ]
         ds = compute_slate_debug_stats(entries)
         assert any("sigma max" in w for w in ds["warnings"])
         assert ds["sigma_stats"]["max"] == 2.0
-        assert ds["dynamic_floor_stats"]["max"] == 4.5
+        assert ds["dynamic_floor_stats"]["max"] == 200.0
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_sigma_stats_integration(self, mock_rbb):
@@ -1497,5 +1507,5 @@ class TestSigmaUnitSanity:
         ds = result["debug_stats"]
         assert ds["sigma_stats"]["min"] == 0.02
         assert ds["sigma_stats"]["max"] == 0.02
-        expected_floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * 0.02
+        expected_floor = max(_TIER1_BASE_EDGE, _TIER1_SIGMA_MULT * 0.02)
         assert abs(ds["dynamic_floor_stats"]["min"] - expected_floor) < 1e-9
