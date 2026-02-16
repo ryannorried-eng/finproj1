@@ -16,7 +16,9 @@ from line_tracker.bet_slip import (
     compute_standouts,
     format_american,
     has_conflicting_leg,
+    implied_prob_from_american,
     is_duplicate_leg,
+    kelly_stake,
     parlay_payout,
 )
 from line_tracker.bet_slip import (
@@ -326,7 +328,7 @@ def _sidebar():
         # --- Page navigation ---
         st.radio(
             "Page",
-            ["Dashboard", "Best Lines to Shop", "Performance"],
+            ["Dashboard", "Daily Slate", "Best Lines to Shop", "Performance"],
             key="nav_page",
             horizontal=True,
         )
@@ -1073,6 +1075,103 @@ def _detail_history(event_name: str):
 # Bet Slip: add controls (inside detail odds tab)
 # ---------------------------------------------------------------------------
 
+def _consensus_prob(
+    bt_lines: list, bet_type: BetType, side: str,
+) -> float | None:
+    """Compute vig-free consensus probability for *side* across all books.
+
+    Returns None when fewer than 2 books provide odds for this selection.
+    """
+    probs: list[float] = []
+    for ln in bt_lines:
+        if bet_type == BetType.MONEYLINE:
+            h = ln.home_value
+            a = ln.away_value
+        elif bet_type == BetType.SPREAD:
+            h = ln.home_price
+            a = ln.away_price
+        else:  # TOTAL
+            h = ln.home_price
+            a = ln.away_price
+
+        if h is None or a is None:
+            continue
+
+        p_h = implied_prob_from_american(h)
+        p_a = implied_prob_from_american(a)
+        total = p_h + p_a
+        if total <= 0:
+            continue
+        # Remove vig proportionally
+        if bet_type == BetType.MONEYLINE:
+            fair = p_h / total if side == "Home" else p_a / total
+        elif bet_type == BetType.SPREAD:
+            fair = p_h / total if side == "Home" else p_a / total
+        else:  # TOTAL
+            fair = p_h / total if side == "Over" else p_a / total
+        probs.append(fair)
+
+    if len(probs) < 2:
+        return None
+
+    from statistics import median as _median
+    return _median(probs)
+
+
+def _kelly_sizing_block(
+    bt_lines: list,
+    selected_bt: BetType,
+    selected_side: str,
+    odds: float,
+    market_key: str,
+) -> None:
+    """Render Kelly-based recommended stake inside 'Add to Bet Slip'."""
+    prob = _consensus_prob(bt_lines, selected_bt, selected_side)
+    if prob is None:
+        st.caption(
+            "Kelly sizing unavailable — need at least 2 books for "
+            "consensus probability."
+        )
+        return
+
+    with st.expander("Kelly Sizing", expanded=False):
+        kcols = st.columns([2, 2])
+        with kcols[0]:
+            bankroll = st.number_input(
+                "Bankroll ($)",
+                min_value=1.0,
+                value=1000.0,
+                step=100.0,
+                key=f"kelly_bank_{market_key}",
+            )
+        with kcols[1]:
+            frac_pct = st.slider(
+                "Kelly fraction (%)",
+                min_value=5,
+                max_value=100,
+                value=25,
+                step=5,
+                key=f"kelly_frac_{market_key}",
+            )
+
+        frac = frac_pct / 100.0
+        rec = kelly_stake(prob, odds, bankroll, fraction=frac)
+        b = _american_to_decimal(odds) - 1
+
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            st.metric("Recommended Stake", fmt_money(rec))
+        with mc2:
+            bk_pct = (rec / bankroll * 100) if bankroll > 0 else 0
+            st.metric("% of Bankroll", fmt_pct(bk_pct))
+
+        st.caption(
+            f"Assumptions: p={prob:.3f} (vig-free consensus), "
+            f"odds={_format_odds(odds)}, b={b:.3f} (net payout per $1), "
+            f"fraction={frac_pct}% Kelly"
+        )
+
+
 def _try_add_leg(leg: dict) -> None:
     """Validate and add a leg to the bet slip, enforcing sportsbook lock."""
     slip = st.session_state.setdefault("bet_slip", [])
@@ -1199,6 +1298,9 @@ def _bet_slip_add_controls(
         f"{selected_book} \u00b7 {market_label} \u00b7 "
         f"{selected_side}{line_str} \u00b7 {_format_odds(odds)}"
     )
+
+    # --- Kelly Sizing ---
+    _kelly_sizing_block(bt_lines, selected_bt, selected_side, odds, market_key)
 
     with cols[2]:
         if st.button(
@@ -1345,6 +1447,112 @@ def _slip_dialog():
     with bcols[1]:
         if st.button("Close", key="dlg_close", use_container_width=True):
             st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# PAGE: Daily Slate
+# ---------------------------------------------------------------------------
+
+def _page_daily_slate():
+    """Show today's games in a compact slate with best-available odds."""
+    sport = _sport_name()
+    st.title("Daily Slate")
+    st.caption(
+        f"Today's {sport} games at a glance — best moneyline, spread, "
+        "and total across all sportsbooks."
+    )
+
+    lines = st.session_state.get("last_fetch")
+    if not lines:
+        st.info(
+            "No data loaded yet. Fetch odds from the Dashboard first."
+        )
+        return
+
+    games = _build_game_index(lines)
+    if not games:
+        st.info("No games found in the fetched data.")
+        return
+
+    # Sort games by last_updated (most recent first)
+    sorted_games = sorted(
+        games.items(), key=lambda x: x[1]["last_updated"], reverse=True,
+    )
+
+    st.metric("Games on Slate", len(sorted_games))
+    st.divider()
+
+    for event_name, info in sorted_games:
+        game_lines = [ln for ln in lines if ln.event == event_name]
+        ml = [ln for ln in game_lines if ln.bet_type == BetType.MONEYLINE]
+        sp = [ln for ln in game_lines if ln.bet_type == BetType.SPREAD]
+        tot = [ln for ln in game_lines if ln.bet_type == BetType.TOTAL]
+
+        with st.container(border=True):
+            hcols = st.columns([4, 2])
+            with hcols[0]:
+                st.markdown(f"**{event_name}**")
+                st.caption(
+                    f"{sport} · {len(info['books'])} books · "
+                    f"Updated {_relative_time(info['last_updated'])}"
+                )
+            with hcols[1]:
+                if st.button("View Game", key=f"slate_view_{event_name}"):
+                    st.session_state["page"] = "detail"
+                    st.session_state["selected_game"] = event_name
+                    st.rerun()
+
+            cols = st.columns(3)
+            with cols[0]:
+                if ml:
+                    best_h = max(ml, key=lambda ln: ln.home_value)
+                    best_a = max(ml, key=lambda ln: ln.away_value)
+                    st.markdown("**Moneyline**")
+                    st.caption(
+                        f"Home {_format_odds(best_h.home_value)} "
+                        f"({best_h.sportsbook})"
+                    )
+                    st.caption(
+                        f"Away {_format_odds(best_a.away_value)} "
+                        f"({best_a.sportsbook})"
+                    )
+                else:
+                    st.markdown("**Moneyline**")
+                    st.caption("—")
+
+            with cols[1]:
+                if sp:
+                    best_h = max(sp, key=lambda ln: ln.home_value)
+                    best_a = max(sp, key=lambda ln: ln.away_value)
+                    st.markdown("**Spread**")
+                    st.caption(
+                        f"Home {best_h.home_value:+.1f} "
+                        f"({best_h.sportsbook})"
+                    )
+                    st.caption(
+                        f"Away {best_a.away_value:+.1f} "
+                        f"({best_a.sportsbook})"
+                    )
+                else:
+                    st.markdown("**Spread**")
+                    st.caption("—")
+
+            with cols[2]:
+                if tot:
+                    best_o = max(tot, key=lambda ln: ln.home_value)
+                    best_u = max(tot, key=lambda ln: ln.away_value)
+                    st.markdown("**Total**")
+                    st.caption(
+                        f"O {best_o.home_value:.1f} "
+                        f"({best_o.sportsbook})"
+                    )
+                    st.caption(
+                        f"U {best_u.away_value:.1f} "
+                        f"({best_u.sportsbook})"
+                    )
+                else:
+                    st.markdown("**Total**")
+                    st.caption("—")
 
 
 # ---------------------------------------------------------------------------
@@ -2059,7 +2267,9 @@ def main():
         _page_detail()
     else:
         nav = st.session_state.get("nav_page", "Dashboard")
-        if nav == "Best Lines to Shop":
+        if nav == "Daily Slate":
+            _page_daily_slate()
+        elif nav == "Best Lines to Shop":
             _page_best_lines()
         elif nav == "Performance":
             _page_performance()

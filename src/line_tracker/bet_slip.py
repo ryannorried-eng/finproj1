@@ -106,6 +106,39 @@ def has_conflicting_leg(slip: list[dict], leg: dict) -> bool:
     return False
 
 
+def kelly_stake(
+    prob: float,
+    odds: float,
+    bankroll: float,
+    fraction: float = 0.25,
+) -> float:
+    """Compute Kelly criterion stake.
+
+    Parameters
+    ----------
+    prob : float
+        Estimated true probability of winning (0–1).
+    odds : float
+        American odds offered by the sportsbook.
+    bankroll : float
+        Total bankroll in dollars.
+    fraction : float
+        Kelly fraction (e.g. 0.25 for quarter-Kelly). Defaults to 0.25.
+
+    Returns
+    -------
+    float
+        Recommended stake in dollars (clamped to >= 0).
+    """
+    b = american_to_decimal(odds) - 1  # net payout per $1 wagered
+    if b <= 0:
+        return 0.0
+    q = 1 - prob
+    kelly_f = (b * prob - q) / b
+    kelly_f = max(kelly_f, 0.0)  # clamp negative edge to 0
+    return round(bankroll * kelly_f * fraction, 2)
+
+
 def compute_standouts(entries: list[dict], stake: float = 100.0) -> list[dict]:
     """Compute shopping-value standouts from odds entries.
 
