@@ -60,6 +60,7 @@ def _make_rec(
     oldest_update_age_min: float = 15.0,
     market_unstable: bool = False,
     market_volatility_sigma: float = 0.0,
+    market_hold_median: float = 0.0,
     edge_z: float = 0.0,
     ev: float = 0.05,
     best_sportsbook: str = "FanDuel",
@@ -86,6 +87,7 @@ def _make_rec(
         oldest_update_age_min=oldest_update_age_min,
         market_unstable=market_unstable,
         market_volatility_sigma=market_volatility_sigma,
+        market_hold_median=market_hold_median,
         edge_z=edge_z,
     )
 
@@ -101,6 +103,7 @@ def _entry(
     market_unstable: bool = False,
     books_used: int = 5,
     oldest_update_age_min: float = 15.0,
+    market_hold_median: float = 0.0,
     market: str = "moneyline",
 ) -> dict:
     """Build a minimal entry dict for classify_rec."""
@@ -114,6 +117,7 @@ def _entry(
         "market_unstable": market_unstable,
         "books_used": books_used,
         "oldest_update_age_min": oldest_update_age_min,
+        "market_hold_median": market_hold_median,
         "market": market,
     }
 
@@ -155,75 +159,89 @@ class TestSlateScore:
 
 
 class TestClassifyRec:
-    def test_tier1(self):
+    def test_tier1b_default(self):
+        """Default entry (books=5) passes Tier 1B but not 1A."""
         result = classify_rec(_entry(
             edge_pct=3.0, confidence="High", quality_tier="Strong",
         ))
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1b"
         assert result["reasons"] == []
 
-    def test_tier1_elite(self):
+    def test_tier1a_with_enough_books(self):
+        """books=6 promotes to Tier 1A."""
+        result = classify_rec(_entry(
+            edge_pct=3.0, confidence="High", quality_tier="Strong",
+            books_used=6,
+        ))
+        assert result["tier"] == "tier1a"
+        assert result["reasons"] == []
+
+    def test_tier1b_elite(self):
         result = classify_rec(_entry(
             edge_pct=4.0, confidence="High", quality_tier="Elite",
             quality_score=90,
         ))
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1b"
         assert result["reasons"] == []
 
-    def test_tier2_moderate_quality_medium_conf(self):
+    def test_tier1b_moderate_quality_medium_conf(self):
+        """Medium conf + Moderate quality + edge >= 2.0 → tier1b."""
         result = classify_rec(_entry(
             edge_pct=2.0, confidence="Medium", quality_tier="Moderate",
             quality_score=55,
         ))
-        assert result["tier"] == "tier2"
+        assert result["tier"] == "tier1b"
         assert result["reasons"] == []
 
-    def test_tier2_high_conf_moderate_tier(self):
+    def test_tier1b_high_conf_moderate_tier(self):
         result = classify_rec(_entry(
             edge_pct=2.0, confidence="High", quality_tier="Moderate",
         ))
-        assert result["tier"] == "tier2"
+        assert result["tier"] == "tier1b"
 
-    def test_tier2_requires_edge_above_threshold(self):
+    def test_tier2_edge_at_threshold(self):
+        """edge=1.0 with Medium/Moderate and books=4 → tier2."""
         result = classify_rec(_entry(
             edge_pct=1.0, confidence="Medium", quality_tier="Moderate",
+            books_used=4,
         ))
-        assert result["tier"] == "avoid"
-        assert any("Edge too small" in r for r in result["reasons"])
+        assert result["tier"] == "tier2"
 
-    def test_tier2_edge_z_check(self):
-        """Low edge_z prevents Tier 2 even when edge passes."""
+    def test_tier1b_edge_z_irrelevant(self):
+        """Low edge_z does NOT prevent Tier 1B (no edge_z gate for 1B)."""
         result = classify_rec(_entry(
             edge_pct=2.0, confidence="Medium", quality_tier="Moderate",
             edge_z=0.5,
         ))
-        assert result["tier"] == "avoid"
-        assert any("Edge Z-score too low" in r for r in result["reasons"])
+        assert result["tier"] == "tier1b"
 
-    def test_tier2_edge_z_skipped_when_zero(self):
-        """edge_z == 0 (unavailable) does not block Tier 2."""
+    def test_tier1b_edge_z_zero(self):
+        """edge_z == 0 (unavailable) does not block Tier 1B."""
         result = classify_rec(_entry(
             edge_pct=2.0, confidence="Medium", quality_tier="Moderate",
             edge_z=0.0,
         ))
-        assert result["tier"] == "tier2"
+        assert result["tier"] == "tier1b"
 
-    def test_avoid_low_confidence(self):
+    def test_tier3_low_confidence(self):
+        """Low confidence with positive edge → tier3."""
         result = classify_rec(_entry(confidence="Low"))
-        assert result["tier"] == "avoid"
-        assert any("Confidence Low" in r for r in result["reasons"])
+        assert result["tier"] == "tier3"
+        assert result["reasons"] == []
 
-    def test_avoid_thin_quality(self):
+    def test_tier3_thin_quality(self):
+        """Thin quality with positive edge → tier3."""
         result = classify_rec(_entry(quality_tier="Thin"))
-        assert result["tier"] == "avoid"
-        assert any("Quality tier Thin" in r for r in result["reasons"])
+        assert result["tier"] == "tier3"
+        assert result["reasons"] == []
 
-    def test_avoid_low_edge(self):
+    def test_tier3_low_edge(self):
+        """edge=0.5 with Medium/Moderate → tier3 (below T2 edge floor)."""
         result = classify_rec(_entry(
             edge_pct=0.5, confidence="Medium", quality_tier="Moderate",
         ))
-        assert result["tier"] == "avoid"
-        assert any("Edge too small" in r for r in result["reasons"])
+        assert result["tier"] == "tier3"
+        assert result["reasons"] == []
 
     def test_avoid_unstable_market(self):
         result = classify_rec(_entry(market_unstable=True))
@@ -244,7 +262,7 @@ class TestClassifyRec:
         """Exactly 120 min does NOT trigger stale-lines reason."""
         result = classify_rec(_entry(oldest_update_age_min=120.0))
         assert not any("Stale lines" in r for r in result["reasons"])
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1b"
 
     def test_avoid_edge_outlier_low_confidence(self):
         result = classify_rec(_entry(
@@ -257,28 +275,28 @@ class TestClassifyRec:
         result = classify_rec(_entry(
             edge_pct=5.0, confidence="High", quality_tier="Strong",
         ))
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1b"
         assert not any("Edge outlier" in r for r in result["reasons"])
 
-    def test_tier1_requires_high_confidence(self):
-        """Medium confidence falls to Tier 2 (if other Tier 2 criteria met)."""
+    def test_tier1a_requires_high_confidence(self):
+        """Medium confidence falls to Tier 1B (with Strong quality, books=5)."""
         result = classify_rec(_entry(
             edge_pct=4.0, confidence="Medium", quality_tier="Strong",
         ))
-        assert result["tier"] == "tier2"
+        assert result["tier"] == "tier1b"
 
-    def test_tier1_requires_elite_or_strong_tier(self):
-        """Moderate quality_tier falls to Tier 2."""
+    def test_tier1a_requires_elite_or_strong_tier(self):
+        """Moderate quality_tier falls to Tier 1B."""
         result = classify_rec(_entry(
             edge_pct=4.0, confidence="High", quality_tier="Moderate",
         ))
-        assert result["tier"] == "tier2"
+        assert result["tier"] == "tier1b"
 
-    def test_exactly_4_books_no_too_few_reason(self):
-        """Exactly 4 books does NOT trigger the too-few-books reason."""
+    def test_exactly_4_books_falls_to_tier2(self):
+        """Exactly 4 books passes hard gate but fails 1A/1B → tier2."""
         result = classify_rec(_entry(books_used=4))
         assert not any("Too few books" in r for r in result["reasons"])
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier2"
 
     def test_avoid_multiple_reasons(self):
         result = classify_rec(_entry(
@@ -294,27 +312,25 @@ class TestClassifyRec:
         expected = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * 0.5
         assert result["dynamic_edge_floor"] == expected
 
-    def test_tier1_dynamic_floor_fail_gives_reason(self):
-        """When a Strong/High rec just misses Tier 1's dynamic floor."""
+    def test_tier1a_dynamic_floor_fail_falls_to_1b(self):
+        """When a Strong/High rec just misses Tier 1A's dynamic floor → 1B."""
         sigma = 0.5
         floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
         result = classify_rec(_entry(
             edge_pct=floor - 0.1, confidence="High", quality_tier="Strong",
             market_volatility_sigma=sigma,
         ))
-        # Edge is above _TIER2_EDGE so it should land in Tier 2
-        assert result["tier"] == "tier2"
+        # Edge 2.9 still >= dyn_floor_1b(0.5) = max(2.0, 1.5) = 2.0
+        assert result["tier"] == "tier1b"
 
-    def test_avoid_includes_dynamic_floor_reason_when_below_tier2(self):
-        """Strong/High rec with edge below Tier 2 minimum gets floor reason."""
-        sigma = 0.5
+    def test_edge_below_1b_floor_goes_to_tier2(self):
+        """Strong/High rec with edge below 1B floor but >=1.0 → tier2."""
         result = classify_rec(_entry(
-            edge_pct=1.0, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=sigma,
+            edge_pct=1.5, confidence="High", quality_tier="Strong",
+            books_used=4,
         ))
-        assert result["tier"] == "avoid"
-        assert any("Edge too small" in r for r in result["reasons"])
-        assert any("Fails Tier 1 dynamic floor" in r for r in result["reasons"])
+        # edge=1.5 < dyn_floor_1b(0)=2.0 → fail 1B, but >=1.0 → tier2
+        assert result["tier"] == "tier2"
 
     def test_edge_not_positive(self):
         result = classify_rec(_entry(edge_pct=0.0))
@@ -424,8 +440,8 @@ class TestStayAwaySortKey:
 
 class TestBuildDailySlate:
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_basic_tier1(self, mock_rbb):
-        """A high-quality recommendation lands in tier1."""
+    def test_basic_tier1b(self, mock_rbb):
+        """A high-quality recommendation (books=5) lands in tier1b → tier1."""
         mock_rbb.return_value = [_make_rec(
             quality_score=80, edge_pct=3.0, quality_tier="Strong", confidence="High",
         )]
@@ -433,28 +449,28 @@ class TestBuildDailySlate:
         result = build_daily_slate(lines)
         assert len(result["tier1"]) == 1
         assert result["tier1"][0]["event"] == "Lakers @ Celtics"
-        assert result["tier1"][0]["tier"] == "tier1"
+        assert result["tier1"][0]["tier"] == "tier1b"
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_basic_tier2(self, mock_rbb):
-        """A moderate recommendation lands in tier2."""
+    def test_basic_tier1b_moderate(self, mock_rbb):
+        """Medium/Moderate + edge=2.0 + books=5 → tier1b (in tier1)."""
         mock_rbb.return_value = [_make_rec(
             quality_score=55, edge_pct=2.0,
             quality_tier="Moderate", confidence="Medium",
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        assert len(result["tier2"]) == 1
-        assert result["tier2"][0]["tier"] == "tier2"
+        assert len(result["tier1"]) == 1
+        assert result["tier1"][0]["tier"] == "tier1b"
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_basic_avoid(self, mock_rbb):
-        """A low-quality recommendation lands in avoid."""
+    def test_basic_tier3(self, mock_rbb):
+        """Thin quality with positive edge → tier3."""
         mock_rbb.return_value = [_make_rec(
             quality_score=20, edge_pct=0.5, quality_tier="Thin",
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        assert len(result["stay_away"]) == 1
-        assert len(result["stay_away"][0]["avoid_reasons"]) >= 1
+        assert len(result["tier3"]) == 1
+        assert result["tier3"][0]["tier"] == "tier3"
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_metadata_attached(self, mock_rbb):
@@ -466,7 +482,10 @@ class TestBuildDailySlate:
         )]
         lines = {"evt1": _event_lines("Knicks @ Heat", commence=ct)}
         result = build_daily_slate(lines)
-        all_entries = result["tier1"] + result["tier2"] + result["stay_away"]
+        all_entries = (
+            result["tier1"] + result["tier2"] + result["tier3"]
+            + result["stay_away"]
+        )
         entry = all_entries[0]
         assert entry["event"] == "Knicks @ Heat"
         assert entry["commence_time"] == ct
@@ -522,7 +541,10 @@ class TestBuildDailySlate:
                       quality_tier="Moderate", confidence="Medium"),
         ]
         result = build_daily_slate({"evt1": _event_lines()})
-        total = len(result["tier1"]) + len(result["tier2"]) + len(result["stay_away"])
+        total = (
+            len(result["tier1"]) + len(result["tier2"])
+            + len(result["tier3"]) + len(result["stay_away"])
+        )
         assert total == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -537,12 +559,15 @@ class TestBuildDailySlate:
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"max_per_event": 2},
         )
-        total = len(result["tier1"]) + len(result["tier2"]) + len(result["stay_away"])
+        total = (
+            len(result["tier1"]) + len(result["tier2"])
+            + len(result["tier3"]) + len(result["stay_away"])
+        )
         assert total == 2
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_filter_min_edge_does_not_drop_avoid(self, mock_rbb):
-        """min_edge display-filter does NOT prevent classification or avoid."""
+    def test_filter_min_edge_does_not_change_classification(self, mock_rbb):
+        """min_edge display-filter hides tier2 but doesn't drop classification."""
         mock_rbb.return_value = [_make_rec(
             quality_score=80, edge_pct=1.0, quality_tier="Strong",
             confidence="High",
@@ -550,9 +575,10 @@ class TestBuildDailySlate:
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"min_edge": 2.0}
         )
-        # Entry is classified as avoid (edge too small for Tier 2),
-        # and NOT dropped by the display filter.
-        assert len(result["stay_away"]) == 1
+        # Entry is classified as tier2 (edge=1.0 >= _TIER2_EDGE=1.0),
+        # display-filtered from tier2 list, but counts still reflect it.
+        assert result["counts"]["tier2"] == 1
+        assert len(result["tier2"]) == 0  # filtered out of display
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_filter_markets(self, mock_rbb):
@@ -564,12 +590,15 @@ class TestBuildDailySlate:
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"markets": ["spread", "total"]}
         )
-        total = len(result["tier1"]) + len(result["tier2"]) + len(result["stay_away"])
+        total = (
+            len(result["tier1"]) + len(result["tier2"])
+            + len(result["tier3"]) + len(result["stay_away"])
+        )
         assert total == 0
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_filter_hide_low_confidence_does_not_drop_avoid(self, mock_rbb):
-        """hide_low_confidence does NOT suppress Stay Away entries."""
+    def test_filter_hide_low_confidence_does_not_drop_tier3(self, mock_rbb):
+        """hide_low_confidence filters tier3 display but doesn't change count."""
         mock_rbb.return_value = [_make_rec(
             confidence="Low", quality_score=80, edge_pct=3.0,
             quality_tier="Thin",
@@ -577,15 +606,20 @@ class TestBuildDailySlate:
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"hide_low_confidence": True}
         )
-        # Low confidence recs are classified to avoid, not dropped
-        assert len(result["stay_away"]) == 1
+        # Low/Thin with positive edge → tier3 classification
+        assert result["counts"]["tier3"] == 1
+        # Display-filtered from tier3 list
+        assert len(result["tier3"]) == 0
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_empty_input(self, mock_rbb):
         """Empty lines_by_event produces empty tiers."""
         result = build_daily_slate({})
+        assert result["tier1a"] == []
+        assert result["tier1b"] == []
         assert result["tier1"] == []
         assert result["tier2"] == []
+        assert result["tier3"] == []
         assert result["stay_away"] == []
         mock_rbb.assert_not_called()
 
@@ -596,6 +630,7 @@ class TestBuildDailySlate:
         result = build_daily_slate({"evt1": _event_lines()})
         assert result["tier1"] == []
         assert result["tier2"] == []
+        assert result["tier3"] == []
         assert result["stay_away"] == []
 
     @patch("line_tracker.slate.recommend_best_bets")
@@ -626,9 +661,10 @@ class TestBuildDailySlate:
             "evt3": _event_lines("Warriors @ Suns"),
         }
         result = build_daily_slate(lines)
-        assert len(result["tier1"]) == 1
-        assert len(result["tier2"]) == 1
-        assert len(result["stay_away"]) == 1
+        # Knicks: Elite/High → tier1b (books=5), Celtics: Moderate/Medium → tier1b
+        assert len(result["tier1"]) == 2
+        # Warriors: Thin/Low → tier3
+        assert len(result["tier3"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_avoid_reasons_populated(self, mock_rbb):
@@ -679,8 +715,9 @@ class TestBuildDailySlate:
         """Stay Away is capped at _STAY_AWAY_LIMIT entries."""
 
         def side_effect(lines):
+            # edge=0 → avoid (edge not positive)
             return [_make_rec(
-                quality_score=20, edge_pct=0.3,
+                quality_score=20, edge_pct=0.0,
                 quality_tier="Thin", confidence="Low",
             )]
 
@@ -704,7 +741,9 @@ class TestBuildDailySlate:
         )
         debug = result["debug"]
         assert debug["total_recs"] == 1
-        assert debug["tier1_count"] == 1
+        assert debug["tier1_count"] == 1  # combined tier1
+        assert debug["tier1b_count"] == 1
+        assert debug["tier1a_count"] == 0
         assert debug["tier2_count"] == 0
         assert debug["stay_away_count"] == 0
         assert "High" in debug["by_confidence"]
@@ -727,8 +766,8 @@ class TestBuildDailySlate:
 
 class TestStayAwayAlwaysPopulated:
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_all_recs_to_stay_away(self, mock_rbb):
-        """When all recs fail Tier1/Tier2, Stay Away is non-empty with reasons."""
+    def test_all_recs_to_tier3(self, mock_rbb):
+        """When all recs fail Tier1/Tier2 but have positive edge → tier3."""
 
         def side_effect(lines):
             return [_make_rec(
@@ -744,15 +783,13 @@ class TestStayAwayAlwaysPopulated:
         result = build_daily_slate(lines)
         assert len(result["tier1"]) == 0
         assert len(result["tier2"]) == 0
-        assert len(result["stay_away"]) == 2
-        for entry in result["stay_away"]:
-            assert len(entry["avoid_reasons"]) >= 1
+        assert len(result["tier3"]) == 2
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_stay_away_not_suppressed_by_display_filters(self, mock_rbb):
-        """Display filters (min_edge, min_quality, hide_low) don't suppress avoid."""
+    def test_avoid_not_suppressed_by_display_filters(self, mock_rbb):
+        """Display filters don't suppress actual avoid entries."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=30, edge_pct=0.3,
+            quality_score=30, edge_pct=0.0,
             quality_tier="Thin", confidence="Low",
         )]
         result = build_daily_slate(
@@ -763,16 +800,15 @@ class TestStayAwayAlwaysPopulated:
         assert len(result["stay_away"][0]["avoid_reasons"]) >= 1
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_medium_quality_recs_go_to_stay_away_with_reasons(self, mock_rbb):
-        """Recs with moderate stats that miss Tier 2 edge get Stay Away + reasons."""
+    def test_moderate_recs_with_edge_at_tier2_threshold(self, mock_rbb):
+        """Moderate recs with edge=1.0 reach tier2 (relaxed edge floor)."""
         mock_rbb.return_value = [_make_rec(
             quality_score=55, edge_pct=1.0,
             quality_tier="Moderate", confidence="Medium",
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        assert len(result["stay_away"]) == 1
-        entry = result["stay_away"][0]
-        assert any("Edge too small" in r for r in entry["avoid_reasons"])
+        # edge=1.0 >= _TIER2_EDGE=1.0 → tier2
+        assert len(result["tier2"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_entry_carries_edge_z_and_market_unstable(self, mock_rbb):
@@ -793,86 +829,90 @@ class TestStayAwayAlwaysPopulated:
 
 
 class TestDynamicEdgeFloor:
-    def test_zero_sigma_uses_base_edge(self):
-        """With sigma=0, dynamic floor equals the base edge (3.0%)."""
+    def test_zero_sigma_tier1a(self):
+        """sigma=0, books=6 → floor_1a=2.5 → tier1a."""
         result = classify_rec(_entry(
             edge_pct=_TIER1_BASE_EDGE, confidence="High",
             quality_tier="Strong", market_volatility_sigma=0.0,
+            books_used=6,
         ))
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1a"
 
-    def test_below_base_edge_falls_to_tier2(self):
-        """Edge below 3.0% base with zero sigma → tier2 (if Tier 2 criteria met)."""
+    def test_below_base_edge_falls_to_1b(self):
+        """Edge below 2.5% but >= 2.0 with books=5 → tier1b."""
         result = classify_rec(_entry(
-            edge_pct=2.99, confidence="High", quality_tier="Strong",
+            edge_pct=2.4, confidence="High", quality_tier="Strong",
             market_volatility_sigma=0.0,
         ))
-        # 2.99 >= _TIER2_EDGE (1.5) → tier2
-        assert result["tier"] == "tier2"
+        # 2.4 >= dyn_floor_1b(0)=2.0 → tier1b
+        assert result["tier"] == "tier1b"
 
-    def test_sigma_raises_floor(self):
-        """sigma=0.02 → floor=3.024; edge=3.01 < 3.024 → not tier1."""
+    def test_sigma_raises_1a_floor(self):
+        """sigma=0.5 → floor_1a=3.0; edge=2.9 < 3.0 → not tier1a."""
         result = classify_rec(_entry(
-            edge_pct=3.01, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=0.02,
+            edge_pct=2.9, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=0.5, books_used=6,
         ))
-        # Misses Tier 1, but 3.01 >= 1.5 → tier2
-        assert result["tier"] == "tier2"
+        # Misses 1A, but 2.9 >= floor_1b(0.5)=max(2.0,1.5)=2.0 → tier1b
+        assert result["tier"] == "tier1b"
 
-    def test_edge_above_raised_floor(self):
-        """sigma=0.02 → floor = 3.024; edge=3.03 >= 3.024 → tier1."""
+    def test_edge_above_raised_1a_floor(self):
+        """sigma=0.5 → floor_1a=3.0; edge=3.0 >= 3.0 → tier1a."""
         result = classify_rec(_entry(
-            edge_pct=3.03, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=0.02,
+            edge_pct=3.0, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=0.5, books_used=6,
         ))
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1a"
 
     def test_high_sigma_needs_large_edge(self):
-        """sigma=1.0 → floor = 4.2; edge=4.0 < 4.2 → not tier1."""
+        """sigma=1.0 → floor_1a=3.5; edge=3.4 < 3.5 → not tier1a."""
         result = classify_rec(_entry(
-            edge_pct=4.0, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=1.0,
+            edge_pct=3.4, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=1.0, books_used=6,
         ))
-        # 4.0 >= 1.5 → tier2
-        assert result["tier"] == "tier2"
+        # 3.4 >= floor_1b(1.0)=max(2.0,2.0)=2.0 → tier1b
+        assert result["tier"] == "tier1b"
 
     def test_high_sigma_edge_above(self):
-        """sigma=1.0 → floor = 4.2; edge=4.3 >= 4.2 → tier1."""
+        """sigma=1.0 → floor_1a=3.5; edge=3.5 >= 3.5 → tier1a."""
         result = classify_rec(_entry(
-            edge_pct=4.3, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=1.0,
+            edge_pct=3.5, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=1.0, books_used=6,
         ))
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1a"
 
     def test_dynamic_floor_formula(self):
-        """Verify the formula: floor = base + mult * sigma."""
+        """Verify the formula: floor_1a = base + mult * sigma."""
         sigma = 0.05
         expected_floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
-        # edge just at the floor → tier1
+        # edge just at the floor with books=6 → tier1a
         r_at = classify_rec(_entry(
             edge_pct=expected_floor, confidence="High",
             quality_tier="Strong", market_volatility_sigma=sigma,
+            books_used=6,
         ))
-        assert r_at["tier"] == "tier1"
-        # edge just below the floor → not tier1 (tier2 since >= 1.5)
+        assert r_at["tier"] == "tier1a"
+        # edge just below the floor → not tier1a (tier1b since >= 2.0)
         r_below = classify_rec(_entry(
             edge_pct=expected_floor - 0.001, confidence="High",
             quality_tier="Strong", market_volatility_sigma=sigma,
+            books_used=6,
         ))
-        assert r_below["tier"] == "tier2"
+        assert r_below["tier"] == "tier1b"
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_dynamic_floor_integration(self, mock_rbb):
-        """Integration: high sigma pushes a borderline rec from tier1 to tier2."""
+        """Integration: high sigma pushes a borderline rec from tier1a to tier1b."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=80, edge_pct=3.1,
+            quality_score=80, edge_pct=2.55,
             quality_tier="Strong", confidence="High",
-            market_volatility_sigma=0.1,  # floor = 3.0 + 1.2*0.1 = 3.12
+            market_volatility_sigma=0.1,  # floor_1a = 2.5 + 1.0*0.1 = 2.6
+            books_used_count=6,
         )]
         result = build_daily_slate({"evt1": _event_lines()})
-        # 3.1 < 3.12 → tier2 (since 3.1 >= 1.5)
-        assert len(result["tier2"]) == 1
-        assert len(result["tier1"]) == 0
+        # 2.55 < 2.6 → fails 1A, but >= floor_1b(0.1)=2.0 → tier1b
+        assert len(result["tier1b"]) == 1
+        assert len(result["tier1a"]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -890,7 +930,9 @@ class TestCountsAlwaysPresent:
         result = build_daily_slate({"evt1": _event_lines()})
         assert "counts" in result
         assert result["counts"]["total_recs"] == 1
-        assert result["counts"]["tier1"] == 1
+        assert result["counts"]["tier1"] == 1  # combined
+        assert result["counts"]["tier1b"] == 1
+        assert result["counts"]["tier1a"] == 0
         assert result["counts"]["tier2"] == 0
         assert result["counts"]["stay_away"] == 0
 
@@ -966,14 +1008,14 @@ class TestFiltersNeverChangeClassification:
 
 
 class TestRelaxedTier2:
-    def test_strict_avoid_passes_relaxed(self):
-        """An entry that's avoid under strict but meets relaxed thresholds."""
+    def test_strict_tier3_passes_relaxed(self):
+        """An entry that's tier3 under strict but meets relaxed thresholds."""
         e = _entry(
             edge_pct=0.8, confidence="Medium", quality_tier="Moderate",
             edge_z=0.0, books_used=5,
         )
         result = classify_rec(e)
-        assert result["tier"] == "avoid"  # strict classification
+        assert result["tier"] == "tier3"  # strict classification
         assert passes_relaxed_tier2(e) is True  # relaxed display
 
     def test_relaxed_rejects_hard_disqualifier(self):
@@ -1016,14 +1058,14 @@ class TestRelaxedTier2:
         )
         assert passes_relaxed_tier2(e) is False
 
-    def test_relaxed_does_not_change_tier1(self):
-        """passes_relaxed_tier2 is only for avoid entries; Tier1 stays strict."""
+    def test_relaxed_does_not_change_tier1b(self):
+        """passes_relaxed_tier2 is only for tier3/avoid; Tier1B stays strict."""
         e = _entry(
             edge_pct=3.0, confidence="High", quality_tier="Strong",
         )
         result = classify_rec(e)
-        # Tier 1 entries should never need relaxed promotion
-        assert result["tier"] == "tier1"
+        # Tier 1B entries should never need relaxed promotion
+        assert result["tier"] == "tier1b"
 
     def test_relaxed_rejects_stale(self):
         """Stale lines block relaxed promotion."""
@@ -1067,10 +1109,12 @@ class TestEmptyStateStrings:
     def test_empty_tier1_has_data_for_message(self, mock_rbb):
         """When tier1 is empty but recs exist, counts reflect it."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=55, edge_pct=2.0,
+            quality_score=55, edge_pct=1.5,
             quality_tier="Moderate", confidence="Medium",
+            books_used_count=4,
         )]
         result = build_daily_slate({"evt1": _event_lines()})
+        # edge=1.5 < floor_1b(0)=2.0 → fails 1B, but >=1.0 → tier2
         assert len(result["tier1"]) == 0
         assert result["counts"]["tier1"] == 0
         assert result["counts"]["total_recs"] > 0
@@ -1119,15 +1163,15 @@ class TestComputeSlateDebugStats:
     def test_basic_counts(self):
         entries = [
             {**_entry(edge_pct=4.0, confidence="High", quality_tier="Elite"),
-             "tier": "tier1", "dynamic_edge_floor": 3.0},
+             "tier": "tier1a", "dynamic_edge_floor": 2.5},
             {**_entry(edge_pct=2.0, confidence="Medium", quality_tier="Moderate"),
-             "tier": "tier2", "dynamic_edge_floor": 3.0},
+             "tier": "tier2", "dynamic_edge_floor": 2.5},
             {**_entry(edge_pct=0.5, confidence="Low", quality_tier="Thin"),
-             "tier": "avoid", "dynamic_edge_floor": 3.0},
+             "tier": "avoid", "dynamic_edge_floor": 2.5},
         ]
         ds = compute_slate_debug_stats(entries)
         assert ds["total_recs"] == 3
-        assert ds["counts_by_tier"] == {"tier1": 1, "tier2": 1, "avoid": 1}
+        assert ds["counts_by_tier"] == {"tier1a": 1, "tier2": 1, "avoid": 1}
         assert ds["counts_by_confidence"]["High"] == 1
         assert ds["counts_by_confidence"]["Medium"] == 1
         assert ds["counts_by_confidence"]["Low"] == 1
@@ -1202,21 +1246,21 @@ class TestComputeSlateDebugStats:
         ds = compute_slate_debug_stats(entries)
         assert any("dynamic floor median" in w for w in ds["warnings"])
 
-    def test_warning_no_stay_away(self):
-        """All recs in tier1 → StayAway==0 warning."""
+    def test_warning_no_stay_away_or_tier3(self):
+        """All recs in tier1b → StayAway+Tier3==0 warning."""
         entries = [
-            {**_entry(), "tier": "tier1", "dynamic_edge_floor": 3.0},
+            {**_entry(), "tier": "tier1b", "dynamic_edge_floor": 2.5},
         ]
         ds = compute_slate_debug_stats(entries)
-        assert any("StayAway == 0" in w for w in ds["warnings"])
+        assert any("StayAway+Tier3 == 0" in w for w in ds["warnings"])
 
     def test_no_warnings_for_normal_data(self):
         entries = [
             {**_entry(market_volatility_sigma=0.02),
-             "tier": "tier1", "dynamic_edge_floor": 3.024},
+             "tier": "tier1b", "dynamic_edge_floor": 2.52},
             {**_entry(market_volatility_sigma=0.01, edge_pct=0.5,
                       confidence="Low", quality_tier="Thin"),
-             "tier": "avoid", "dynamic_edge_floor": 3.012},
+             "tier": "avoid", "dynamic_edge_floor": 2.51},
         ]
         ds = compute_slate_debug_stats(entries)
         # Has both tiers and stay_away, sigma < 0.25, floor < 6
@@ -1272,6 +1316,7 @@ class TestClassificationNotDroppedPreFiltering:
         classified = (
             result["counts"]["tier1"]
             + result["counts"]["tier2"]
+            + result["counts"]["tier3"]
             + result["counts"]["stay_away"]
         )
         assert classified == total
@@ -1372,8 +1417,9 @@ class TestGateFailureCountersIntegration:
     def test_gate_failures_nonzero_when_tier1_empty(self, mock_rbb):
         """When no entries make Tier 1, at least one T1 gate failure is non-zero."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=55, edge_pct=2.0,
+            quality_score=55, edge_pct=1.5,
             quality_tier="Moderate", confidence="Medium",
+            books_used_count=4,
         )]
         result = build_daily_slate({"evt1": _event_lines()})
         ds = result["debug_stats"]
@@ -1418,24 +1464,24 @@ class TestGateFailureCountersIntegration:
 
 class TestSigmaUnitSanity:
     def test_small_sigma_correct_floor(self):
-        """sigma=0.02 → floor = 3.0 + 1.2*0.02 = 3.024."""
+        """sigma=0.02 → floor_1a = 2.5 + 1.0*0.02 = 2.52."""
         result = classify_rec(_entry(
-            edge_pct=3.024, confidence="High", quality_tier="Strong",
-            market_volatility_sigma=0.02,
+            edge_pct=2.52, confidence="High", quality_tier="Strong",
+            market_volatility_sigma=0.02, books_used=6,
         ))
-        assert result["tier"] == "tier1"
-        assert abs(result["dynamic_edge_floor"] - 3.024) < 1e-9
+        assert result["tier"] == "tier1a"
+        assert abs(result["dynamic_edge_floor"] - 2.52) < 1e-9
 
     def test_large_sigma_triggers_warning(self):
-        """sigma=2.0 → floor = 5.4; debug_stats should warn."""
+        """sigma=2.0 → floor = 4.5; debug_stats should warn."""
         entries = [
             {**_entry(market_volatility_sigma=2.0),
-             "tier": "avoid", "dynamic_edge_floor": 5.4},
+             "tier": "avoid", "dynamic_edge_floor": 4.5},
         ]
         ds = compute_slate_debug_stats(entries)
         assert any("sigma max" in w for w in ds["warnings"])
         assert ds["sigma_stats"]["max"] == 2.0
-        assert ds["dynamic_floor_stats"]["max"] == 5.4
+        assert ds["dynamic_floor_stats"]["max"] == 4.5
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_sigma_stats_integration(self, mock_rbb):

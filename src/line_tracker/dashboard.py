@@ -44,7 +44,10 @@ from line_tracker.performance import (
     summary_kpis,
 )
 from line_tracker.scraper import OddsClient
-from line_tracker.slate import build_daily_slate, passes_relaxed_tier2
+from line_tracker.slate import (
+    build_daily_slate,
+    passes_relaxed_tier2,
+)
 from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 
 SPORTS = {
@@ -1983,22 +1986,25 @@ def _page_daily_slate():
     with st.expander("Slate Filters", expanded=False):
         sf1, sf2 = st.columns(2)
         with sf1:
-            pro_mode = st.toggle(
-                "Pro Mode",
-                value=False,
-                key="slate_pro_mode",
+            mode = st.radio(
+                "Mode",
+                options=["Standard", "Pro"],
+                index=0,
+                key="slate_mode",
                 help=(
-                    "Tighter Tier 1: edge >= 3.5%, edge_z >= 2.8, "
-                    "books >= 6, hold <= 6%. Fewer top plays, higher "
-                    "conviction. Tier 2 / Stay Away unchanged."
+                    "**Standard**: Top Plays = Tier 1A + 1B. "
+                    "**Pro**: Top Plays = Tier 1A only "
+                    "(Tier 1B shown under More Plays)."
                 ),
+                horizontal=True,
             )
+            pro_mode = mode == "Pro"
             strict_mode = st.toggle(
                 "Strict mode",
                 value=True,
                 key="slate_strict_mode",
                 help=(
-                    "ON: Tier 2 uses strict thresholds (edge >= 1.5%, "
+                    "ON: Tier 2 uses strict thresholds (edge >= 1.0%, "
                     "edge_z >= 1.0). OFF: relaxed (edge >= 0.5%, "
                     "edge_z >= 0.75, Low confidence allowed if quality "
                     "tier >= Strong). Tier 1 is always strict."
@@ -2008,6 +2014,11 @@ def _page_daily_slate():
                 "Show Stay Away",
                 value=True,
                 key="slate_show_stay_away",
+            )
+            show_closest = st.checkbox(
+                "Show Closest to Top Plays when none qualify",
+                value=True,
+                key="slate_show_closest",
             )
         with sf2:
             max_per_section = st.slider(
@@ -2055,19 +2066,25 @@ def _page_daily_slate():
     slate = build_daily_slate(
         dict(lines_by_event),
         filters=filters,
-        settings={"pro_mode": pro_mode},
     )
 
-    tier1 = slate["tier1"]
-    tier2 = list(slate["tier2"])
+    # ── Assemble display tiers based on mode ──────────────────────────
+    if pro_mode:
+        top_plays = list(slate["tier1a"])
+        more_plays = list(slate["tier1b"]) + list(slate["tier2"])
+    else:
+        top_plays = list(slate["tier1"])
+        more_plays = list(slate["tier2"])
+
     stay_away = list(slate["stay_away"])
+    closest = list(slate["closest_candidates"])
     counts = slate["counts"]
 
-    # ── Relaxed mode: promote qualifying stay_away → display tier2 ────
+    # ── Relaxed mode: promote qualifying stay_away → display more ─────
     if not strict_mode:
         promoted = [e for e in stay_away if passes_relaxed_tier2(e)]
         stay_away = [e for e in stay_away if not passes_relaxed_tier2(e)]
-        tier2 = tier2 + promoted
+        more_plays = more_plays + promoted
 
     # ── Tier 2 sorting (stable, deterministic) ────────────────────────
     _tier2_sort_keys = {
@@ -2080,11 +2097,11 @@ def _page_daily_slate():
             e["event"],
         ),
     }
-    tier2.sort(key=_tier2_sort_keys.get(tier2_sort, _tier2_sort_keys["Best edge"]))
+    more_plays.sort(key=_tier2_sort_keys.get(tier2_sort, _tier2_sort_keys["Best edge"]))
 
     # ── Apply max-per-section cap ─────────────────────────────────────
-    tier1_display = tier1[:max_per_section]
-    tier2_display = tier2[:max_per_section]
+    top_display = top_plays[:max_per_section]
+    more_display = more_plays[:max_per_section]
     stay_away_display = stay_away[:max_per_section] if show_stay_away else []
 
     # ── No-data guard ─────────────────────────────────────────────────
@@ -2095,10 +2112,11 @@ def _page_daily_slate():
         )
 
     # Summary metrics
-    mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("Top Plays", len(tier1_display))
-    mc2.metric("More Plays", len(tier2_display))
-    mc3.metric("Stay Away", len(stay_away_display))
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Top Plays", len(top_display))
+    mc2.metric("More Plays", len(more_display))
+    mc3.metric("Tier 3", counts.get("tier3", 0))
+    mc4.metric("Stay Away", len(stay_away_display))
 
     # Sanity-check warnings (shown when debug env is on)
     if _debug_env:
@@ -2110,11 +2128,13 @@ def _page_daily_slate():
     ds = slate.get("debug_stats")
     if debug and ds:
         with st.expander("Debug: Classification Breakdown", expanded=False):
-            dc1, dc2, dc3, dc4 = st.columns(4)
-            dc1.metric("Total Recs", debug["total_recs"])
-            dc2.metric("Tier 1", debug["tier1_count"])
-            dc3.metric("Tier 2", debug["tier2_count"])
-            dc4.metric("Stay Away", debug["stay_away_count"])
+            dc1, dc2, dc3, dc4, dc5, dc6 = st.columns(6)
+            dc1.metric("Total", debug["total_recs"])
+            dc2.metric("Tier 1A", debug.get("tier1a_count", 0))
+            dc3.metric("Tier 1B", debug.get("tier1b_count", 0))
+            dc4.metric("Tier 2", debug["tier2_count"])
+            dc5.metric("Tier 3", debug.get("tier3_count", 0))
+            dc6.metric("Stay Away", debug["stay_away_count"])
             st.markdown("**By Confidence:** " + ", ".join(
                 f"{k}: {v}" for k, v in sorted(debug["by_confidence"].items())
             ))
@@ -2167,28 +2187,42 @@ def _page_daily_slate():
 
     st.divider()
 
-    # ── Tier 1: Top Plays ─────────────────────────────────────────────
-    st.subheader("Top Plays (Tier 1)")
-    if not tier1_display:
-        st.info("No Tier 1 plays today under current thresholds.")
-        st.caption(
-            "Tier 1 requires **High** confidence + quality tier "
-            "**Elite/Strong** + edge >= (3.0 + 1.2 \u00d7 \u03c3)."
-        )
+    # ── Top Plays (Tier 1A, or 1A+1B in Standard mode) ───────────────
+    _top_label = "Top Plays (Tier 1A)" if pro_mode else "Top Plays (Tier 1)"
+    st.subheader(_top_label)
+    if not top_display:
+        st.info("No top plays today under current thresholds.")
+        if pro_mode:
+            st.caption(
+                "Tier 1A requires **High** confidence, **Elite/Strong** "
+                "quality, books >= 6, hold <= 6%, "
+                "edge >= (2.5 + 1.0 \u00d7 \u03c3)."
+            )
+        else:
+            st.caption(
+                "Tier 1 requires **High/Medium** confidence, "
+                "**Elite/Strong/Moderate** quality, "
+                "edge >= dynamic floor."
+            )
+        # Show closest candidates when no top plays qualify
+        if show_closest and closest:
+            st.markdown("**Closest to qualifying:**")
+            _render_slate_table(closest[:5])
     else:
-        _render_slate_date_groups(tier1_display, show_cards=True)
+        _render_slate_date_groups(top_display, show_cards=True)
 
     st.divider()
 
-    # ── Tier 2: More Plays ────────────────────────────────────────────
-    st.subheader("More Plays (Tier 2)")
-    if not tier2_display:
-        st.info("No Tier 2 plays meet current filters.")
+    # ── More Plays (Tier 2, or 1B+Tier 2 in Pro mode) ────────────────
+    _more_label = "More Plays (Tier 1B + Tier 2)" if pro_mode else "More Plays (Tier 2)"
+    st.subheader(_more_label)
+    if not more_display:
+        st.info("No additional plays meet current filters.")
         st.caption(
-            "Try turning off Strict mode or lowering the Tier 2 edge floor."
+            "Try turning off Strict mode or lowering the edge floor."
         )
     else:
-        _render_slate_table(tier2_display)
+        _render_slate_table(more_display)
 
     st.divider()
 

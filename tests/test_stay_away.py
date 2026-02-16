@@ -283,29 +283,31 @@ class TestAvoidScore:
 
 class TestClassifyRecMarketFlags:
     def test_avoid_includes_high_hold_reason(self):
-        """Stay Away entry with high hold gets the flag reason."""
+        """hold >= 8% triggers hard Stay Away with hold reason."""
         e = _entry(
             edge_pct=0.5, confidence="Medium", quality_tier="Moderate",
             market_hold_median=8.0,
         )
         result = classify_rec(e)
         assert result["tier"] == "avoid"
+        assert any("Market hold too high" in r for r in result["reasons"])
+        # Also gets the market quality flag for hold > 7%
         assert any("High market hold" in r for r in result["reasons"])
 
-    def test_avoid_includes_noise_reason(self):
-        """Stay Away entry with high sigma + low edge gets noise flag."""
+    def test_noise_flag_on_hard_avoid(self):
+        """Noise flag appears when entry is avoid (e.g. books < 4)."""
         e = _entry(
             edge_pct=1.0, confidence="Medium", quality_tier="Moderate",
-            market_volatility_sigma=0.06,
+            market_volatility_sigma=0.06, books_used=3,
         )
         result = classify_rec(e)
         assert result["tier"] == "avoid"
         assert any("Noisy market" in r for r in result["reasons"])
 
-    def test_avoid_includes_divergence_reason(self):
-        """Stay Away entry with high divergence gets the flag."""
+    def test_divergence_flag_on_hard_avoid(self):
+        """Divergence flag appears when entry is avoid (edge <= 0)."""
         e = _entry(
-            edge_pct=0.5, confidence="Medium", quality_tier="Moderate",
+            edge_pct=0.0, confidence="Medium", quality_tier="Moderate",
             divergence=0.06,
         )
         result = classify_rec(e)
@@ -323,39 +325,38 @@ class TestClassifyRecMarketFlags:
         assert any("Unstable market" in r for r in result["reasons"])
         assert any("High market hold" in r for r in result["reasons"])
 
-    def test_tier1_unaffected_by_market_flags(self):
-        """Tier 1 classification is not affected by market quality flags."""
+    def test_tier1b_unaffected_by_market_flags(self):
+        """Tier 1B classification is not affected by market quality flags."""
         e = _entry(
             edge_pct=3.5, confidence="High", quality_tier="Strong",
-            market_hold_median=9.0, divergence=0.06,
+            market_hold_median=5.0, divergence=0.06,
         )
         result = classify_rec(e)
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1b"
         assert result["reasons"] == []
 
     def test_tier2_unaffected_by_market_flags(self):
         """Tier 2 classification is not affected by market quality flags."""
         e = _entry(
             edge_pct=2.0, confidence="Medium", quality_tier="Moderate",
-            market_hold_median=9.0, divergence=0.06,
+            market_hold_median=7.0, divergence=0.06, books_used=4,
         )
         result = classify_rec(e)
         assert result["tier"] == "tier2"
         assert result["reasons"] == []
 
-    def test_multiple_market_flags(self):
-        """Multiple market flags appear when all conditions met."""
+    def test_multiple_market_flags_on_hold_avoid(self):
+        """Multiple market flags appear on hold-gated avoid entry."""
         e = _entry(
             edge_pct=0.5, confidence="Low", quality_tier="Thin",
-            market_hold_median=8.0,
+            market_hold_median=8.5,
             market_volatility_sigma=0.07,
             divergence=0.05,
         )
         result = classify_rec(e)
         assert result["tier"] == "avoid"
         flags = result["reasons"]
-        assert any("Confidence Low" in r for r in flags)
-        assert any("Quality tier Thin" in r for r in flags)
+        assert any("Market hold too high" in r for r in flags)
         assert any("High market hold" in r for r in flags)
         assert any("Noisy market" in r for r in flags)
         assert any("Sharp-retail divergence" in r for r in flags)
@@ -435,7 +436,7 @@ class TestBuildSlateAvoidScore:
     def test_avoid_entry_has_avoid_score(self, mock_rbb):
         """Stay Away entries carry an avoid_score field."""
         mock_rbb.return_value = [_make_rec(
-            quality_score=20, edge_pct=0.5,
+            quality_score=20, edge_pct=0.0,
             quality_tier="Thin", confidence="Low",
         )]
         result = build_daily_slate({"evt1": _event_lines()})
@@ -485,13 +486,15 @@ class TestBuildSlateAvoidScore:
         def side_effect(lines):
             ev = lines[0].event
             if "Bad" in ev:
+                # hold >= 8 → avoid, worst entry
                 return [_make_rec(
                     quality_score=20, edge_pct=0.3,
                     quality_tier="Thin", confidence="Low",
                     market_hold_median=9.0,
                 )]
+            # edge = 0 → avoid (edge not positive)
             return [_make_rec(
-                quality_score=50, edge_pct=1.0,
+                quality_score=50, edge_pct=0.0,
                 quality_tier="Moderate", confidence="Medium",
             )]
 

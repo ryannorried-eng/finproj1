@@ -1,4 +1,4 @@
-"""Tests for Pro Mode gating and calibration stats."""
+"""Tests for Tier 1A / 1B gating and calibration stats."""
 
 from __future__ import annotations
 
@@ -8,22 +8,18 @@ import pandas as pd
 
 from line_tracker.performance import calibration_stats
 from line_tracker.slate import (
-    _PRO_BOOKS_MIN,
-    _PRO_EDGE_MIN,
-    _PRO_EDGE_Z_MIN,
-    _PRO_HOLD_MAX,
-    _TIER1_BASE_EDGE,
-    _TIER1_SIGMA_MULT,
+    _TIER1A_BOOKS_MIN,
+    _TIER1A_HOLD_MAX,
+    _TIER1B_BOOKS_MIN,
+    _TIER1B_HOLD_MAX,
     build_daily_slate,
     classify_rec,
+    dyn_floor_1a,
 )
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-_PRO = {"pro_mode": True}
-_STD = {"pro_mode": False}
 
 
 def _entry(
@@ -41,7 +37,7 @@ def _entry(
     divergence: float | None = None,
     market: str = "moneyline",
 ) -> dict:
-    """Build an entry dict that passes standard AND Pro Mode Tier 1."""
+    """Build an entry dict that passes Tier 1A by default."""
     return {
         "edge_pct": edge_pct,
         "confidence": confidence,
@@ -59,208 +55,159 @@ def _entry(
 
 
 # ---------------------------------------------------------------------------
-# Pro Mode OFF → standard Tier 1 behaviour
+# Tier 1A gating
 # ---------------------------------------------------------------------------
 
 
-class TestStandardModeUnchanged:
-    def test_standard_tier1(self):
-        """Standard mode: entry meeting classic criteria → tier1."""
-        result = classify_rec(_entry(), settings=_STD)
-        assert result["tier"] == "tier1"
-
-    def test_standard_ignores_edge_z(self):
-        """Standard mode: edge_z not required for Tier 1."""
-        result = classify_rec(_entry(edge_z=0.0), settings=_STD)
-        assert result["tier"] == "tier1"
-
-    def test_standard_ignores_books(self):
-        """Standard mode: books_used=4 (>= _MIN_BOOKS) still tier1."""
-        result = classify_rec(_entry(books_used=4), settings=_STD)
-        assert result["tier"] == "tier1"
-
-    def test_standard_ignores_hold(self):
-        """Standard mode: high hold does not block Tier 1."""
-        result = classify_rec(_entry(market_hold_median=9.0), settings=_STD)
-        assert result["tier"] == "tier1"
-
-    def test_none_settings_is_standard(self):
-        """settings=None behaves like standard mode."""
+class TestTier1AGating:
+    def test_tier1a_passes_all_gates(self):
+        """Entry meeting all Tier 1A gates → tier1a."""
         result = classify_rec(_entry())
-        assert result["tier"] == "tier1"
+        assert result["tier"] == "tier1a"
+
+    def test_tier1a_rejects_medium_confidence(self):
+        """Medium confidence fails Tier 1A → falls to 1B."""
+        result = classify_rec(_entry(confidence="Medium"))
+        assert result["tier"] == "tier1b"
+
+    def test_tier1a_rejects_moderate_quality(self):
+        """Moderate quality fails Tier 1A → falls to 1B."""
+        result = classify_rec(_entry(quality_tier="Moderate"))
+        assert result["tier"] == "tier1b"
+
+    def test_tier1a_rejects_few_books(self):
+        """books_used < 6 fails Tier 1A."""
+        result = classify_rec(_entry(books_used=5))
+        assert result["tier"] != "tier1a"
+
+    def test_tier1a_rejects_high_hold(self):
+        """hold > 6% fails Tier 1A."""
+        result = classify_rec(_entry(market_hold_median=6.5))
+        assert result["tier"] != "tier1a"
+
+    def test_tier1a_hold_at_threshold_passes(self):
+        """hold == 6% passes Tier 1A (<=)."""
+        result = classify_rec(_entry(market_hold_median=_TIER1A_HOLD_MAX))
+        assert result["tier"] == "tier1a"
+
+    def test_tier1a_books_at_threshold_passes(self):
+        """books == 6 passes Tier 1A (>=)."""
+        result = classify_rec(_entry(books_used=_TIER1A_BOOKS_MIN))
+        assert result["tier"] == "tier1a"
+
+    def test_tier1a_edge_below_floor(self):
+        """Edge below dyn_floor_1a fails Tier 1A."""
+        result = classify_rec(_entry(edge_pct=2.0))
+        assert result["tier"] != "tier1a"
 
 
 # ---------------------------------------------------------------------------
-# Pro Mode ON → tighter Tier 1 gates
+# Tier 1B gating
 # ---------------------------------------------------------------------------
 
 
-class TestProModeGating:
-    def test_pro_tier1_passes_all_gates(self):
-        """Entry meeting all Pro Mode gates → tier1."""
-        result = classify_rec(_entry(), settings=_PRO)
-        assert result["tier"] == "tier1"
+class TestTier1BGating:
+    def test_tier1b_medium_confidence(self):
+        """Medium conf + Strong quality + books=5 → tier1b."""
+        result = classify_rec(_entry(
+            confidence="Medium", books_used=5,
+        ))
+        assert result["tier"] == "tier1b"
 
-    def test_pro_rejects_low_edge(self):
-        """Edge below _PRO_EDGE_MIN → not tier1 (falls to tier2)."""
-        result = classify_rec(
-            _entry(edge_pct=3.2), settings=_PRO,
-        )
-        assert result["tier"] != "tier1"
+    def test_tier1b_moderate_quality(self):
+        """High conf + Moderate quality + books=5 → tier1b."""
+        result = classify_rec(_entry(
+            quality_tier="Moderate", books_used=5,
+        ))
+        assert result["tier"] == "tier1b"
 
-    def test_pro_rejects_low_edge_z(self):
-        """edge_z below _PRO_EDGE_Z_MIN → not tier1."""
-        result = classify_rec(
-            _entry(edge_z=2.5), settings=_PRO,
-        )
-        assert result["tier"] != "tier1"
+    def test_tier1b_rejects_low_confidence(self):
+        """Low confidence fails Tier 1B."""
+        result = classify_rec(_entry(confidence="Low"))
+        assert result["tier"] not in ("tier1a", "tier1b")
 
-    def test_pro_rejects_zero_edge_z(self):
-        """edge_z == 0 (unavailable) → Pro Mode rejects for Tier 1."""
-        result = classify_rec(
-            _entry(edge_z=0.0), settings=_PRO,
-        )
-        assert result["tier"] != "tier1"
+    def test_tier1b_rejects_thin_quality(self):
+        """Thin quality fails Tier 1B."""
+        result = classify_rec(_entry(quality_tier="Thin"))
+        assert result["tier"] not in ("tier1a", "tier1b")
 
-    def test_pro_rejects_few_books(self):
-        """books_used below _PRO_BOOKS_MIN → not tier1."""
-        result = classify_rec(
-            _entry(books_used=5), settings=_PRO,
-        )
-        assert result["tier"] != "tier1"
+    def test_tier1b_hold_at_threshold(self):
+        """hold == 7.5% passes Tier 1B (<=)."""
+        result = classify_rec(_entry(
+            market_hold_median=_TIER1B_HOLD_MAX, books_used=5,
+            confidence="Medium", quality_tier="Moderate",
+        ))
+        assert result["tier"] == "tier1b"
 
-    def test_pro_rejects_high_hold(self):
-        """hold_median above _PRO_HOLD_MAX → not tier1."""
-        result = classify_rec(
-            _entry(market_hold_median=7.0), settings=_PRO,
-        )
-        assert result["tier"] != "tier1"
+    def test_tier1b_hold_above_threshold(self):
+        """hold > 7.5% fails Tier 1B → falls to tier2."""
+        result = classify_rec(_entry(
+            market_hold_median=7.6, books_used=5,
+            confidence="Medium", quality_tier="Moderate",
+        ))
+        assert result["tier"] not in ("tier1a", "tier1b")
 
-    def test_pro_hold_at_threshold_passes(self):
-        """hold_median == _PRO_HOLD_MAX → tier1 (<=)."""
-        result = classify_rec(
-            _entry(market_hold_median=_PRO_HOLD_MAX), settings=_PRO,
-        )
-        assert result["tier"] == "tier1"
+    def test_tier1b_books_at_threshold(self):
+        """books == 5 passes Tier 1B (>=)."""
+        result = classify_rec(_entry(
+            books_used=_TIER1B_BOOKS_MIN,
+            confidence="Medium", quality_tier="Moderate",
+        ))
+        assert result["tier"] == "tier1b"
 
-    def test_pro_edge_at_threshold_passes(self):
-        """edge_pct == _PRO_EDGE_MIN → tier1 (>=)."""
-        result = classify_rec(
-            _entry(edge_pct=_PRO_EDGE_MIN), settings=_PRO,
-        )
-        assert result["tier"] == "tier1"
-
-    def test_pro_edge_z_at_threshold_passes(self):
-        """edge_z == _PRO_EDGE_Z_MIN → tier1 (>=)."""
-        result = classify_rec(
-            _entry(edge_z=_PRO_EDGE_Z_MIN), settings=_PRO,
-        )
-        assert result["tier"] == "tier1"
-
-    def test_pro_books_at_threshold_passes(self):
-        """books_used == _PRO_BOOKS_MIN → tier1 (>=)."""
-        result = classify_rec(
-            _entry(books_used=_PRO_BOOKS_MIN), settings=_PRO,
-        )
-        assert result["tier"] == "tier1"
+    def test_tier1b_books_below_threshold(self):
+        """books < 5 fails Tier 1B."""
+        result = classify_rec(_entry(
+            books_used=4, confidence="Medium", quality_tier="Moderate",
+        ))
+        assert result["tier"] not in ("tier1a", "tier1b")
 
 
 # ---------------------------------------------------------------------------
-# Pro Mode still respects dynamic floor
+# Tier 1A dynamic floor
 # ---------------------------------------------------------------------------
 
 
-class TestProModeDynamicFloor:
-    def test_pro_uses_dynamic_floor_when_higher(self):
-        """When dyn_floor > _PRO_EDGE_MIN, Pro Mode uses dyn_floor."""
-        sigma = 1.0  # floor = 3.0 + 1.2*1.0 = 4.2 > 3.5
-        floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
-        # Edge between _PRO_EDGE_MIN and dyn_floor → not tier1
-        result = classify_rec(
-            _entry(edge_pct=4.0, market_volatility_sigma=sigma),
-            settings=_PRO,
-        )
-        assert result["tier"] != "tier1"
-        assert result["dynamic_edge_floor"] == floor
+class TestTier1ADynamicFloor:
+    def test_sigma_raises_floor(self):
+        """sigma=1.0 → floor_1a = 2.5 + 1.0*1.0 = 3.5; edge=3.0 < 3.5."""
+        result = classify_rec(_entry(
+            edge_pct=3.0, market_volatility_sigma=1.0,
+        ))
+        assert result["tier"] != "tier1a"
+        assert result["dynamic_edge_floor"] == dyn_floor_1a(1.0)
 
-    def test_pro_uses_pro_edge_when_higher(self):
-        """When _PRO_EDGE_MIN > dyn_floor, Pro Mode uses _PRO_EDGE_MIN."""
-        # sigma=0 → dyn_floor = 3.0 < 3.5
-        result = classify_rec(
-            _entry(edge_pct=3.3, market_volatility_sigma=0.0),
-            settings=_PRO,
-        )
-        # 3.3 >= dyn_floor(3.0) but < _PRO_EDGE_MIN(3.5) → not tier1
-        assert result["tier"] != "tier1"
+    def test_edge_above_raised_floor(self):
+        """sigma=1.0 → floor_1a = 3.5; edge=3.6 >= 3.5 → tier1a."""
+        result = classify_rec(_entry(
+            edge_pct=3.6, market_volatility_sigma=1.0,
+        ))
+        assert result["tier"] == "tier1a"
 
 
 # ---------------------------------------------------------------------------
-# Pro Mode does NOT affect Tier 2 or Stay Away classification
+# Demotion from Tier 1A to Tier 1B
 # ---------------------------------------------------------------------------
 
 
-class TestProModeDoesNotAffectTier2:
-    def test_tier2_unchanged_in_pro_mode(self):
-        """Tier 2 criteria are identical regardless of Pro Mode."""
-        e = _entry(
-            edge_pct=2.0, confidence="Medium", quality_tier="Moderate",
-            edge_z=1.5, books_used=5, market_hold_median=8.0,
-        )
-        std = classify_rec(e, settings=_STD)
-        pro = classify_rec(e, settings=_PRO)
-        assert std["tier"] == "tier2"
-        assert pro["tier"] == "tier2"
+class TestTier1ADemotion:
+    def test_demoted_by_books(self):
+        """books=5 fails 1A (needs 6) but passes 1B → tier1b."""
+        result = classify_rec(_entry(books_used=5))
+        assert result["tier"] == "tier1b"
 
-    def test_avoid_unchanged_in_pro_mode(self):
-        """Stay Away criteria are identical regardless of Pro Mode."""
-        e = _entry(
-            edge_pct=0.5, confidence="Low", quality_tier="Thin",
-        )
-        std = classify_rec(e, settings=_STD)
-        pro = classify_rec(e, settings=_PRO)
-        assert std["tier"] == "avoid"
-        assert pro["tier"] == "avoid"
-        assert std["reasons"] == pro["reasons"]
+    def test_demoted_by_hold(self):
+        """hold=7.0 fails 1A (needs <=6) but passes 1B (<=7.5) → tier1b."""
+        result = classify_rec(_entry(market_hold_median=7.0))
+        assert result["tier"] == "tier1b"
 
 
 # ---------------------------------------------------------------------------
-# Pro Mode demotes standard-Tier1 entries to Tier 2
+# build_daily_slate tier1a / tier1b buckets
 # ---------------------------------------------------------------------------
 
 
-class TestProModeDemotion:
-    def test_standard_tier1_demoted_to_tier2_by_pro(self):
-        """Entry that passes standard Tier 1 but fails Pro gates → tier2."""
-        # edge=3.2 passes standard (>= 3.0) but fails Pro (< 3.5)
-        e = _entry(edge_pct=3.2, edge_z=1.5, books_used=5)
-        std = classify_rec(e, settings=_STD)
-        pro = classify_rec(e, settings=_PRO)
-        assert std["tier"] == "tier1"
-        assert pro["tier"] == "tier2"
-
-    def test_standard_tier1_demoted_by_edge_z(self):
-        """edge_z=2.0 passes standard but fails Pro → tier2."""
-        e = _entry(edge_z=2.0)
-        std = classify_rec(e, settings=_STD)
-        pro = classify_rec(e, settings=_PRO)
-        assert std["tier"] == "tier1"
-        assert pro["tier"] == "tier2"
-
-    def test_standard_tier1_demoted_by_hold(self):
-        """hold=7% passes standard but fails Pro → tier2."""
-        e = _entry(market_hold_median=7.0)
-        std = classify_rec(e, settings=_STD)
-        pro = classify_rec(e, settings=_PRO)
-        assert std["tier"] == "tier1"
-        assert pro["tier"] == "tier2"
-
-
-# ---------------------------------------------------------------------------
-# build_daily_slate with Pro Mode
-# ---------------------------------------------------------------------------
-
-
-class TestBuildSlateProMode:
+class TestBuildSlateTiers:
     def _make_rec(self, **kwargs):
         from line_tracker.best_bets import BetRecommendation
 
@@ -301,36 +248,30 @@ class TestBuildSlateProMode:
         ]
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_pro_mode_off_tier1(self, mock_rbb):
-        """Standard mode: qualifying rec → tier1."""
+    def test_tier1a_in_slate(self, mock_rbb):
+        """Strong rec → tier1a in slate, and in combined tier1."""
         mock_rbb.return_value = [self._make_rec()]
-        result = build_daily_slate(
-            {"e1": self._lines()}, settings={"pro_mode": False},
-        )
+        result = build_daily_slate({"e1": self._lines()})
+        assert len(result["tier1a"]) == 1
         assert len(result["tier1"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_pro_mode_on_fewer_tier1(self, mock_rbb):
-        """Pro Mode: rec with edge_z=1.5 fails Pro gates → not tier1."""
-        mock_rbb.return_value = [self._make_rec(edge_z=1.5)]
-        result = build_daily_slate(
-            {"e1": self._lines()}, settings={"pro_mode": True},
-        )
-        assert len(result["tier1"]) == 0
-        # Should fall to tier2 instead
-        assert len(result["tier2"]) == 1
+    def test_tier1b_in_slate(self, mock_rbb):
+        """5-book rec → tier1b, not tier1a."""
+        mock_rbb.return_value = [self._make_rec(books_used_count=5)]
+        result = build_daily_slate({"e1": self._lines()})
+        assert len(result["tier1a"]) == 0
+        assert len(result["tier1b"]) == 1
+        assert len(result["tier1"]) == 1  # combined
 
     @patch("line_tracker.slate.recommend_best_bets")
-    def test_pro_mode_on_still_tier1_when_strong(self, mock_rbb):
-        """Pro Mode: rec meeting all Pro gates → still tier1."""
-        mock_rbb.return_value = [self._make_rec(
-            edge_pct=4.0, edge_z=3.0, books_used_count=7,
-            market_hold_median=4.0,
-        )]
-        result = build_daily_slate(
-            {"e1": self._lines()}, settings={"pro_mode": True},
-        )
-        assert len(result["tier1"]) == 1
+    def test_counts_tier1a_tier1b(self, mock_rbb):
+        """Counts include tier1a, tier1b, and combined tier1."""
+        mock_rbb.return_value = [self._make_rec()]
+        result = build_daily_slate({"e1": self._lines()})
+        assert result["counts"]["tier1a"] == 1
+        assert result["counts"]["tier1b"] == 0
+        assert result["counts"]["tier1"] == 1
 
 
 # ---------------------------------------------------------------------------

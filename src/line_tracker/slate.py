@@ -11,20 +11,26 @@ from line_tracker.market_structure import sharp_retail_divergence as _sharp_reta
 from line_tracker.models import BettingLine, BetType
 
 # ── tier thresholds ────────────────────────────────────────────────
-_TIER1_BASE_EDGE = 3.0
-_TIER1_SIGMA_MULT = 1.2
-_TIER2_EDGE = 1.5
+_TIER1_BASE_EDGE = 2.5   # Tier 1A base edge floor (relaxed from 3.0)
+_TIER1_SIGMA_MULT = 1.0  # Tier 1A sigma multiplier (relaxed from 1.2)
+_TIER2_EDGE = 1.0         # Tier 2 static edge floor (relaxed from 1.5)
 _TIER2_EDGE_Z_MIN = 1.0
 _MIN_BOOKS = 4
 _STALE_THRESHOLD_MIN = 120.0
 _EDGE_OUTLIER_THRESHOLD = 4.0
 _STAY_AWAY_LIMIT = 15
+_STAY_AWAY_HOLD_MAX = 8.0  # hold >= 8% is hard Stay Away
 
-# ── Pro Mode Tier 1 thresholds (stricter than standard) ──────────────
-_PRO_EDGE_MIN = 3.5  # minimum edge%
-_PRO_EDGE_Z_MIN = 2.8  # minimum edge Z-score
-_PRO_BOOKS_MIN = 6  # minimum books used
-_PRO_HOLD_MAX = 6.0  # maximum market hold median %
+# ── Tier 1A (Institutional / Pro) thresholds ─────────────────────────
+_TIER1A_BOOKS_MIN = 6
+_TIER1A_HOLD_MAX = 6.0
+
+# ── Tier 1B (Standard / Aggressive) thresholds ──────────────────────
+_TIER1B_FLOOR_MIN = 2.0   # minimum 1B edge floor
+_TIER1B_BASE_EDGE = 1.0
+_TIER1B_SIGMA_MULT = 1.0
+_TIER1B_BOOKS_MIN = 5
+_TIER1B_HOLD_MAX = 7.5
 
 # ── market-quality avoid thresholds ───────────────────────────────────
 _AVOID_HOLD_MAX = 7.0  # median book hold% above which market is suspect
@@ -35,6 +41,53 @@ _AVOID_DIVERGENCE_MIN = 0.04  # sharp-retail divergence threshold
 # ── relaxed Tier 2 display thresholds (used when strict mode OFF) ─────
 _RELAXED_TIER2_EDGE = 0.5
 _RELAXED_TIER2_EDGE_Z_MIN = 0.75
+
+
+# ── dynamic edge floor helpers ──────────────────────────────────────
+
+
+def dyn_floor_1a(sigma: float) -> float:
+    """Dynamic edge floor for Tier 1A: base + mult * sigma."""
+    return _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
+
+
+def dyn_floor_1b(sigma: float) -> float:
+    """Dynamic edge floor for Tier 1B: max(floor_min, base + mult * sigma)."""
+    return max(_TIER1B_FLOOR_MIN, _TIER1B_BASE_EDGE + _TIER1B_SIGMA_MULT * sigma)
+
+
+def compute_distance_to_1b(entry: dict) -> float:
+    """Distance-to-Tier-1B score; lower means closer to qualifying.
+
+    Components:
+    * Edge gap below ``dyn_floor_1b``
+    * +0.5 if confidence not in (High, Medium)
+    * +0.5 if quality_tier not in (Elite, Strong, Moderate)
+    * +0.3 if hold > ``_TIER1B_HOLD_MAX``
+    * +0.3 if books < ``_TIER1B_BOOKS_MIN``
+    """
+    sigma = entry.get("market_volatility_sigma", 0.0)
+    edge = entry.get("edge_pct", 0.0)
+    confidence = entry.get("confidence", "")
+    quality_tier = entry.get("quality_tier", "")
+    hold_median = entry.get("market_hold_median", 0.0)
+    books_used = entry.get("books_used", 0)
+
+    floor = dyn_floor_1b(sigma)
+
+    distance = 0.0
+    if edge < floor:
+        distance += floor - edge
+    if confidence not in ("High", "Medium"):
+        distance += 0.5
+    if quality_tier not in ("Elite", "Strong", "Moderate"):
+        distance += 0.5
+    if hold_median > _TIER1B_HOLD_MAX:
+        distance += 0.3
+    if books_used < _TIER1B_BOOKS_MIN:
+        distance += 0.3
+
+    return round(distance, 3)
 
 
 def _slate_score(quality_score: float, edge_pct: float) -> float:
@@ -106,32 +159,41 @@ def _avoid_score(entry: dict) -> float:
 
 
 def classify_rec(entry: dict, settings: dict | None = None) -> dict:
-    """Classify a single slate entry into tier1, tier2, or avoid.
+    """Classify a recommendation into tier1a/tier1b/tier2/tier3/avoid.
 
     Runs for **every** recommendation — nothing is skipped before
     classification.
+
+    Tier cascade:
+        1. Hard disqualifiers → **avoid** (unstable, <4 books, stale, outlier)
+        2. hold >= 8% or edge <= 0 → **avoid**
+        3. Tier 1A (Institutional): High conf, Elite/Strong quality,
+           books >= 6, hold <= 6%, edge >= dyn_floor_1a
+        4. Tier 1B (Standard): High/Medium conf, Elite/Strong/Moderate quality,
+           books >= 5, hold <= 7.5%, edge >= dyn_floor_1b
+        5. Tier 2: High/Medium conf, Elite/Strong/Moderate quality,
+           edge >= 1.0%, edge_z >= 1.0 (or unavailable), books >= 4
+        6. Tier 3: positive-edge plays that don't meet higher tiers
+           but also don't trigger Stay Away conditions
 
     Parameters
     ----------
     entry:
         A dict with at least: edge_pct, confidence, quality_tier,
         quality_score, market_volatility_sigma, edge_z, books_used,
-        oldest_update_age_min, market_unstable.
+        oldest_update_age_min, market_unstable, market_hold_median.
     settings:
-        Optional overrides.  Recognised keys:
-
-        * ``pro_mode`` (bool): when True, Tier 1 uses tighter gates
-          (edge >= 3.5%, edge_z >= 2.8, books >= 6, hold <= 6%).
+        Reserved for future use.
 
     Returns
     -------
     dict with keys:
-        tier:  ``"tier1"`` | ``"tier2"`` | ``"avoid"``
-        reasons: list[str]  (empty for tier1/tier2; populated for avoid)
-        dynamic_edge_floor: float  (Tier 1 floor used, for debugging)
+        tier: ``"tier1a"`` | ``"tier1b"`` | ``"tier2"`` | ``"tier3"``
+              | ``"avoid"``
+        reasons: list[str]  (empty except for avoid)
+        dynamic_edge_floor: float  (Tier 1A floor, for debugging)
     """
     settings = settings or {}
-    pro_mode = settings.get("pro_mode", False)
 
     edge = entry.get("edge_pct", 0.0)
     confidence = entry.get("confidence", "")
@@ -143,9 +205,9 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
     oldest_age = entry.get("oldest_update_age_min", 0.0)
     hold_median = entry.get("market_hold_median", 0.0)
 
-    dyn_floor = _TIER1_BASE_EDGE + _TIER1_SIGMA_MULT * sigma
+    floor_1a = dyn_floor_1a(sigma)
 
-    # ── Hard disqualifiers (block ALL tiers) ──────────────────────
+    # ── Hard disqualifiers (block ALL tiers → Stay Away) ──────────
     hard_reasons: list[str] = []
     if market_unstable:
         hard_reasons.append("Unstable market (too many outlier books filtered)")
@@ -163,91 +225,59 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         return {
             "tier": "avoid",
             "reasons": hard_reasons,
-            "dynamic_edge_floor": dyn_floor,
+            "dynamic_edge_floor": floor_1a,
         }
 
-    # ── Tier 1 ────────────────────────────────────────────────────
-    if pro_mode:
-        # Pro Mode: tighter gates on top of standard requirements
-        pro_floor = max(dyn_floor, _PRO_EDGE_MIN)
-        if (
-            confidence == "High"
-            and quality_tier in ("Elite", "Strong")
-            and edge >= pro_floor
-            and edge > 0
-            and (edge_z >= _PRO_EDGE_Z_MIN if edge_z else False)
-            and books_used >= _PRO_BOOKS_MIN
-            and hold_median <= _PRO_HOLD_MAX
-        ):
-            return {
-                "tier": "tier1",
-                "reasons": [],
-                "dynamic_edge_floor": dyn_floor,
-            }
-    else:
-        # Standard Tier 1
-        if (
-            confidence == "High"
-            and quality_tier in ("Elite", "Strong")
-            and edge >= dyn_floor
-            and edge > 0
-        ):
-            return {
-                "tier": "tier1",
-                "reasons": [],
-                "dynamic_edge_floor": dyn_floor,
-            }
+    # ── Hold gate → Stay Away ─────────────────────────────────────
+    if hold_median >= _STAY_AWAY_HOLD_MAX:
+        reasons = [
+            f"Market hold too high "
+            f"({hold_median:.1f}% >= {_STAY_AWAY_HOLD_MAX:.0f}%)"
+        ]
+        _add_market_quality_flags(reasons, entry)
+        return {"tier": "avoid", "reasons": reasons, "dynamic_edge_floor": floor_1a}
 
-    # ── Tier 2 (independent criteria, NOT Tier 1 lite) ────────────
+    # ── Negative / zero edge → Stay Away ──────────────────────────
+    if edge <= 0:
+        reasons = [f"Edge not positive ({edge:.1f}%)"]
+        _add_market_quality_flags(reasons, entry)
+        return {"tier": "avoid", "reasons": reasons, "dynamic_edge_floor": floor_1a}
+
+    # ── Tier 1A (Institutional / Pro) ─────────────────────────────
+    if (
+        confidence == "High"
+        and quality_tier in ("Elite", "Strong")
+        and edge >= floor_1a
+        and books_used >= _TIER1A_BOOKS_MIN
+        and hold_median <= _TIER1A_HOLD_MAX
+    ):
+        return {"tier": "tier1a", "reasons": [], "dynamic_edge_floor": floor_1a}
+
+    # ── Tier 1B (Standard / Aggressive) ───────────────────────────
+    floor_1b = dyn_floor_1b(sigma)
+    if (
+        confidence in ("High", "Medium")
+        and quality_tier in ("Elite", "Strong", "Moderate")
+        and edge >= floor_1b
+        and books_used >= _TIER1B_BOOKS_MIN
+        and hold_median <= _TIER1B_HOLD_MAX
+    ):
+        return {"tier": "tier1b", "reasons": [], "dynamic_edge_floor": floor_1a}
+
+    # ── Tier 2 ────────────────────────────────────────────────────
     t2_conf = confidence in ("High", "Medium")
     t2_qt = quality_tier in ("Elite", "Strong", "Moderate")
     t2_edge = edge >= _TIER2_EDGE
     # edge_z == 0.0 means unavailable (default) — skip the check
     t2_ez = edge_z >= _TIER2_EDGE_Z_MIN if edge_z else True
-    t2_pos = edge > 0
+    t2_books = books_used >= _MIN_BOOKS
 
-    if t2_conf and t2_qt and t2_edge and t2_ez and t2_pos:
-        return {"tier": "tier2", "reasons": [], "dynamic_edge_floor": dyn_floor}
+    if t2_conf and t2_qt and t2_edge and t2_ez and t2_books:
+        return {"tier": "tier2", "reasons": [], "dynamic_edge_floor": floor_1a}
 
-    # ── Stay Away — collect human-readable reasons ────────────────
-    reasons: list[str] = []
-
-    if confidence == "Low":
-        reasons.append(f"Confidence {confidence}")
-    elif confidence not in ("High", "Medium"):
-        reasons.append(f"Confidence {confidence}")
-
-    if quality_tier not in ("Elite", "Strong", "Moderate"):
-        reasons.append(f"Quality tier {quality_tier}")
-
-    if edge <= 0:
-        reasons.append(f"Edge not positive ({edge:.1f}%)")
-    elif edge < _TIER2_EDGE:
-        reasons.append(f"Edge too small ({edge:.1f}% < {_TIER2_EDGE}%)")
-
-    if edge_z and edge_z < _TIER2_EDGE_Z_MIN:
-        reasons.append(
-            f"Edge Z-score too low ({edge_z:.2f} < {_TIER2_EDGE_Z_MIN})"
-        )
-
-    # Note when the rec specifically failed the Tier 1 dynamic floor
-    if (
-        confidence == "High"
-        and quality_tier in ("Elite", "Strong")
-        and 0 < edge < dyn_floor
-    ):
-        reasons.append(
-            f"Fails Tier 1 dynamic floor: needs >= {dyn_floor:.1f}% "
-            f"given volatility σ={sigma:.3f}"
-        )
-
-    # Market-quality flags (supplementary context)
-    _add_market_quality_flags(reasons, entry)
-
-    if not reasons:
-        reasons.append("Does not meet Tier 2 criteria")
-
-    return {"tier": "avoid", "reasons": reasons, "dynamic_edge_floor": dyn_floor}
+    # ── Tier 3: positive edge, no hard Stay Away flags ────────────
+    # Edge > 0 already guaranteed (checked above).
+    return {"tier": "tier3", "reasons": [], "dynamic_edge_floor": floor_1a}
 
 
 # ── Stay Away ranking ──────────────────────────────────────────────
@@ -405,18 +435,21 @@ def compute_slate_debug_stats(entries: list[dict]) -> dict:
 
     # ── Sanity warnings ───────────────────────────────────────────
     warnings: list[str] = []
-    n_tier1 = counts_by_tier.get("tier1", 0)
+    n_tier1a = counts_by_tier.get("tier1a", 0)
+    n_tier1b = counts_by_tier.get("tier1b", 0)
     n_tier2 = counts_by_tier.get("tier2", 0)
+    n_tier3 = counts_by_tier.get("tier3", 0)
     n_avoid = counts_by_tier.get("avoid", 0)
+    n_all = n_tier1a + n_tier1b + n_tier2 + n_tier3 + n_avoid
 
-    if total > 0 and n_tier1 + n_tier2 + n_avoid == 0:
+    if total > 0 and n_all == 0:
         warnings.append(
-            "total_recs > 0 but Tier1+Tier2+StayAway == 0 "
+            "total_recs > 0 but all tier counts == 0 "
             "(entries may be lost)"
         )
-    if total > 0 and n_avoid == 0:
+    if total > 0 and n_avoid == 0 and n_tier3 == 0:
         warnings.append(
-            "total_recs > 0 but StayAway == 0 "
+            "total_recs > 0 but StayAway+Tier3 == 0 "
             "(every rec passed — check thresholds)"
         )
     if sigma_stats["max"] is not None and sigma_stats["max"] > 0.25:
@@ -491,30 +524,18 @@ def build_daily_slate(
 ) -> dict:
     """Build the daily slate from lines grouped by event.
 
-    Every recommendation is classified **first** (tier1 / tier2 / avoid).
-    User display-filters (min_edge, min_quality, hide_low_confidence, etc.)
-    are applied only to tier1/tier2 lists afterwards — Stay Away is always
-    populated when recs exist.
-
-    Parameters
-    ----------
-    lines_by_event:
-        Mapping of *event_id* → list of ``BettingLine`` objects.
-    filters:
-        Optional display-filter dict (see ``_passes_filters``).
-        ``max_per_event`` (int, default 1) limits recs taken per event.
-    settings:
-        Optional classification overrides forwarded to ``classify_rec``
-        (e.g. ``{"pro_mode": True}``).
+    Every recommendation is classified first
+    (tier1a / tier1b / tier2 / tier3 / avoid).  User display-filters
+    are applied only to actionable tier lists afterwards — Stay Away
+    is always populated when recs exist.
 
     Returns
     -------
-    dict with keys ``"tier1"``, ``"tier2"``, ``"stay_away"`` (lists of
-    slate-entry dicts), ``"counts"`` (always present), ``"debug_stats"``
-    (gate-failure counts, sigma/floor stats, warnings — always present),
-    and ``"debug"`` (extended counters, present when
-    ``LINE_TRACKER_DEBUG`` env-var is set or ``debug`` filter flag is
-    True).
+    dict with keys:
+        ``"tier1a"``, ``"tier1b"``, ``"tier1"`` (1a+1b combined),
+        ``"tier2"``, ``"tier3"``, ``"stay_away"``,
+        ``"closest_candidates"`` (Tier 2/3 entries closest to Tier 1B),
+        ``"counts"``, ``"debug_stats"``, and optional ``"debug"``.
     """
     filters = filters or {}
     settings = settings or {}
@@ -580,25 +601,36 @@ def build_daily_slate(
             entry["avoid_reasons"] = classification["reasons"]
             entry["dynamic_edge_floor"] = classification["dynamic_edge_floor"]
             entry["avoid_score"] = _avoid_score(entry)
+            entry["distance_to_1b"] = compute_distance_to_1b(entry)
 
             all_entries.append(entry)
 
     # Sort by slate_score descending
     all_entries.sort(key=lambda e: e["slate_score"], reverse=True)
 
-    # ── Bucket into tiers (display-filters on tier1/tier2 only) ───
-    result: dict = {"tier1": [], "tier2": [], "stay_away": []}
+    # ── Bucket into tiers ─────────────────────────────────────────
+    _top_tiers = {"tier1a", "tier1b"}
+    result: dict = {
+        "tier1a": [], "tier1b": [], "tier1": [],
+        "tier2": [], "tier3": [], "stay_away": [],
+        "closest_candidates": [],
+    }
     display_filters = {k: v for k, v in filters.items() if k != "max_per_event"}
 
     for entry in all_entries:
-        if entry["tier"] == "tier1":
+        tier = entry["tier"]
+        if tier in _top_tiers:
             if _passes_filters(entry, display_filters):
+                result[tier].append(entry)
                 result["tier1"].append(entry)
-        elif entry["tier"] == "tier2":
+        elif tier == "tier2":
             if _passes_filters(entry, display_filters):
                 result["tier2"].append(entry)
+        elif tier == "tier3":
+            if _passes_filters(entry, display_filters):
+                result["tier3"].append(entry)
         else:
-            # Stay Away: only apply markets filter, not edge/quality/confidence
+            # Stay Away: only apply markets filter
             markets_filter = {}
             if "markets" in filters:
                 markets_filter["markets"] = filters["markets"]
@@ -609,11 +641,24 @@ def build_daily_slate(
     result["stay_away"].sort(key=_stay_away_sort_key)
     result["stay_away"] = result["stay_away"][:_STAY_AWAY_LIMIT]
 
+    # ── Closest candidates (tier2/tier3 entries nearest to Tier 1B) ─
+    candidate_pool = result["tier2"] + result["tier3"]
+    for e in candidate_pool:
+        e.setdefault("distance_to_1b", compute_distance_to_1b(e))
+    result["closest_candidates"] = sorted(
+        candidate_pool, key=lambda e: e["distance_to_1b"],
+    )[:10]
+
     # ── Counts (always available) ─────────────────────────────────
     result["counts"] = {
         "total_recs": len(all_entries),
-        "tier1": sum(1 for e in all_entries if e["tier"] == "tier1"),
+        "tier1a": sum(1 for e in all_entries if e["tier"] == "tier1a"),
+        "tier1b": sum(1 for e in all_entries if e["tier"] == "tier1b"),
+        "tier1": sum(
+            1 for e in all_entries if e["tier"] in ("tier1a", "tier1b")
+        ),
         "tier2": sum(1 for e in all_entries if e["tier"] == "tier2"),
+        "tier3": sum(1 for e in all_entries if e["tier"] == "tier3"),
         "stay_away": sum(1 for e in all_entries if e["tier"] == "avoid"),
     }
 
@@ -629,8 +674,11 @@ def build_daily_slate(
         result["debug"] = {
             **result["counts"],
             "total_recs": len(all_entries),
+            "tier1a_count": result["counts"]["tier1a"],
+            "tier1b_count": result["counts"]["tier1b"],
             "tier1_count": result["counts"]["tier1"],
             "tier2_count": result["counts"]["tier2"],
+            "tier3_count": result["counts"]["tier3"],
             "stay_away_count": result["counts"]["stay_away"],
             "by_confidence": dict(
                 Counter(e.get("confidence", "") for e in all_entries)
