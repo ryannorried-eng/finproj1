@@ -745,6 +745,8 @@ def build_daily_slate(
                 "line": rec.line,
                 "best_odds": rec.best_odds,
                 "best_sportsbook": rec.best_sportsbook,
+                "consensus_prob": rec.consensus_prob,
+                "p_be": rec.p_be,
                 "edge_pct": rec.ev_100,  # EV/$100 — tiering key
                 "ev_100": rec.ev_100,
                 "ev_roi": rec.ev_roi,

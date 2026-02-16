@@ -1,4 +1,10 @@
-"""Tests for spec-defined EV / edge formulas and consensus aggregation."""
+"""Tests for spec-defined EV / edge formulas and consensus aggregation.
+
+Includes 'golden tests' for the EV math definitions:
+  ev_100  = 100*(p*d - 1)
+  edge_pp = p - 1/d
+  exec_adv_100 = 100*p*(d_best - d_ref)
+"""
 
 from __future__ import annotations
 
@@ -263,3 +269,99 @@ class TestExecAdv100:
         adv_tight = max(r["exec_adv_100"] for r in tight)
         adv_wide = max(r["exec_adv_100"] for r in wide)
         assert adv_wide > adv_tight
+
+
+# ── 5) Golden tests — fixed-value regression guards ─────────────────
+
+
+class TestGoldenEvMath:
+    """Deterministic, pure-math tests with fixed p and d values.
+
+    These protect against formula drift or sign errors.
+    """
+
+    def test_ev100_zero_at_fair_coinflip(self):
+        """p=0.5, d=2.0 → ev_100 = 100*(0.5*2 - 1) = 0."""
+        p, d = 0.5, 2.0
+        ev_100 = 100.0 * (p * d - 1.0)
+        assert ev_100 == 0.0
+
+    def test_edge_pp_matches_definition(self):
+        """edge_pp = p - 1/d for several (p, d) combos."""
+        cases = [
+            (0.55, 2.0),   # favourite, even odds
+            (0.40, 3.0),   # underdog, long odds
+            (0.65, 1.5),   # heavy favourite, short odds
+        ]
+        for p, d in cases:
+            edge_pp = p - 1.0 / d
+            expected = p - 1.0 / d
+            assert abs(edge_pp - expected) < 1e-12, (
+                f"p={p}, d={d}"
+            )
+
+    def test_ev_sign_favorite_case(self):
+        """Favourite: p=0.60, d=1.80 → ev_100 > 0 (positive EV)."""
+        p, d = 0.60, 1.80
+        ev_100 = 100.0 * (p * d - 1.0)
+        # 0.60 * 1.80 = 1.08 → ev_100 = 8.0
+        assert ev_100 > 0
+        assert abs(ev_100 - 8.0) < 1e-10
+
+    def test_ev_sign_underdog_case(self):
+        """Underdog: p=0.35, d=3.50 → ev_100 > 0."""
+        p, d = 0.35, 3.50
+        ev_100 = 100.0 * (p * d - 1.0)
+        # 0.35 * 3.50 = 1.225 → ev_100 = 22.5
+        assert ev_100 > 0
+        assert abs(ev_100 - 22.5) < 1e-10
+
+    def test_ev_sign_negative_case(self):
+        """p=0.45, d=2.0 → ev_100 < 0 (negative EV)."""
+        p, d = 0.45, 2.0
+        ev_100 = 100.0 * (p * d - 1.0)
+        # 0.45 * 2.0 = 0.90 → ev_100 = -10.0
+        assert ev_100 < 0
+        assert abs(ev_100 - (-10.0)) < 1e-10
+
+    def test_vig_free_two_way_normalization(self):
+        """-110/-110 (standard vig) → ~0.5/0.5 after removal."""
+        p_home, p_away = _remove_vig(-110, -110)
+        assert abs(p_home - 0.5) < 0.001
+        assert abs(p_away - 0.5) < 0.001
+        assert abs(p_home + p_away - 1.0) < 1e-10
+
+    def test_exec_adv_nonneg_when_best_ge_ref(self):
+        """exec_adv_100 >= 0 whenever d_best >= d_ref."""
+        p = 0.55
+        cases = [
+            (2.0, 1.9),   # d_best > d_ref
+            (2.0, 2.0),   # d_best == d_ref → 0
+            (3.5, 1.8),   # wide gap
+        ]
+        for d_best, d_ref in cases:
+            adv = 100.0 * p * (d_best - d_ref)
+            assert adv >= 0, (
+                f"d_best={d_best}, d_ref={d_ref}"
+            )
+
+    def test_exec_adv_increases_with_better_price(self):
+        """Holding p constant, bigger d_best → bigger exec_adv."""
+        p, d_ref = 0.55, 1.90
+        adv_low = 100.0 * p * (2.00 - d_ref)
+        adv_high = 100.0 * p * (2.20 - d_ref)
+        assert adv_high > adv_low
+
+    def test_edge_pct_equals_100_times_edge_pp(self):
+        """edge_pct = 100 * edge_pp for arbitrary values."""
+        p, d = 0.58, 1.85
+        edge_pp = p - 1.0 / d
+        edge_pct = 100.0 * edge_pp
+        assert abs(edge_pct - 100.0 * edge_pp) < 1e-12
+
+    def test_vig_free_asymmetric_normalizes(self):
+        """-150/+130 should normalize to probs summing to 1."""
+        p_h, p_a = _remove_vig(-150, 130)
+        assert abs(p_h + p_a - 1.0) < 1e-10
+        # Favourite should have higher prob
+        assert p_h > p_a

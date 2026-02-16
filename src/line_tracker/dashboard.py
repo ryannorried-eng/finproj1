@@ -58,6 +58,9 @@ from line_tracker.slate import (
 )
 from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 
+# Toggle to show EV Math Debug expander on slate / shopping pages.
+SHOW_EV_DEBUG = False
+
 SPORTS = {
     "NFL": "americanfootball_nfl",
     "NBA": "basketball_nba",
@@ -1824,6 +1827,8 @@ def _page_best_lines():
 
     st.markdown(f"**{len(standouts)} standout{'s' if len(standouts) != 1 else ''}**")
 
+    _render_ev_debug_shopping(standouts)
+
     slip_book = _get_slip_book()
 
     # Build event → commence_time map from fetched lines
@@ -2237,6 +2242,9 @@ def _page_daily_slate():
                     f"**books:** {_p(vt.get('books_used', {}))}"
                 )
 
+    # EV Math Debug — top 3 from the combined candidate list
+    _render_ev_debug_panel(top_plays + more_plays)
+
     st.divider()
 
     # ── Top Plays (Tier 1A, or 1A+1B in Standard mode) ───────────────
@@ -2345,6 +2353,73 @@ def _slate_market_label(entry: dict) -> str:
     if market == "total" and line is not None:
         return f"Total ({line:.1f})"
     return market.title()
+
+
+def _render_ev_debug_panel(entries: list[dict]) -> None:
+    """Show EV math breakdown for the top 3 entries.
+
+    Guarded by ``SHOW_EV_DEBUG``.  Does not affect ranking/filtering.
+    """
+    if not SHOW_EV_DEBUG or not entries:
+        return
+    top3 = entries[:3]
+    with st.expander("EV Math Debug (top 3)", expanded=False):
+        for i, e in enumerate(top3, 1):
+            odds = e.get("best_odds", 0)
+            d_best = _slip_a2d(odds) if odds else 0.0
+            p = e.get("consensus_prob", 0.0)
+            p_be = e.get("p_be", 0.0)
+            edge_pp = e.get("edge_pp", 0.0)
+            edge_pct_pp = e.get("edge_pct_pp", 0.0)
+            ev_100 = e.get("ev_100", 0.0)
+            books = e.get("books_used", 0)
+            st.markdown(
+                f"**#{i} {e.get('selection', '?')}** "
+                f"({e.get('market', '?')}) "
+                f"@ {e.get('best_sportsbook', '?')}"
+            )
+            st.text(
+                f"  p = {p:.4f}   books = {books}\n"
+                f"  d_best = {d_best:.4f}\n"
+                f"  p_be = {p_be:.4f}\n"
+                f"  edge_pp = {edge_pp:.4f}\n"
+                f"  edge_pct = {edge_pct_pp:.2f}%\n"
+                f"  ev_100 = ${ev_100:.2f}\n"
+            )
+
+
+def _render_ev_debug_shopping(
+    standouts: list[dict],
+) -> None:
+    """Show EV debug for top 3 standouts on Best Lines page."""
+    if not SHOW_EV_DEBUG or not standouts:
+        return
+    top3 = standouts[:3]
+    with st.expander("EV Math Debug (top 3)", expanded=False):
+        for i, s in enumerate(top3, 1):
+            p = s.get("consensus_prob", 0.0)
+            d_best = s.get("d_best", 0.0)
+            d_ref = s.get("d_ref", 0.0)
+            p_be = 1.0 / d_best if d_best > 0 else 0.0
+            edge_pp = p - p_be
+            edge_pct = 100.0 * edge_pp
+            ev_100 = 100.0 * (p * d_best - 1.0)
+            exec_adv = s.get("exec_adv_100", 0.0)
+            st.markdown(
+                f"**#{i} {s.get('selection', '?')}** "
+                f"({s.get('market', '?')}) "
+                f"@ {s.get('sportsbook', '?')}"
+            )
+            st.text(
+                f"  p = {p:.4f}\n"
+                f"  d_best = {d_best:.4f}   "
+                f"d_ref = {d_ref:.4f}\n"
+                f"  p_be = {p_be:.4f}\n"
+                f"  edge_pp = {edge_pp:.4f}\n"
+                f"  edge_pct = {edge_pct:.2f}%\n"
+                f"  ev_100 = ${ev_100:.2f}\n"
+                f"  exec_adv_100 = ${exec_adv:.2f}\n"
+            )
 
 
 def _render_slate_date_groups(entries: list[dict], *, show_cards: bool) -> None:
