@@ -385,6 +385,10 @@ class BetRecommendation:
     kelly_base: float = 0.0  # raw Kelly fraction (capped at 25%)
     kelly_suggested: float = 0.0  # Kelly × confidence multiplier
     sizing_note: str = ""  # human-readable sizing label
+    # Exclusion-consensus debug fields
+    p_incl: float = 0.0  # consensus prob including evaluated book
+    books_used_excl: int = 0  # books in the exclusion consensus
+    consensus_method: str = ""  # "median" or "trimmed_mean"
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +474,38 @@ def _remove_vig(odds_a: float, odds_b: float) -> tuple[float, float]:
     if total == 0:
         return 0.5, 0.5
     return pa / total, pb / total
+
+
+def consensus_prob_excluding_book(
+    probs_by_book: list[tuple[str, float]],
+    exclude_book: str,
+) -> tuple[float, int, str]:
+    """Compute consensus probability excluding a specific sportsbook.
+
+    Parameters
+    ----------
+    probs_by_book : list of (sportsbook_name, vig_free_prob)
+        All available book probabilities for one side of a market.
+    exclude_book : str
+        The sportsbook to exclude from the consensus.
+
+    Returns
+    -------
+    (p_excl, books_used_excl, method)
+        p_excl : consensus probability without *exclude_book*
+        books_used_excl : number of books used in the consensus
+        method : "trimmed_mean" or "median"
+    """
+    filtered = [p for (book, p) in probs_by_book if book != exclude_book]
+    if not filtered:
+        # Fallback: only one book → use its own prob
+        all_probs = [p for (_, p) in probs_by_book]
+        return (median(all_probs) if all_probs else 0.5), len(all_probs), "median"
+
+    n = len(filtered)
+    if n >= 6:
+        return _trimmed_mean(filtered), n, "trimmed_mean"
+    return median(filtered), n, "median"
 
 
 def _compute_ev(consensus_prob: float, american_odds: float) -> float:
@@ -684,6 +720,9 @@ def _build_rec(
     outlier_filtered: bool = False,
     market_unstable: bool = False,
     book_holds: dict[str, float] | None = None,
+    p_incl: float = 0.0,
+    books_used_excl: int = 0,
+    consensus_method: str = "",
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs.
 
@@ -822,6 +861,9 @@ def _build_rec(
         kelly_base=round(k_base, 6),
         kelly_suggested=round(k_sugg, 6),
         sizing_note=s_note,
+        p_incl=round(p_incl, 4),
+        books_used_excl=books_used_excl,
+        consensus_method=consensus_method,
     )
 
 
@@ -899,9 +941,9 @@ def _moneyline_recommendations(
     f_home = [home_no_vig[i] for i in keep_idx]
     f_away = [away_no_vig[i] for i in keep_idx]
 
-    # Consensus: trimmed mean (>=5 books) or median (<5)
-    consensus_home = _consensus_prob(f_home)
-    consensus_away = _consensus_prob(f_away)
+    # Inclusive consensus: trimmed mean (>=5 books) or median (<5)
+    consensus_home_incl = _consensus_prob(f_home)
+    consensus_away_incl = _consensus_prob(f_away)
 
     best_home_line = max(lines, key=lambda ln: ln.home_value)
     best_away_line = max(lines, key=lambda ln: ln.away_value)
@@ -916,6 +958,22 @@ def _moneyline_recommendations(
     ]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
+
+    # Per-book vig-free probs (filtered set) for exclusion consensus
+    home_probs_by_book = [
+        (f_lines[i].sportsbook, f_home[i]) for i in range(len(f_lines))
+    ]
+    away_probs_by_book = [
+        (f_lines[i].sportsbook, f_away[i]) for i in range(len(f_lines))
+    ]
+
+    # Consensus excluding the evaluated sportsbook
+    home_excl, home_n_excl, home_method = consensus_prob_excluding_book(
+        home_probs_by_book, best_home_line.sportsbook,
+    )
+    away_excl, away_n_excl, away_method = consensus_prob_excluding_book(
+        away_probs_by_book, best_away_line.sportsbook,
+    )
 
     # Implied hold% per sportsbook (all books, pre-filter)
     book_holds: dict[str, float] = {}
@@ -941,7 +999,7 @@ def _moneyline_recommendations(
             selection=home_team,
             side="home",
             line=None,
-            consensus_prob=consensus_home,
+            consensus_prob=home_excl,
             unweighted_consensus_prob=unweighted_home,
             best_sportsbook=best_home_line.sportsbook,
             best_odds=best_home_line.home_value,
@@ -954,6 +1012,9 @@ def _moneyline_recommendations(
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
             book_holds=book_holds,
+            p_incl=consensus_home_incl,
+            books_used_excl=home_n_excl,
+            consensus_method=home_method,
         )
     )
 
@@ -963,7 +1024,7 @@ def _moneyline_recommendations(
             selection=away_team,
             side="away",
             line=None,
-            consensus_prob=consensus_away,
+            consensus_prob=away_excl,
             unweighted_consensus_prob=unweighted_away,
             best_sportsbook=best_away_line.sportsbook,
             best_odds=best_away_line.away_value,
@@ -976,6 +1037,9 @@ def _moneyline_recommendations(
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
             book_holds=book_holds,
+            p_incl=consensus_away_incl,
+            books_used_excl=away_n_excl,
+            consensus_method=away_method,
         )
     )
 
@@ -1034,8 +1098,8 @@ def _spread_recommendations(
 
     books_used = len(keep_idx)
 
-    consensus_home = _consensus_prob(f_home)
-    consensus_away = _consensus_prob(f_away)
+    consensus_home_incl = _consensus_prob(f_home)
+    consensus_away_incl = _consensus_prob(f_away)
 
     best_home = max(f_matching, key=lambda ln: ln.home_price)
     best_away = max(f_matching, key=lambda ln: ln.away_price)
@@ -1049,6 +1113,20 @@ def _spread_recommendations(
     ]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
+
+    # Per-book vig-free probs for exclusion consensus
+    home_probs_by_book = [
+        (f_matching[i].sportsbook, f_home[i]) for i in range(len(f_matching))
+    ]
+    away_probs_by_book = [
+        (f_matching[i].sportsbook, f_away[i]) for i in range(len(f_matching))
+    ]
+    home_excl, home_n_excl, home_method = consensus_prob_excluding_book(
+        home_probs_by_book, best_home.sportsbook,
+    )
+    away_excl, away_n_excl, away_method = consensus_prob_excluding_book(
+        away_probs_by_book, best_away.sportsbook,
+    )
 
     # Implied hold% per sportsbook (matching lines, pre-filter)
     book_holds: dict[str, float] = {}
@@ -1070,7 +1148,7 @@ def _spread_recommendations(
             selection=home_team,
             side="home",
             line=chosen_spread,
-            consensus_prob=consensus_home,
+            consensus_prob=home_excl,
             unweighted_consensus_prob=unweighted_home,
             best_sportsbook=best_home.sportsbook,
             best_odds=best_home.home_price,
@@ -1083,6 +1161,9 @@ def _spread_recommendations(
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
             book_holds=book_holds,
+            p_incl=consensus_home_incl,
+            books_used_excl=home_n_excl,
+            consensus_method=home_method,
         )
     )
 
@@ -1093,7 +1174,7 @@ def _spread_recommendations(
             selection=away_team,
             side="away",
             line=away_spread,
-            consensus_prob=consensus_away,
+            consensus_prob=away_excl,
             unweighted_consensus_prob=unweighted_away,
             best_sportsbook=best_away.sportsbook,
             best_odds=best_away.away_price,
@@ -1106,6 +1187,9 @@ def _spread_recommendations(
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
             book_holds=book_holds,
+            p_incl=consensus_away_incl,
+            books_used_excl=away_n_excl,
+            consensus_method=away_method,
         )
     )
 
@@ -1163,8 +1247,8 @@ def _total_recommendations(
 
     books_used = len(keep_idx)
 
-    consensus_over = _consensus_prob(f_over)
-    consensus_under = _consensus_prob(f_under)
+    consensus_over_incl = _consensus_prob(f_over)
+    consensus_under_incl = _consensus_prob(f_under)
 
     best_over = max(f_matching, key=lambda ln: ln.home_price)
     best_under = max(f_matching, key=lambda ln: ln.away_price)
@@ -1175,6 +1259,20 @@ def _total_recommendations(
     ]
     newest_age = max(0.0, min(ages))
     oldest_age = max(0.0, max(ages))
+
+    # Per-book vig-free probs for exclusion consensus
+    over_probs_by_book = [
+        (f_matching[i].sportsbook, f_over[i]) for i in range(len(f_matching))
+    ]
+    under_probs_by_book = [
+        (f_matching[i].sportsbook, f_under[i]) for i in range(len(f_matching))
+    ]
+    over_excl, over_n_excl, over_method = consensus_prob_excluding_book(
+        over_probs_by_book, best_over.sportsbook,
+    )
+    under_excl, under_n_excl, under_method = consensus_prob_excluding_book(
+        under_probs_by_book, best_under.sportsbook,
+    )
 
     # Implied hold% per sportsbook (matching lines, pre-filter)
     book_holds: dict[str, float] = {}
@@ -1196,7 +1294,7 @@ def _total_recommendations(
             selection="Over",
             side="over",
             line=chosen_total,
-            consensus_prob=consensus_over,
+            consensus_prob=over_excl,
             unweighted_consensus_prob=unweighted_over,
             best_sportsbook=best_over.sportsbook,
             best_odds=best_over.home_price,
@@ -1209,6 +1307,9 @@ def _total_recommendations(
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
             book_holds=book_holds,
+            p_incl=consensus_over_incl,
+            books_used_excl=over_n_excl,
+            consensus_method=over_method,
         )
     )
 
@@ -1218,7 +1319,7 @@ def _total_recommendations(
             selection="Under",
             side="under",
             line=chosen_total,
-            consensus_prob=consensus_under,
+            consensus_prob=under_excl,
             unweighted_consensus_prob=unweighted_under,
             best_sportsbook=best_under.sportsbook,
             best_odds=best_under.away_price,
@@ -1231,6 +1332,9 @@ def _total_recommendations(
             outlier_filtered=outlier_filtered,
             market_unstable=market_unstable,
             book_holds=book_holds,
+            p_incl=consensus_under_incl,
+            books_used_excl=under_n_excl,
+            consensus_method=under_method,
         )
     )
 

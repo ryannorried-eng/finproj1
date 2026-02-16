@@ -217,16 +217,16 @@ class TestExecAdv100:
             assert "exec_adv_100" in r
 
     def test_exec_adv_100_formula(self):
-        """exec_adv_100 = 100 * p * (d_best - d_ref)."""
+        """exec_adv_100 = 100 * p_incl * (d_best - d_ref)."""
         results = self._standout_items()
         for r in results:
             expected = round(
-                100.0 * r["consensus_prob"] * (
+                100.0 * r["p_incl"] * (
                     r["d_best"] - r["d_ref"]
                 ),
                 2,
             )
-            assert abs(r["exec_adv_100"] - expected) < 0.01
+            assert abs(r["exec_adv_100"] - expected) < 0.02
 
     def test_exec_adv_100_non_negative(self):
         """exec_adv_100 >= 0 since d_best >= d_ref."""

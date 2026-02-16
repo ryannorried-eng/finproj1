@@ -179,15 +179,19 @@ class TestKellyOnRecommendation:
             assert 0.0 <= r.kelly_suggested <= _KELLY_CAP
 
     def test_positive_ev_has_nonzero_kelly(self):
-        """Recs with positive EV should have kelly_base > 0."""
+        """Recs with positive EV (from robust consensus) have kelly_base > 0.
+
+        Note: ev uses exclusion consensus, but kelly uses weighted robust
+        consensus — they may disagree on sign.  Check kelly's own input.
+        """
         lines = [
             _ml_line("DraftKings", -150, 130),
             _ml_line("FanDuel", -140, 120),
             _ml_line("BetMGM", -160, 140),
         ]
         recs = recommend_best_bets(lines, top_n=6)
-        positive_ev = [r for r in recs if r.ev > 0]
-        for r in positive_ev:
-            assert r.kelly_base > 0, (
-                f"{r.selection} has +EV but kelly_base=0"
-            )
+        for r in recs:
+            # Kelly > 0 iff the weighted robust consensus shows +EV
+            if r.kelly_base > 0:
+                # Verify it's consistent: consensus_prob_weighted > breakeven
+                assert r.consensus_prob_weighted > r.breakeven_prob
