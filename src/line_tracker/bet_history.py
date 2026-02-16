@@ -162,8 +162,19 @@ def settle_bet(
 
 
 def _attach_clv(bet: Bet, store) -> None:
-    """Compute and attach CLV data to a settled bet."""
-    from line_tracker.best_bets import LegCLV, enrich_bet_with_clv
+    """Compute and attach CLV data to a settled bet.
+
+    Also persists CLV analytics rows to the ``bet_clv`` table for the
+    Performance page.
+    """
+    from line_tracker.best_bets import (
+        CLV_TOLERANCE,
+        LegCLV,
+        _bet_type_from_market,
+        _compute_pick_analytics,
+        enrich_bet_with_clv,
+    )
+    from line_tracker.bet_slip import american_to_decimal
 
     ct = None
     if bet.commence_time:
@@ -184,6 +195,73 @@ def _attach_clv(bet: Bet, store) -> None:
         }
         for lc in leg_clvs
     ]
+
+    # Persist analytics rows for Performance page
+    clv_rows: list[dict] = []
+    for i, (leg, lc) in enumerate(zip(bet.legs, leg_clvs)):
+        bt = _bet_type_from_market(leg.get("market", ""))
+        pick_odds = leg.get("odds")
+
+        # Compute pick-time analytics
+        analytics: dict = {}
+        if bt is not None and pick_odds is not None:
+            analytics = _compute_pick_analytics(leg, store, bt, pick_odds)
+
+        # beat_close flags (1=beat, 0=lost/matched, None=no close)
+        def _beat_flag(clv_val):
+            if clv_val is None:
+                return None
+            return 1 if clv_val > CLV_TOLERANCE else 0
+
+        exec_dec = (
+            american_to_decimal(lc.book_close_odds)
+            if lc.book_close_odds is not None
+            else None
+        )
+        mkt_dec = (
+            american_to_decimal(lc.best_close_odds)
+            if lc.best_close_odds is not None
+            else None
+        )
+
+        row = {
+            "bet_id": bet.id,
+            "leg_index": i,
+            "sport": leg.get("sport"),
+            "market": leg.get("market"),
+            "pick_sportsbook": leg.get("sportsbook", bet.sportsbook),
+            "event_name": leg.get("event_name"),
+            "selection": leg.get("selection"),
+            "pick_line": leg.get("line"),
+            "pick_odds": pick_odds,
+            "pick_timestamp": leg.get("fetched_at"),
+            "commence_time": bet.commence_time,
+            "edge_pct": analytics.get("edge_pct"),
+            "edge_z": analytics.get("edge_z"),
+            "books_used": analytics.get("books_used"),
+            "market_hold_median": analytics.get("market_hold_median"),
+            "market_volatility_sigma": analytics.get(
+                "market_volatility_sigma",
+            ),
+            "confidence": analytics.get("confidence", "Low"),
+            "quality_tier": analytics.get("quality_tier", "Tier3"),
+            "close_timestamp": None,
+            "close_estimated": lc.close_estimated,
+            "exec_close_odds": lc.book_close_odds,
+            "market_close_odds": lc.best_close_odds,
+            "exec_close_decimal": exec_dec,
+            "market_close_decimal": mkt_dec,
+            "exec_clv_prob": lc.clv_price_prob_book,
+            "market_clv_prob": lc.clv_price_prob_best,
+            "beat_close_exec": _beat_flag(lc.clv_price_prob_book),
+            "beat_close_market": _beat_flag(lc.clv_price_prob_best),
+            "settled_at": bet.settled_at,
+            "outcome": bet.status,
+        }
+        clv_rows.append(row)
+
+    if clv_rows:
+        store.save_clv_rows(clv_rows)
 
 
 def delete_bet(state: dict, bet_id: str) -> Bet:

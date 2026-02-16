@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from statistics import median as _median
+from statistics import stdev as _stdev
 
 from line_tracker.bet_slip import american_to_decimal, implied_prob_from_american
 from line_tracker.models import BetType
@@ -210,3 +212,162 @@ def enrich_bet_with_clv(
         results.append(lclv)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Pick-time analytics helpers
+# ---------------------------------------------------------------------------
+
+def _compute_pick_analytics(
+    leg: dict,
+    store: LineStore,
+    bet_type: BetType,
+    pick_odds: float,
+) -> dict:
+    """Compute pick-time edge/hold/volatility analytics for a leg.
+
+    Uses stored lines close to the pick timestamp to compute how this
+    pick compared to the broader market at the time of placement.
+    """
+    event_name = leg.get("event_name", "")
+    selection = leg.get("selection", "")
+
+    # Fetch all books' latest lines for the event + bet_type
+    all_lines = store.get_latest_for_event(event_name, bet_type)
+
+    # Extract relevant odds from each book
+    odds_list: list[float] = []
+    for ln in all_lines:
+        o = _extract_odds_for_selection(ln, bet_type, selection)
+        if o is not None:
+            odds_list.append(o)
+
+    books_used = len(odds_list)
+    if books_used < 2:
+        return {
+            "edge_pct": None,
+            "edge_z": None,
+            "books_used": books_used,
+            "market_hold_median": None,
+            "market_volatility_sigma": None,
+            "confidence": "Low",
+            "quality_tier": "Tier3",
+        }
+
+    # Edge: consensus_prob - pick_prob (positive = good)
+    probs = [implied_prob_from_american(o) for o in odds_list]
+    consensus = _median(probs)
+    pick_prob = implied_prob_from_american(pick_odds)
+    edge_pct = consensus - pick_prob
+
+    # Edge z-score
+    if len(probs) >= 3:
+        try:
+            sigma = _stdev(probs)
+            edge_z = edge_pct / sigma if sigma > 0 else 0.0
+        except Exception:
+            sigma = 0.0
+            edge_z = 0.0
+    else:
+        sigma = 0.0
+        edge_z = edge_pct / 0.01 if edge_pct else 0.0
+
+    # Market hold (overround): sum of implied probs for both sides
+    holds: list[float] = []
+    for ln in all_lines:
+        h, a = _extract_both_probs(ln, bet_type)
+        if h is not None and a is not None:
+            holds.append(h + a - 1.0)
+    hold_median = _median(holds) if holds else None
+
+    # Market volatility
+    volatility = sigma
+
+    # Confidence classification
+    confidence = _classify_confidence(edge_z, hold_median, books_used)
+    tier = _classify_tier(
+        edge_pct, edge_z, hold_median, books_used,
+    )
+
+    return {
+        "edge_pct": round(edge_pct, 6) if edge_pct is not None else None,
+        "edge_z": round(edge_z, 4) if edge_z is not None else None,
+        "books_used": books_used,
+        "market_hold_median": (
+            round(hold_median, 6) if hold_median is not None else None
+        ),
+        "market_volatility_sigma": round(volatility, 6),
+        "confidence": confidence,
+        "quality_tier": tier,
+    }
+
+
+def _extract_odds_for_selection(
+    line, bet_type: BetType, selection: str,
+) -> float | None:
+    """Extract American odds for a specific selection from a line."""
+    if bet_type == BetType.MONEYLINE:
+        if selection == "Home":
+            return line.home_value
+        if selection == "Away":
+            return line.away_value
+    elif bet_type == BetType.SPREAD:
+        if selection == "Home":
+            return line.home_price
+        if selection == "Away":
+            return line.away_price
+    elif bet_type == BetType.TOTAL:
+        if selection == "Over":
+            return line.home_price
+        if selection == "Under":
+            return line.away_price
+    return None
+
+
+def _extract_both_probs(
+    line, bet_type: BetType,
+) -> tuple[float | None, float | None]:
+    """Extract implied probs for both sides of a line."""
+    if bet_type == BetType.MONEYLINE:
+        h = implied_prob_from_american(line.home_value)
+        a = implied_prob_from_american(line.away_value)
+        return h, a
+    elif bet_type in (BetType.SPREAD, BetType.TOTAL):
+        if line.home_price is not None and line.away_price is not None:
+            h = implied_prob_from_american(line.home_price)
+            a = implied_prob_from_american(line.away_price)
+            return h, a
+    return None, None
+
+
+def _classify_confidence(
+    edge_z: float,
+    hold_median: float | None,
+    books_used: int,
+) -> str:
+    """Classify confidence as High/Medium/Low."""
+    if edge_z >= 2.0 and books_used >= 4:
+        if hold_median is not None and hold_median < 0.05:
+            return "High"
+        return "Medium"
+    if edge_z >= 1.0:
+        return "Medium"
+    return "Low"
+
+
+def _classify_tier(
+    edge_pct: float | None,
+    edge_z: float,
+    hold_median: float | None,
+    books_used: int,
+) -> str:
+    """Classify quality tier: Tier1/Tier2/Tier3/StayAway."""
+    if edge_pct is not None and edge_pct < 0:
+        return "StayAway"
+    hold_ok = hold_median is not None and hold_median < 0.05
+    if edge_z >= 1.5 and hold_ok and books_used >= 4:
+        return "Tier1"
+    hold_ok2 = hold_median is not None and hold_median < 0.08
+    if edge_z >= 0.75 and (hold_ok2 or hold_median is None):
+        return "Tier2"
+    return "Tier3"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -326,7 +326,7 @@ def _sidebar():
         # --- Page navigation ---
         st.radio(
             "Page",
-            ["Dashboard", "Best Lines to Shop"],
+            ["Dashboard", "Best Lines to Shop", "Performance"],
             key="nav_page",
             horizontal=True,
         )
@@ -1666,6 +1666,284 @@ def _bet_history_dialog():
 
 
 # ---------------------------------------------------------------------------
+# PAGE 4: Performance (CLV analytics)
+# ---------------------------------------------------------------------------
+
+def _page_performance():
+    """CLV-driven performance analytics page."""
+    from line_tracker.performance import (
+        compute_breakdown_tables,
+        compute_kpis,
+        load_clv_df,
+    )
+
+    st.title("Performance")
+    st.caption(
+        "Analyse your Closing Line Value across settled bets. "
+        "Positive CLV means you consistently beat the closing line."
+    )
+
+    # --- Filters row ---
+    fc1, fc2, fc3 = st.columns(3)
+    with fc1:
+        date_range = st.selectbox(
+            "Date range",
+            ["Last 7 days", "Last 30 days", "Last 90 days", "All time"],
+            index=1,
+            key="perf_date_range",
+        )
+    with fc2:
+        sport_filter = st.selectbox(
+            "Sport",
+            ["All"] + list(SPORTS.keys()),
+            key="perf_sport",
+        )
+    with fc3:
+        market_filter = st.selectbox(
+            "Market",
+            ["All", "ML", "Spread", "Total"],
+            key="perf_market",
+        )
+
+    fc4, fc5, fc6, fc7 = st.columns(4)
+    with fc4:
+        conf_filter = st.selectbox(
+            "Confidence",
+            ["All", "High", "Medium", "Low"],
+            key="perf_conf",
+        )
+    with fc5:
+        tier_filter = st.selectbox(
+            "Tier",
+            ["All", "Tier1", "Tier2", "Tier3", "StayAway"],
+            key="perf_tier",
+        )
+    with fc6:
+        book_filter = st.text_input(
+            "Sportsbook",
+            value="",
+            key="perf_book",
+            placeholder="All",
+        )
+    with fc7:
+        include_est = st.checkbox(
+            "Include estimated closes",
+            value=False,
+            key="perf_inc_est",
+        )
+
+    # Build date bounds
+    start_iso = None
+    _day_map = {
+        "Last 7 days": 7,
+        "Last 30 days": 30,
+        "Last 90 days": 90,
+    }
+    days = _day_map.get(date_range)
+    if days:
+        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        start_iso = start_dt.isoformat()
+
+    # Load data
+    with LineStore(DB_PATH) as store:
+        df = load_clv_df(
+            store,
+            start=start_iso,
+            sport=(
+                sport_filter if sport_filter != "All" else None
+            ),
+            market=(
+                market_filter if market_filter != "All" else None
+            ),
+            book=book_filter or None,
+            confidence=(
+                conf_filter if conf_filter != "All" else None
+            ),
+            tier=tier_filter if tier_filter != "All" else None,
+            include_estimated=include_est,
+        )
+
+    if df.empty:
+        st.info(
+            "No closed legs yet. Place and settle bets to populate "
+            "CLV data."
+        )
+        if not include_est:
+            st.caption(
+                "Tip: Toggle 'Include estimated closes' if you "
+                "have settled bets without pre-game snapshots."
+            )
+        return
+
+    # --- KPI cards ---
+    kpis = compute_kpis(df)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(
+        "% Beat Close (Exec)",
+        (
+            fmt_pct(kpis["pct_beat_close_exec"])
+            if kpis["pct_beat_close_exec"] is not None
+            else "\u2014"
+        ),
+    )
+    k2.metric(
+        "Avg CLV (Exec)",
+        (
+            f"{kpis['avg_clv_prob_pts_exec']:+.2f} pp"
+            if kpis["avg_clv_prob_pts_exec"] is not None
+            else "\u2014"
+        ),
+    )
+    k3.metric(
+        "Median CLV (Exec)",
+        (
+            f"{kpis['median_clv_prob_pts_exec']:+.2f} pp"
+            if kpis["median_clv_prob_pts_exec"] is not None
+            else "\u2014"
+        ),
+    )
+    k4.metric("Sample Size", kpis["sample_size"])
+
+    # Secondary market CLV line
+    if kpis["avg_clv_prob_pts_market"] is not None:
+        st.caption(
+            f"Market CLV: avg {kpis['avg_clv_prob_pts_market']:+.2f}"
+            f" pp, median "
+            f"{kpis['median_clv_prob_pts_market']:+.2f} pp, "
+            f"beat {kpis['pct_beat_close_market']:.1f}%"
+        )
+
+    st.divider()
+
+    # --- Tabs ---
+    tab_bd, tab_tr, tab_cal = st.tabs([
+        "Breakdowns", "Trends", "Calibration",
+    ])
+
+    breakdowns = compute_breakdown_tables(df)
+
+    with tab_bd:
+        _render_breakdowns(breakdowns)
+
+    with tab_tr:
+        _render_trends(df)
+
+    with tab_cal:
+        _render_calibration(
+            df,
+            breakdowns.get("by_tier", pd.DataFrame()),
+            breakdowns.get("by_confidence", pd.DataFrame()),
+        )
+
+
+def _render_breakdowns(
+    breakdowns: dict[str, pd.DataFrame],
+) -> None:
+    """Render breakdown tables in the Breakdowns tab."""
+    labels = {
+        "by_tier": "By Quality Tier",
+        "by_confidence": "By Confidence",
+        "by_market": "By Market",
+        "by_sport": "By Sport",
+        "by_book": "By Sportsbook",
+    }
+    for key, label in labels.items():
+        tbl = breakdowns.get(key, pd.DataFrame())
+        with st.expander(label, expanded=(key == "by_tier")):
+            if tbl.empty:
+                st.caption("No data for this grouping.")
+            else:
+                st.dataframe(
+                    tbl, use_container_width=True,
+                )
+
+
+def _render_trends(df: pd.DataFrame) -> None:
+    """Render trend charts in the Trends tab."""
+    import matplotlib.pyplot as plt
+
+    from line_tracker.performance import compute_trends
+
+    trends = compute_trends(df)
+
+    if trends["reason"]:
+        st.info(trends["reason"])
+        return
+
+    daily = trends["daily"]
+    rolling7 = trends["rolling_7"]
+
+    # Chart 1: Beat Close %
+    fig1, ax1 = plt.subplots(figsize=(8, 3))
+    ax1.plot(
+        daily.index, daily["pct_beat_close_exec"],
+        marker=".", linewidth=0.8, label="Daily",
+    )
+    if len(rolling7) >= 3:
+        ax1.plot(
+            rolling7.index,
+            rolling7["pct_beat_close_exec"],
+            linewidth=2, label="7-day avg",
+        )
+    ax1.axhline(50, linestyle="--", linewidth=0.5)
+    ax1.set_ylabel("Beat Close %")
+    ax1.set_title("Execution Beat-Close Rate")
+    ax1.legend(fontsize="small")
+    fig1.tight_layout()
+    st.pyplot(fig1)
+    plt.close(fig1)
+
+    # Chart 2: Avg CLV prob pts
+    fig2, ax2 = plt.subplots(figsize=(8, 3))
+    ax2.bar(
+        daily.index, daily["avg_clv_prob_pts_exec"],
+        width=0.8, label="Daily",
+    )
+    if len(rolling7) >= 3:
+        ax2.plot(
+            rolling7.index,
+            rolling7["avg_clv_prob_pts_exec"],
+            linewidth=2, label="7-day avg",
+        )
+    ax2.axhline(0, linewidth=0.5)
+    ax2.set_ylabel("Avg CLV (prob pts)")
+    ax2.set_title("Execution CLV Trend")
+    ax2.legend(fontsize="small")
+    fig2.tight_layout()
+    st.pyplot(fig2)
+    plt.close(fig2)
+
+
+def _render_calibration(
+    df: pd.DataFrame,
+    by_tier: pd.DataFrame,
+    by_conf: pd.DataFrame,
+) -> None:
+    """Render calibration suggestions and tier comparison table."""
+    from line_tracker.performance import calibration_suggestions
+
+    msgs = calibration_suggestions(df, by_tier, by_conf)
+
+    st.markdown("**Calibration Suggestions**")
+    for msg in msgs:
+        st.markdown(f"- {msg}")
+
+    # Comparison table: Tier1 vs Tier2 vs StayAway
+    if not by_tier.empty:
+        tiers_of_interest = ["Tier1", "Tier2", "StayAway"]
+        available = [
+            t for t in tiers_of_interest if t in by_tier.index
+        ]
+        if available:
+            st.divider()
+            st.markdown("**Tier Comparison**")
+            st.dataframe(
+                by_tier.loc[available],
+                use_container_width=True,
+            )
+
+
+# ---------------------------------------------------------------------------
 # CLV display helper
 # ---------------------------------------------------------------------------
 
@@ -1783,6 +2061,8 @@ def main():
         nav = st.session_state.get("nav_page", "Dashboard")
         if nav == "Best Lines to Shop":
             _page_best_lines()
+        elif nav == "Performance":
+            _page_performance()
         else:
             _page_dashboard()
 
