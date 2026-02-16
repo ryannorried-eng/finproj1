@@ -12,9 +12,17 @@ from line_tracker.slate import (
     _TIER1A_HOLD_MAX,
     _TIER1B_BOOKS_MIN,
     _TIER1B_HOLD_MAX,
+    PRO_THRESHOLDS,
+    STANDARD_THRESHOLDS,
+    TierThresholds,
+    _percentiles,
     build_daily_slate,
     classify_rec,
+    compute_volume_tuning_stats,
     dyn_floor_1a,
+    get_thresholds,
+    print_slate_summary,
+    suggest_thresholds,
 )
 
 # ---------------------------------------------------------------------------
@@ -126,9 +134,15 @@ class TestTier1BGating:
         result = classify_rec(_entry(confidence="Low"))
         assert result["tier"] not in ("tier1a", "tier1b")
 
-    def test_tier1b_rejects_thin_quality(self):
-        """Thin quality fails Tier 1B."""
+    def test_tier1b_thin_quality_override(self):
+        """Thin quality passes 1B when override conditions are met."""
+        # Default: edge=4.0, hold=4.0, books=7 → all override gates met
         result = classify_rec(_entry(quality_tier="Thin"))
+        assert result["tier"] == "tier1b"
+
+    def test_tier1b_rejects_thin_quality_few_books(self):
+        """Thin quality fails 1B override when books < 6."""
+        result = classify_rec(_entry(quality_tier="Thin", books_used=5))
         assert result["tier"] not in ("tier1a", "tier1b")
 
     def test_tier1b_hold_at_threshold(self):
@@ -387,3 +401,370 @@ class TestCalibrationStats:
         ])
         cal = calibration_stats(df)
         assert cal["Stay Away"]["legs"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TierThresholds parameter pack
+# ---------------------------------------------------------------------------
+
+
+class TestTierThresholds:
+    def test_standard_defaults(self):
+        """STANDARD_THRESHOLDS has expected default values."""
+        th = STANDARD_THRESHOLDS
+        assert th.mode == "Standard"
+        assert th.tier1b_base_edge == 0.75
+        assert th.tier1b_sigma_mult == 0.9
+        assert th.tier1b_floor_min == 1.75
+        assert th.tier2_edge_min == 0.0
+        assert th.tier2_edge_z_min == 0.0
+
+    def test_pro_thresholds(self):
+        """PRO_THRESHOLDS has stricter values."""
+        th = PRO_THRESHOLDS
+        assert th.mode == "Pro"
+        assert th.tier1b_base_edge == 1.0
+        assert th.tier1b_floor_min == 2.0
+        assert th.tier2_edge_min == 1.0
+        assert th.tier2_edge_z_min == 1.0
+
+    def test_get_thresholds_standard(self):
+        assert get_thresholds("Standard") is STANDARD_THRESHOLDS
+
+    def test_get_thresholds_pro(self):
+        assert get_thresholds("Pro") is PRO_THRESHOLDS
+
+    def test_frozen(self):
+        """TierThresholds is immutable."""
+        import dataclasses
+        assert dataclasses.fields(TierThresholds)
+        try:
+            STANDARD_THRESHOLDS.mode = "Bad"  # type: ignore[misc]
+            raise AssertionError("Expected FrozenInstanceError")
+        except dataclasses.FrozenInstanceError:
+            pass
+
+    def test_classify_with_pro_thresholds(self):
+        """Pro thresholds disable Low-confidence override for Tier 1B."""
+        # Low conf + high edge_z → tier1b under Standard, but avoid under Pro
+        # (because edge=4.0 >= outlier threshold with Low conf → hard avoid)
+        e = _entry(
+            confidence="Low", edge_pct=3.5, edge_z=3.0,
+            books_used=7, market_hold_median=4.0,
+        )
+        std = classify_rec(e, thresholds=STANDARD_THRESHOLDS)
+        pro = classify_rec(e, thresholds=PRO_THRESHOLDS)
+        assert std["tier"] == "tier1b"
+        assert pro["tier"] == "tier3"  # Low conf, no override in Pro
+
+
+# ---------------------------------------------------------------------------
+# Low-confidence override for Tier 1B
+# ---------------------------------------------------------------------------
+
+
+class TestTier1BLowConfOverride:
+    def test_low_conf_with_high_edge_z_passes(self):
+        """Low conf + edge_z >= 2.0 + edge >= 2.5 → tier1b."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=2.5, edge_z=2.0,
+            quality_tier="Strong", books_used=5,
+        ))
+        assert result["tier"] == "tier1b"
+
+    def test_low_conf_insufficient_edge_z(self):
+        """Low conf + edge_z < 2.0 → fails 1B override → falls to tier2
+        (T2 low-conf override: edge_z=1.9 >= 1.5 and edge=3.0 >= 1.0)."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=3.0, edge_z=1.9,
+            quality_tier="Strong", books_used=5,
+        ))
+        assert result["tier"] != "tier1b"
+        assert result["tier"] == "tier2"
+
+    def test_low_conf_insufficient_edge_pct(self):
+        """Low conf + edge_pct < 2.5 → fails 1B override → falls to tier2
+        (T2 low-conf override: edge_z=3.0 >= 1.5 and edge=2.4 >= 1.0)."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=2.4, edge_z=3.0,
+            quality_tier="Strong", books_used=5,
+        ))
+        assert result["tier"] != "tier1b"
+        assert result["tier"] == "tier2"
+
+    def test_low_conf_edge_z_zero_means_unavailable(self):
+        """Low conf + edge_z=0 (unavailable) → no override → tier3."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=3.0, edge_z=0.0,
+            quality_tier="Strong", books_used=5,
+        ))
+        assert result["tier"] == "tier3"
+
+    def test_low_conf_override_at_boundary(self):
+        """Exactly at threshold values → passes."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=2.5, edge_z=2.0,
+            quality_tier="Moderate", books_used=5,
+        ))
+        assert result["tier"] == "tier1b"
+
+
+# ---------------------------------------------------------------------------
+# Thin-quality override for Tier 1B
+# ---------------------------------------------------------------------------
+
+
+class TestTier1BThinOverride:
+    def test_thin_quality_with_override_passes(self):
+        """Thin + edge>=3.0 + hold<=6.5 + books>=6 → tier1b."""
+        result = classify_rec(_entry(
+            quality_tier="Thin", edge_pct=3.0, market_hold_median=6.5,
+            books_used=6, confidence="High",
+        ))
+        assert result["tier"] == "tier1b"
+
+    def test_thin_quality_edge_too_low(self):
+        """Thin + edge<3.0 → fails override."""
+        result = classify_rec(_entry(
+            quality_tier="Thin", edge_pct=2.9, market_hold_median=4.0,
+            books_used=7, confidence="High",
+        ))
+        assert result["tier"] == "tier3"
+
+    def test_thin_quality_hold_too_high(self):
+        """Thin + hold>6.5 → fails override."""
+        result = classify_rec(_entry(
+            quality_tier="Thin", edge_pct=3.5, market_hold_median=6.6,
+            books_used=7, confidence="High",
+        ))
+        assert result["tier"] == "tier3"
+
+    def test_thin_quality_books_too_few(self):
+        """Thin + books<6 → fails override."""
+        result = classify_rec(_entry(
+            quality_tier="Thin", edge_pct=3.5, market_hold_median=4.0,
+            books_used=5, confidence="High",
+        ))
+        assert result["tier"] == "tier3"
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 Low-confidence override
+# ---------------------------------------------------------------------------
+
+
+class TestTier2LowConfOverride:
+    def test_low_conf_with_edge_z_override(self):
+        """Low conf + edge_z >= 1.5 + edge >= 1.0 → tier2."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=1.0, edge_z=1.5,
+            quality_tier="Strong", books_used=5,
+        ))
+        assert result["tier"] == "tier2"
+
+    def test_low_conf_insufficient_edge_z_for_tier2(self):
+        """Low conf + edge_z < 1.5 → no override → tier3."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=1.0, edge_z=1.4,
+            quality_tier="Strong", books_used=5,
+        ))
+        assert result["tier"] == "tier3"
+
+    def test_low_conf_insufficient_edge_for_tier2(self):
+        """Low conf + edge < 1.0 → no override → tier3."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=0.9, edge_z=2.0,
+            quality_tier="Strong", books_used=5,
+        ))
+        assert result["tier"] == "tier3"
+
+    def test_low_conf_tier2_at_boundary(self):
+        """Low conf at exact threshold boundaries → tier2."""
+        result = classify_rec(_entry(
+            confidence="Low", edge_pct=1.0, edge_z=1.5,
+            quality_tier="Moderate", books_used=4,
+        ))
+        assert result["tier"] == "tier2"
+
+
+# ---------------------------------------------------------------------------
+# Stay Away: only explicit hard conditions
+# ---------------------------------------------------------------------------
+
+
+class TestStayAwayExplicitOnly:
+    def test_stay_away_edge_zero(self):
+        """edge=0 → stay away."""
+        result = classify_rec(_entry(edge_pct=0.0))
+        assert result["tier"] == "avoid"
+
+    def test_stay_away_edge_negative(self):
+        """Negative edge → stay away."""
+        result = classify_rec(_entry(edge_pct=-1.0))
+        assert result["tier"] == "avoid"
+
+    def test_stay_away_books_too_few(self):
+        """books < 4 → stay away."""
+        result = classify_rec(_entry(books_used=3))
+        assert result["tier"] == "avoid"
+
+    def test_stay_away_hold_too_high(self):
+        """hold >= 8 → stay away."""
+        result = classify_rec(_entry(market_hold_median=8.0))
+        assert result["tier"] == "avoid"
+
+    def test_stay_away_unstable(self):
+        """market_unstable → stay away."""
+        result = classify_rec(_entry(market_unstable=True))
+        assert result["tier"] == "avoid"
+
+    def test_stay_away_stale(self):
+        """oldest_update_age_min > 120 → stay away."""
+        result = classify_rec(_entry(oldest_update_age_min=121.0))
+        assert result["tier"] == "avoid"
+
+    def test_stay_away_edge_outlier_low_conf(self):
+        """edge >= 4.0 + Low conf → stay away."""
+        result = classify_rec(_entry(edge_pct=4.0, confidence="Low"))
+        assert result["tier"] == "avoid"
+
+    def test_positive_edge_never_stay_away(self):
+        """Any positive-edge entry without hard flags is NOT stay away."""
+        # Low/Thin/low books - still NOT stay away if edge > 0 and books >= 4
+        result = classify_rec(_entry(
+            edge_pct=0.1, confidence="Low", quality_tier="Thin",
+            books_used=4, market_hold_median=7.9,
+        ))
+        assert result["tier"] != "avoid"
+
+
+# ---------------------------------------------------------------------------
+# suggest_thresholds
+# ---------------------------------------------------------------------------
+
+
+class TestSuggestThresholds:
+    def test_no_relaxation_when_tier1a_populated(self):
+        """suggest_thresholds returns base when tier1a has entries."""
+        stats = {"counts_by_tier": {"tier1a": 1, "tier1b": 3}}
+        result = suggest_thresholds(stats)
+        assert result is STANDARD_THRESHOLDS
+
+    def test_relaxes_when_tier1a_empty(self):
+        """suggest_thresholds relaxes all 4 Tier 1A params when empty."""
+        stats = {"counts_by_tier": {"tier1b": 3, "tier2": 5}}
+        result = suggest_thresholds(stats)
+        assert result.tier1a_books_min == 5  # 6 - 1
+        assert result.tier1a_hold_max == 6.5  # 6.0 + 0.5
+        assert result.tier1a_base_edge == 2.25  # 2.5 - 0.25
+        assert result.tier1a_sigma_mult == 0.9  # 1.0 - 0.1
+
+    def test_floors_respected(self):
+        """Relaxation floors prevent excessive loosening."""
+        # Start with already-relaxed thresholds
+        base = TierThresholds(
+            tier1a_books_min=5,
+            tier1a_hold_max=7.0,
+            tier1a_base_edge=2.0,
+            tier1a_sigma_mult=0.7,
+        )
+        stats = {"counts_by_tier": {"tier1b": 1}}
+        result = suggest_thresholds(stats, base=base)
+        assert result.tier1a_books_min == 5  # floor 5
+        assert result.tier1a_hold_max == 7.0  # cap 7.0
+        assert result.tier1a_base_edge == 2.0  # floor 2.0
+        assert result.tier1a_sigma_mult == 0.7  # floor 0.7
+
+    def test_tier1b_unchanged(self):
+        """suggest_thresholds only relaxes Tier 1A, not 1B."""
+        stats = {"counts_by_tier": {}}
+        result = suggest_thresholds(stats)
+        assert result.tier1b_books_min == STANDARD_THRESHOLDS.tier1b_books_min
+        assert result.tier1b_hold_max == STANDARD_THRESHOLDS.tier1b_hold_max
+
+
+# ---------------------------------------------------------------------------
+# compute_volume_tuning_stats
+# ---------------------------------------------------------------------------
+
+
+class TestVolumetuningStats:
+    def test_empty_entries(self):
+        result = compute_volume_tuning_stats([])
+        assert result == {"total": 0}
+
+    def test_basic_stats(self):
+        entries = [
+            {**_entry(edge_pct=2.0, books_used=5), "tier": "tier1b"},
+            {**_entry(edge_pct=4.0, books_used=7), "tier": "tier1a"},
+        ]
+        result = compute_volume_tuning_stats(entries)
+        assert result["total"] == 2
+        assert result["counts_by_tier"]["tier1b"] == 1
+        assert result["counts_by_tier"]["tier1a"] == 1
+        assert result["edge_pct"]["p50"] is not None
+
+    def test_books_histogram(self):
+        entries = [
+            {**_entry(books_used=2), "tier": "avoid"},
+            {**_entry(books_used=5), "tier": "tier1b"},
+            {**_entry(books_used=7), "tier": "tier1a"},
+            {**_entry(books_used=10), "tier": "tier1a"},
+        ]
+        result = compute_volume_tuning_stats(entries)
+        assert result["books_histogram"]["1-3"] == 1
+        assert result["books_histogram"]["4-5"] == 1
+        assert result["books_histogram"]["6-7"] == 1
+        assert result["books_histogram"]["8+"] == 1
+
+    def test_percentiles(self):
+        vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+        result = _percentiles(vals)
+        assert result["p10"] == 2.0
+        assert result["p50"] == 6.0
+        assert result["p90"] == 10.0
+
+    def test_percentiles_empty(self):
+        result = _percentiles([])
+        assert result["p10"] is None
+        assert result["p50"] is None
+        assert result["p90"] is None
+
+
+# ---------------------------------------------------------------------------
+# print_slate_summary
+# ---------------------------------------------------------------------------
+
+
+class TestPrintSlateSummary:
+    def test_basic_output(self):
+        slate = {
+            "counts": {
+                "total_recs": 10, "tier1a": 2, "tier1b": 3,
+                "tier1": 5, "tier2": 3, "tier3": 1, "stay_away": 1,
+            },
+            "thresholds": STANDARD_THRESHOLDS,
+        }
+        output = print_slate_summary(slate)
+        assert "Mode: Standard" in output
+        assert "Total recs: 10" in output
+        assert "Tier 1A: 2" in output
+
+    def test_with_volume_tuning(self):
+        slate = {
+            "counts": {"total_recs": 1, "tier1a": 0, "tier1b": 1,
+                        "tier1": 1, "tier2": 0, "tier3": 0, "stay_away": 0},
+            "thresholds": STANDARD_THRESHOLDS,
+            "volume_tuning": {
+                "total": 1,
+                "edge_pct": {"p10": 3.0, "p50": 3.0, "p90": 3.0},
+                "edge_z": {"p10": None, "p50": None, "p90": None},
+                "sigma": {"p10": 0.0, "p50": 0.0, "p90": 0.0},
+                "hold_median": {"p10": 0.0, "p50": 0.0, "p90": 0.0},
+                "books_used": {"p10": 5.0, "p50": 5.0, "p90": 5.0},
+                "books_histogram": {"1-3": 0, "4-5": 1, "6-7": 0, "8+": 0},
+            },
+        }
+        output = print_slate_summary(slate)
+        assert "Volume Tuning:" in output
+        assert "edge_pct:" in output

@@ -235,12 +235,12 @@ class TestClassifyRec:
         assert result["tier"] == "tier3"
         assert result["reasons"] == []
 
-    def test_tier3_low_edge(self):
-        """edge=0.5 with Medium/Moderate → tier3 (below T2 edge floor)."""
+    def test_tier2_low_edge(self):
+        """edge=0.5 with Medium/Moderate → tier2 (any positive edge)."""
         result = classify_rec(_entry(
             edge_pct=0.5, confidence="Medium", quality_tier="Moderate",
         ))
-        assert result["tier"] == "tier3"
+        assert result["tier"] == "tier2"
         assert result["reasons"] == []
 
     def test_avoid_unstable_market(self):
@@ -1010,8 +1010,10 @@ class TestFiltersNeverChangeClassification:
 class TestRelaxedTier2:
     def test_strict_tier3_passes_relaxed(self):
         """An entry that's tier3 under strict but meets relaxed thresholds."""
+        # Low conf + Strong quality + no edge_z → tier3 (Low conf override
+        # needs edge_z >= 1.5, but edge_z=0 → not applied).
         e = _entry(
-            edge_pct=0.8, confidence="Medium", quality_tier="Moderate",
+            edge_pct=1.0, confidence="Low", quality_tier="Strong",
             edge_z=0.0, books_used=5,
         )
         result = classify_rec(e)

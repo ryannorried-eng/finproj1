@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import statistics
 from collections import Counter
+from dataclasses import dataclass, replace
 
 from line_tracker.best_bets import recommend_best_bets
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
@@ -26,9 +27,9 @@ _TIER1A_BOOKS_MIN = 6
 _TIER1A_HOLD_MAX = 6.0
 
 # ── Tier 1B (Standard / Aggressive) thresholds ──────────────────────
-_TIER1B_FLOOR_MIN = 2.0   # minimum 1B edge floor
-_TIER1B_BASE_EDGE = 1.0
-_TIER1B_SIGMA_MULT = 1.0
+_TIER1B_FLOOR_MIN = 1.75   # minimum 1B edge floor (relaxed from 2.0)
+_TIER1B_BASE_EDGE = 0.75   # (relaxed from 1.0)
+_TIER1B_SIGMA_MULT = 0.9   # (relaxed from 1.0)
 _TIER1B_BOOKS_MIN = 5
 _TIER1B_HOLD_MAX = 7.5
 
@@ -41,6 +42,78 @@ _AVOID_DIVERGENCE_MIN = 0.04  # sharp-retail divergence threshold
 # ── relaxed Tier 2 display thresholds (used when strict mode OFF) ─────
 _RELAXED_TIER2_EDGE = 0.5
 _RELAXED_TIER2_EDGE_Z_MIN = 0.75
+
+
+# ── parameter pack ─────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class TierThresholds:
+    """Configurable thresholds for the tier classification cascade.
+
+    Use ``STANDARD_THRESHOLDS`` for default behaviour (broader volume)
+    or ``PRO_THRESHOLDS`` for stricter curation.
+    """
+
+    mode: str = "Standard"
+
+    # Tier 1A (Institutional)
+    tier1a_books_min: int = 6
+    tier1a_hold_max: float = 6.0
+    tier1a_base_edge: float = 2.5
+    tier1a_sigma_mult: float = 1.0
+
+    # Tier 1B (Standard / Aggressive)
+    tier1b_books_min: int = 5
+    tier1b_hold_max: float = 7.5
+    tier1b_base_edge: float = 0.75
+    tier1b_sigma_mult: float = 0.9
+    tier1b_floor_min: float = 1.75
+    # Low-confidence override for Tier 1B
+    tier1b_low_conf_edge_z_min: float = 2.0
+    tier1b_low_conf_edge_pct_min: float = 2.5
+    # Thin-quality override for Tier 1B
+    tier1b_thin_edge_pct_min: float = 3.0
+    tier1b_thin_hold_max: float = 6.5
+    tier1b_thin_books_min: int = 6
+
+    # Tier 2
+    tier2_edge_min: float = 0.0  # >0 effectively (avoid gate ensures edge>0)
+    tier2_edge_z_min: float = 0.0  # 0 = disabled
+    tier2_low_conf_edge_z_min: float = 1.5
+    tier2_low_conf_edge_pct_min: float = 1.0
+
+    # Hard gates (Stay Away)
+    min_books: int = 4
+    stay_away_hold_max: float = 8.0
+    stale_threshold_min: float = 120.0
+    edge_outlier_threshold: float = 4.0
+
+
+STANDARD_THRESHOLDS = TierThresholds()
+
+PRO_THRESHOLDS = TierThresholds(
+    mode="Pro",
+    # Tier 1B: stricter floor, no confidence/quality overrides
+    tier1b_base_edge=1.0,
+    tier1b_sigma_mult=1.0,
+    tier1b_floor_min=2.0,
+    tier1b_low_conf_edge_z_min=float("inf"),
+    tier1b_low_conf_edge_pct_min=float("inf"),
+    tier1b_thin_edge_pct_min=float("inf"),
+    # Tier 2: stricter edge floor and edge_z gate, no overrides
+    tier2_edge_min=1.0,
+    tier2_edge_z_min=1.0,
+    tier2_low_conf_edge_z_min=float("inf"),
+    tier2_low_conf_edge_pct_min=float("inf"),
+)
+
+
+def get_thresholds(mode: str = "Standard") -> TierThresholds:
+    """Return the threshold pack for the given mode name."""
+    if mode == "Pro":
+        return PRO_THRESHOLDS
+    return STANDARD_THRESHOLDS
 
 
 # ── dynamic edge floor helpers ──────────────────────────────────────
@@ -56,16 +129,20 @@ def dyn_floor_1b(sigma: float) -> float:
     return max(_TIER1B_FLOOR_MIN, _TIER1B_BASE_EDGE + _TIER1B_SIGMA_MULT * sigma)
 
 
-def compute_distance_to_1b(entry: dict) -> float:
+def compute_distance_to_1b(
+    entry: dict,
+    thresholds: TierThresholds | None = None,
+) -> float:
     """Distance-to-Tier-1B score; lower means closer to qualifying.
 
     Components:
     * Edge gap below ``dyn_floor_1b``
     * +0.5 if confidence not in (High, Medium)
     * +0.5 if quality_tier not in (Elite, Strong, Moderate)
-    * +0.3 if hold > ``_TIER1B_HOLD_MAX``
-    * +0.3 if books < ``_TIER1B_BOOKS_MIN``
+    * +0.3 if hold > hold_max
+    * +0.3 if books < books_min
     """
+    th = thresholds or STANDARD_THRESHOLDS
     sigma = entry.get("market_volatility_sigma", 0.0)
     edge = entry.get("edge_pct", 0.0)
     confidence = entry.get("confidence", "")
@@ -73,7 +150,10 @@ def compute_distance_to_1b(entry: dict) -> float:
     hold_median = entry.get("market_hold_median", 0.0)
     books_used = entry.get("books_used", 0)
 
-    floor = dyn_floor_1b(sigma)
+    floor = max(
+        th.tier1b_floor_min,
+        th.tier1b_base_edge + th.tier1b_sigma_mult * sigma,
+    )
 
     distance = 0.0
     if edge < floor:
@@ -82,9 +162,9 @@ def compute_distance_to_1b(entry: dict) -> float:
         distance += 0.5
     if quality_tier not in ("Elite", "Strong", "Moderate"):
         distance += 0.5
-    if hold_median > _TIER1B_HOLD_MAX:
+    if hold_median > th.tier1b_hold_max:
         distance += 0.3
-    if books_used < _TIER1B_BOOKS_MIN:
+    if books_used < th.tier1b_books_min:
         distance += 0.3
 
     return round(distance, 3)
@@ -158,7 +238,11 @@ def _avoid_score(entry: dict) -> float:
 # ── classification ─────────────────────────────────────────────────
 
 
-def classify_rec(entry: dict, settings: dict | None = None) -> dict:
+def classify_rec(
+    entry: dict,
+    settings: dict | None = None,
+    thresholds: TierThresholds | None = None,
+) -> dict:
     """Classify a recommendation into tier1a/tier1b/tier2/tier3/avoid.
 
     Runs for **every** recommendation — nothing is skipped before
@@ -169,12 +253,12 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         2. hold >= 8% or edge <= 0 → **avoid**
         3. Tier 1A (Institutional): High conf, Elite/Strong quality,
            books >= 6, hold <= 6%, edge >= dyn_floor_1a
-        4. Tier 1B (Standard): High/Medium conf, Elite/Strong/Moderate quality,
+        4. Tier 1B (Standard): High/Medium conf (or Low with override),
+           Elite/Strong/Moderate quality (or Thin with override),
            books >= 5, hold <= 7.5%, edge >= dyn_floor_1b
-        5. Tier 2: High/Medium conf, Elite/Strong/Moderate quality,
-           edge >= 1.0%, edge_z >= 1.0 (or unavailable), books >= 4
+        5. Tier 2: High/Medium conf (or Low with override),
+           Elite/Strong/Moderate quality, edge > 0, books >= 4
         6. Tier 3: positive-edge plays that don't meet higher tiers
-           but also don't trigger Stay Away conditions
 
     Parameters
     ----------
@@ -184,6 +268,9 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         oldest_update_age_min, market_unstable, market_hold_median.
     settings:
         Reserved for future use.
+    thresholds:
+        A ``TierThresholds`` parameter pack.  Defaults to
+        ``STANDARD_THRESHOLDS``.
 
     Returns
     -------
@@ -194,6 +281,7 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         dynamic_edge_floor: float  (Tier 1A floor, for debugging)
     """
     settings = settings or {}
+    th = thresholds or STANDARD_THRESHOLDS
 
     edge = entry.get("edge_pct", 0.0)
     confidence = entry.get("confidence", "")
@@ -205,19 +293,19 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
     oldest_age = entry.get("oldest_update_age_min", 0.0)
     hold_median = entry.get("market_hold_median", 0.0)
 
-    floor_1a = dyn_floor_1a(sigma)
+    floor_1a = th.tier1a_base_edge + th.tier1a_sigma_mult * sigma
 
     # ── Hard disqualifiers (block ALL tiers → Stay Away) ──────────
     hard_reasons: list[str] = []
     if market_unstable:
         hard_reasons.append("Unstable market (too many outlier books filtered)")
-    if books_used and books_used < _MIN_BOOKS:
-        hard_reasons.append(f"Too few books (<{_MIN_BOOKS})")
-    if oldest_age > _STALE_THRESHOLD_MIN:
+    if books_used and books_used < th.min_books:
+        hard_reasons.append(f"Too few books (<{th.min_books})")
+    if oldest_age > th.stale_threshold_min:
         hard_reasons.append(
-            f"Stale lines (oldest update > {_STALE_THRESHOLD_MIN:.0f} min)"
+            f"Stale lines (oldest update > {th.stale_threshold_min:.0f} min)"
         )
-    if edge >= _EDGE_OUTLIER_THRESHOLD and confidence == "Low":
+    if edge >= th.edge_outlier_threshold and confidence == "Low":
         hard_reasons.append("Edge outlier with low confidence (possible bad data)")
 
     if hard_reasons:
@@ -229,10 +317,10 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         }
 
     # ── Hold gate → Stay Away ─────────────────────────────────────
-    if hold_median >= _STAY_AWAY_HOLD_MAX:
+    if hold_median >= th.stay_away_hold_max:
         reasons = [
             f"Market hold too high "
-            f"({hold_median:.1f}% >= {_STAY_AWAY_HOLD_MAX:.0f}%)"
+            f"({hold_median:.1f}% >= {th.stay_away_hold_max:.0f}%)"
         ]
         _add_market_quality_flags(reasons, entry)
         return {"tier": "avoid", "reasons": reasons, "dynamic_edge_floor": floor_1a}
@@ -248,29 +336,62 @@ def classify_rec(entry: dict, settings: dict | None = None) -> dict:
         confidence == "High"
         and quality_tier in ("Elite", "Strong")
         and edge >= floor_1a
-        and books_used >= _TIER1A_BOOKS_MIN
-        and hold_median <= _TIER1A_HOLD_MAX
+        and books_used >= th.tier1a_books_min
+        and hold_median <= th.tier1a_hold_max
     ):
         return {"tier": "tier1a", "reasons": [], "dynamic_edge_floor": floor_1a}
 
     # ── Tier 1B (Standard / Aggressive) ───────────────────────────
-    floor_1b = dyn_floor_1b(sigma)
+    # Confidence: High/Medium by default, Low allowed with override
+    t1b_conf = confidence in ("High", "Medium")
+    if not t1b_conf and confidence == "Low":
+        if (
+            edge_z >= th.tier1b_low_conf_edge_z_min
+            and edge >= th.tier1b_low_conf_edge_pct_min
+        ):
+            t1b_conf = True
+
+    # Quality: Elite/Strong/Moderate by default, Thin allowed with override
+    t1b_qt = quality_tier in ("Elite", "Strong", "Moderate")
+    if not t1b_qt and quality_tier == "Thin":
+        if (
+            edge >= th.tier1b_thin_edge_pct_min
+            and hold_median <= th.tier1b_thin_hold_max
+            and books_used >= th.tier1b_thin_books_min
+        ):
+            t1b_qt = True
+
+    floor_1b = max(
+        th.tier1b_floor_min,
+        th.tier1b_base_edge + th.tier1b_sigma_mult * sigma,
+    )
     if (
-        confidence in ("High", "Medium")
-        and quality_tier in ("Elite", "Strong", "Moderate")
+        t1b_conf
+        and t1b_qt
         and edge >= floor_1b
-        and books_used >= _TIER1B_BOOKS_MIN
-        and hold_median <= _TIER1B_HOLD_MAX
+        and books_used >= th.tier1b_books_min
+        and hold_median <= th.tier1b_hold_max
     ):
         return {"tier": "tier1b", "reasons": [], "dynamic_edge_floor": floor_1a}
 
     # ── Tier 2 ────────────────────────────────────────────────────
+    # Confidence: High/Medium by default, Low allowed with override
     t2_conf = confidence in ("High", "Medium")
+    if not t2_conf and confidence == "Low":
+        if (
+            edge_z >= th.tier2_low_conf_edge_z_min
+            and edge >= th.tier2_low_conf_edge_pct_min
+        ):
+            t2_conf = True
+
     t2_qt = quality_tier in ("Elite", "Strong", "Moderate")
-    t2_edge = edge >= _TIER2_EDGE
-    # edge_z == 0.0 means unavailable (default) — skip the check
-    t2_ez = edge_z >= _TIER2_EDGE_Z_MIN if edge_z else True
-    t2_books = books_used >= _MIN_BOOKS
+    t2_edge = edge >= th.tier2_edge_min if th.tier2_edge_min > 0 else True
+    # edge_z gate: disabled when tier2_edge_z_min == 0
+    if th.tier2_edge_z_min > 0:
+        t2_ez = edge_z >= th.tier2_edge_z_min if edge_z else True
+    else:
+        t2_ez = True
+    t2_books = books_used >= th.min_books
 
     if t2_conf and t2_qt and t2_edge and t2_ez and t2_books:
         return {"tier": "tier2", "reasons": [], "dynamic_edge_floor": floor_1a}
@@ -521,6 +642,7 @@ def build_daily_slate(
     *,
     filters: dict | None = None,
     settings: dict | None = None,
+    thresholds: TierThresholds | None = None,
 ) -> dict:
     """Build the daily slate from lines grouped by event.
 
@@ -539,6 +661,7 @@ def build_daily_slate(
     """
     filters = filters or {}
     settings = settings or {}
+    th = thresholds or STANDARD_THRESHOLDS
     max_per_event: int = filters.get("max_per_event", 1)
 
     all_entries: list[dict] = []
@@ -596,12 +719,16 @@ def build_daily_slate(
             }
 
             # Classify — runs for EVERY rec, no pre-filtering
-            classification = classify_rec(entry, settings=settings)
+            classification = classify_rec(
+                entry, settings=settings, thresholds=th,
+            )
             entry["tier"] = classification["tier"]
             entry["avoid_reasons"] = classification["reasons"]
             entry["dynamic_edge_floor"] = classification["dynamic_edge_floor"]
             entry["avoid_score"] = _avoid_score(entry)
-            entry["distance_to_1b"] = compute_distance_to_1b(entry)
+            entry["distance_to_1b"] = compute_distance_to_1b(
+                entry, thresholds=th,
+            )
 
             all_entries.append(entry)
 
@@ -644,7 +771,7 @@ def build_daily_slate(
     # ── Closest candidates (tier2/tier3 entries nearest to Tier 1B) ─
     candidate_pool = result["tier2"] + result["tier3"]
     for e in candidate_pool:
-        e.setdefault("distance_to_1b", compute_distance_to_1b(e))
+        e.setdefault("distance_to_1b", compute_distance_to_1b(e, thresholds=th))
     result["closest_candidates"] = sorted(
         candidate_pool, key=lambda e: e["distance_to_1b"],
     )[:10]
@@ -687,5 +814,149 @@ def build_daily_slate(
                 Counter(e.get("quality_tier", "") for e in all_entries)
             ),
         }
+        result["volume_tuning"] = compute_volume_tuning_stats(all_entries)
+
+    # ── Thresholds used (always available) ─────────────────────────
+    result["thresholds"] = th
 
     return result
+
+
+# ── volume tuning ─────────────────────────────────────────────────
+
+
+def _percentiles(
+    vals: list[float],
+    pcts: tuple[int, ...] = (10, 50, 90),
+) -> dict:
+    """Return {pN: value} for given percentiles (empty-safe)."""
+    if not vals:
+        return {f"p{p}": None for p in pcts}
+    sorted_vals = sorted(vals)
+    n = len(sorted_vals)
+    result = {}
+    for p in pcts:
+        idx = max(0, min(n - 1, int(p / 100 * n)))
+        result[f"p{p}"] = sorted_vals[idx]
+    return result
+
+
+def compute_volume_tuning_stats(entries: list[dict]) -> dict:
+    """Compute detailed volume tuning statistics.
+
+    Returns distribution snapshots and percentiles (p10/p50/p90)
+    for key metrics, plus histograms for categorical fields.
+    """
+    if not entries:
+        return {"total": 0}
+
+    edges = [e.get("edge_pct", 0.0) for e in entries]
+    edge_zs = [e.get("edge_z", 0.0) for e in entries if e.get("edge_z", 0.0)]
+    sigmas = [e.get("market_volatility_sigma", 0.0) for e in entries]
+    holds = [e.get("market_hold_median", 0.0) for e in entries]
+    books = [e.get("books_used", 0) for e in entries]
+
+    # Categorical distributions
+    conf_dist = dict(Counter(e.get("confidence", "") for e in entries))
+    qt_dist = dict(Counter(e.get("quality_tier", "") for e in entries))
+    tier_dist = dict(Counter(e.get("tier", "") for e in entries))
+
+    # Books histogram (buckets: 1-3, 4-5, 6-7, 8+)
+    books_hist = {"1-3": 0, "4-5": 0, "6-7": 0, "8+": 0}
+    for b in books:
+        if b <= 3:
+            books_hist["1-3"] += 1
+        elif b <= 5:
+            books_hist["4-5"] += 1
+        elif b <= 7:
+            books_hist["6-7"] += 1
+        else:
+            books_hist["8+"] += 1
+
+    return {
+        "total": len(entries),
+        "counts_by_tier": tier_dist,
+        "confidence_dist": conf_dist,
+        "quality_tier_dist": qt_dist,
+        "books_histogram": books_hist,
+        "edge_pct": _percentiles(edges),
+        "edge_z": _percentiles(edge_zs),
+        "sigma": _percentiles(sigmas),
+        "hold_median": _percentiles(holds),
+        "books_used": _percentiles([float(b) for b in books]),
+    }
+
+
+# ── threshold auto-tuning ─────────────────────────────────────────
+
+
+def suggest_thresholds(
+    summary_stats: dict,
+    base: TierThresholds | None = None,
+) -> TierThresholds:
+    """Suggest relaxed thresholds when Tier 1A is underpopulated.
+
+    Applies ordered relaxations when Tier 1A is empty:
+        1. ``books_used`` min **-1** (floor 5)
+        2. ``hold`` max **+0.5** (cap 7.0)
+        3. dyn floor intercept **-0.25** (floor 2.0)
+        4. sigma mult **-0.1** (floor 0.7)
+
+    Parameters
+    ----------
+    summary_stats:
+        Output of ``compute_slate_debug_stats`` (needs ``counts_by_tier``).
+    base:
+        Starting thresholds to relax from (default ``STANDARD_THRESHOLDS``).
+
+    Returns
+    -------
+    A new ``TierThresholds`` with relaxed Tier 1A values, or the
+    original if 1A is already populated.
+    """
+    th = base or STANDARD_THRESHOLDS
+    counts = summary_stats.get("counts_by_tier", {})
+    n_tier1a = counts.get("tier1a", 0)
+
+    if n_tier1a > 0:
+        return th  # no relaxation needed
+
+    return replace(
+        th,
+        tier1a_books_min=max(5, th.tier1a_books_min - 1),
+        tier1a_hold_max=min(7.0, th.tier1a_hold_max + 0.5),
+        tier1a_base_edge=max(2.0, th.tier1a_base_edge - 0.25),
+        tier1a_sigma_mult=max(0.7, th.tier1a_sigma_mult - 0.1),
+    )
+
+
+# ── CLI summary ───────────────────────────────────────────────────
+
+
+def print_slate_summary(slate: dict) -> str:
+    """Format a human-readable slate summary for CLI output."""
+    counts = slate.get("counts", {})
+    th = slate.get("thresholds", STANDARD_THRESHOLDS)
+    lines = [
+        f"Mode: {th.mode}",
+        f"Total recs: {counts.get('total_recs', 0)}",
+        f"  Tier 1A: {counts.get('tier1a', 0)}",
+        f"  Tier 1B: {counts.get('tier1b', 0)}",
+        f"  Tier 1 (combined): {counts.get('tier1', 0)}",
+        f"  Tier 2: {counts.get('tier2', 0)}",
+        f"  Tier 3: {counts.get('tier3', 0)}",
+        f"  Stay Away: {counts.get('stay_away', 0)}",
+    ]
+    vt = slate.get("volume_tuning")
+    if vt and vt.get("total", 0) > 0:
+        lines.append("")
+        lines.append("Volume Tuning:")
+        for key in ("edge_pct", "edge_z", "sigma", "hold_median", "books_used"):
+            pcts = vt.get(key, {})
+            lines.append(
+                f"  {key}: "
+                f"p10={pcts.get('p10')}, p50={pcts.get('p50')}, p90={pcts.get('p90')}"
+            )
+        bh = vt.get("books_histogram", {})
+        lines.append(f"  books_histogram: {bh}")
+    return "\n".join(lines)
