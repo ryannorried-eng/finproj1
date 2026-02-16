@@ -223,17 +223,36 @@ def _compute_pick_analytics(
     store: LineStore,
     bet_type: BetType,
     pick_odds: float,
+    pick_timestamp: datetime | None = None,
 ) -> dict:
     """Compute pick-time edge/hold/volatility analytics for a leg.
 
-    Uses stored lines close to the pick timestamp to compute how this
-    pick compared to the broader market at the time of placement.
+    Uses stored lines **at or before** *pick_timestamp* to compute how
+    this pick compared to the broader market at placement time.  If
+    *pick_timestamp* is ``None``, falls back to the latest snapshot
+    (legacy behaviour).
+
+    The returned dict includes provenance fields:
+      - pick_lines_max_ts: ISO string of the newest line used
+      - pick_lines_count: number of sportsbook lines used
     """
     event_name = leg.get("event_name", "")
     selection = leg.get("selection", "")
 
-    # Fetch all books' latest lines for the event + bet_type
-    all_lines = store.get_latest_for_event(event_name, bet_type)
+    # Fetch lines with strict time bound when possible
+    if pick_timestamp is not None:
+        all_lines = store.get_lines_asof(
+            event_name, bet_type, pick_timestamp,
+        )
+    else:
+        all_lines = store.get_latest_for_event(event_name, bet_type)
+
+    # Provenance: track the max timestamp among lines used
+    pick_lines_max_ts: str | None = None
+    if all_lines:
+        max_ts = max(ln.timestamp for ln in all_lines)
+        pick_lines_max_ts = max_ts.isoformat()
+    pick_lines_count = len(all_lines)
 
     # Extract relevant odds from each book
     odds_list: list[float] = []
@@ -252,6 +271,8 @@ def _compute_pick_analytics(
             "market_volatility_sigma": None,
             "confidence": "Low",
             "quality_tier": "Tier3",
+            "pick_lines_max_ts": pick_lines_max_ts,
+            "pick_lines_count": pick_lines_count,
         }
 
     # Edge: consensus_prob - pick_prob (positive = good)
@@ -299,6 +320,8 @@ def _compute_pick_analytics(
         "market_volatility_sigma": round(volatility, 6),
         "confidence": confidence,
         "quality_tier": tier,
+        "pick_lines_max_ts": pick_lines_max_ts,
+        "pick_lines_count": pick_lines_count,
     }
 
 

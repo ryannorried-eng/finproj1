@@ -202,10 +202,28 @@ def _attach_clv(bet: Bet, store) -> None:
         bt = _bet_type_from_market(leg.get("market", ""))
         pick_odds = leg.get("odds")
 
-        # Compute pick-time analytics
+        # Parse pick_timestamp for time-bounded query
+        pick_ts_raw = leg.get("fetched_at")
+        pick_ts_dt: datetime | None = None
+        if pick_ts_raw:
+            try:
+                pick_ts_dt = datetime.fromisoformat(pick_ts_raw)
+            except (ValueError, TypeError):
+                pass
+
+        # Compute pick-time analytics with strict time bound
         analytics: dict = {}
         if bt is not None and pick_odds is not None:
-            analytics = _compute_pick_analytics(leg, store, bt, pick_odds)
+            analytics = _compute_pick_analytics(
+                leg, store, bt, pick_odds,
+                pick_timestamp=pick_ts_dt,
+            )
+
+        # Provenance warning check
+        _check_provenance(
+            analytics.get("pick_lines_max_ts"),
+            pick_ts_raw,
+        )
 
         # beat_close flags (1=beat, 0=lost/matched, None=no close)
         def _beat_flag(clv_val):
@@ -234,7 +252,7 @@ def _attach_clv(bet: Bet, store) -> None:
             "selection": leg.get("selection"),
             "pick_line": leg.get("line"),
             "pick_odds": pick_odds,
-            "pick_timestamp": leg.get("fetched_at"),
+            "pick_timestamp": pick_ts_raw,
             "commence_time": bet.commence_time,
             "edge_pct": analytics.get("edge_pct"),
             "edge_z": analytics.get("edge_z"),
@@ -257,11 +275,40 @@ def _attach_clv(bet: Bet, store) -> None:
             "beat_close_market": _beat_flag(lc.clv_price_prob_best),
             "settled_at": bet.settled_at,
             "outcome": bet.status,
+            "pick_lines_max_ts": analytics.get("pick_lines_max_ts"),
+            "pick_lines_count": analytics.get("pick_lines_count"),
         }
         clv_rows.append(row)
 
     if clv_rows:
         store.save_clv_rows(clv_rows)
+
+
+# Tolerance for provenance check (2 seconds)
+_PROVENANCE_TOLERANCE_S = 2
+
+
+def _check_provenance(
+    pick_lines_max_ts: str | None,
+    pick_timestamp: str | None,
+) -> None:
+    """Log a warning if pick-analytics lines are newer than pick time."""
+    import logging
+
+    if not pick_lines_max_ts or not pick_timestamp:
+        return
+    try:
+        max_ts = datetime.fromisoformat(pick_lines_max_ts)
+        pick_ts = datetime.fromisoformat(pick_timestamp)
+        delta = (max_ts - pick_ts).total_seconds()
+        if delta > _PROVENANCE_TOLERANCE_S:
+            logging.getLogger("line_tracker.provenance").warning(
+                "Pick-analytics provenance violation: "
+                "pick_lines_max_ts=%s is %.1fs after pick_timestamp=%s",
+                pick_lines_max_ts, delta, pick_timestamp,
+            )
+    except (ValueError, TypeError):
+        pass
 
 
 def delete_bet(state: dict, bet_id: str) -> Bet:

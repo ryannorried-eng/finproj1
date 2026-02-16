@@ -75,6 +75,8 @@ class LineStore:
                 beat_close_market INTEGER,
                 settled_at TEXT,
                 outcome TEXT,
+                pick_lines_max_ts TEXT,
+                pick_lines_count INTEGER,
                 UNIQUE(bet_id, leg_index)
             )
         """)
@@ -104,6 +106,21 @@ class LineStore:
                 "ALTER TABLE lines ADD COLUMN commence_time TEXT"
             )
             self._conn.commit()
+
+        # Provenance columns on bet_clv
+        clv_cols = {
+            row[1]
+            for row in self._conn.execute(
+                "PRAGMA table_info(bet_clv)"
+            ).fetchall()
+        }
+        for col in ("pick_lines_max_ts", "pick_lines_count"):
+            if col not in clv_cols:
+                col_type = "TEXT" if col.endswith("_ts") else "INTEGER"
+                self._conn.execute(
+                    f"ALTER TABLE bet_clv ADD COLUMN {col} {col_type}"
+                )
+        self._conn.commit()
 
     def save_lines(self, lines: list[BettingLine]) -> int:
         """Save a batch of lines. Returns number of rows inserted."""
@@ -177,6 +194,35 @@ class LineStore:
         ).fetchall()
         return [_row_to_line(row) for row in rows]
 
+    def get_lines_asof(
+        self,
+        event: str,
+        bet_type: BetType,
+        asof: datetime,
+    ) -> list[BettingLine]:
+        """Get the latest line per sportsbook as of *asof* timestamp.
+
+        Only lines with ``timestamp <= asof`` are considered.  Returns
+        one line per sportsbook (the most recent before the cutoff).
+        """
+        asof_iso = asof.isoformat()
+        rows = self._conn.execute(
+            """SELECT * FROM lines
+               WHERE event = ? AND bet_type = ? AND timestamp <= ?
+                     AND id IN (
+                         SELECT MAX(id) FROM lines
+                         WHERE event = ? AND bet_type = ?
+                               AND timestamp <= ?
+                         GROUP BY sportsbook
+                     )
+               ORDER BY sportsbook""",
+            (
+                event, bet_type.value, asof_iso,
+                event, bet_type.value, asof_iso,
+            ),
+        ).fetchall()
+        return [_row_to_line(row) for row in rows]
+
     def get_close_lines(
         self,
         event: str,
@@ -236,11 +282,13 @@ class LineStore:
                 exec_close_decimal, market_close_decimal,
                 exec_clv_prob, market_clv_prob,
                 beat_close_exec, beat_close_market,
-                settled_at, outcome
+                settled_at, outcome,
+                pick_lines_max_ts, pick_lines_count
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?
             )
         """
         params = []
@@ -266,6 +314,8 @@ class LineStore:
                 r.get("beat_close_exec"),
                 r.get("beat_close_market"),
                 r.get("settled_at"), r.get("outcome"),
+                r.get("pick_lines_max_ts"),
+                r.get("pick_lines_count"),
             ))
         self._conn.executemany(sql, params)
         self._conn.commit()
