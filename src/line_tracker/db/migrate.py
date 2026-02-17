@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 
 def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
@@ -43,7 +46,15 @@ def ensure_latest(conn: sqlite3.Connection, migrations_path: str | Path) -> None
     mpath = Path(migrations_path)
     current_version = get_schema_version(conn)
 
-    for version, path in _discover_migrations(mpath):
+    migrations = _discover_migrations(mpath)
+    if not migrations and current_version == 0:
+        _log.warning(
+            "No migration files found in %s – tables will not be created. "
+            "Ensure *.sql files are included in package-data.",
+            mpath,
+        )
+
+    for version, path in migrations:
         if version <= current_version:
             continue
 
