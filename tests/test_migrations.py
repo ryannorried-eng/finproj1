@@ -1,0 +1,88 @@
+"""Tests for SQLite schema versioning and additive migrations."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from line_tracker.db.migrate import ensure_latest, get_schema_version
+from line_tracker.storage import LineStore
+
+
+def _migrations_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "src" / "line_tracker" / "db" / "migrations"
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _index_exists(conn: sqlite3.Connection, index_name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+        (index_name,),
+    ).fetchone()
+    return row is not None
+
+
+def test_linestore_init_runs_migrations_to_latest(tmp_path):
+    db = tmp_path / "migrations_a.db"
+    with LineStore(db_path=db) as store:
+        version = get_schema_version(store._conn)
+        assert version == 2
+
+        for table in (
+            "schema_version",
+            "lines",
+            "bet_clv",
+            "calibration_thresholds",
+            "bets",
+            "bet_legs",
+        ):
+            assert _table_exists(store._conn, table)
+
+
+def test_ensure_latest_is_idempotent_noop_on_latest(tmp_path):
+    db = tmp_path / "migrations_b.db"
+    migrations = _migrations_path()
+
+    with sqlite3.connect(db) as conn:
+        ensure_latest(conn, migrations)
+        assert get_schema_version(conn) == 2
+
+        ensure_latest(conn, migrations)
+        assert get_schema_version(conn) == 2
+
+
+def test_schema_version_one_applies_only_indexes_migration(tmp_path):
+    db = tmp_path / "migrations_c.db"
+    migrations = _migrations_path()
+
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)"
+        )
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (1)")
+
+        init_sql = (migrations / "0001_init.sql").read_text(encoding="utf-8")
+        conn.executescript(init_sql)
+        conn.commit()
+
+        ensure_latest(conn, migrations)
+        assert get_schema_version(conn) == 2
+
+        for index_name in (
+            "idx_bet_clv_bet_id",
+            "idx_event_type",
+            "idx_timestamp",
+            "idx_sportsbook",
+            "idx_event_type_book",
+            "idx_bet_legs_bet_id",
+            "idx_bets_status",
+        ):
+            assert _index_exists(conn, index_name)
