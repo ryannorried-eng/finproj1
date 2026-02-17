@@ -78,6 +78,9 @@ def parlay_payout(stake: float, legs_american: list[float]) -> dict:
 
     Returns dict with combined_decimal, combined_american, profit, total_return.
     """
+    if not legs_american:
+        raise ValueError("Parlay requires at least one leg.")
+
     combined_dec = 1.0
     for odds in legs_american:
         combined_dec *= american_to_decimal(odds)

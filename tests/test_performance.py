@@ -477,3 +477,20 @@ def test_clv_color_uses_probability_semantics():
     assert clv_decimal < 0
     assert clv_prob > 0
     assert clv_color(clv_prob) == "green"
+
+
+def test_apply_filters_handles_tz_aware_closed_at_with_naive_date_bounds():
+    df = pd.DataFrame({
+        "closed_at": pd.to_datetime([
+            "2026-01-31T00:00:00Z",
+            "2026-01-31T23:30:00Z",
+            "2026-02-01T00:00:00Z",
+        ], utc=True),
+        "market": ["ML", "ML", "ML"],
+    })
+
+    filtered = apply_filters(df, date_start="2026-01-31", date_end="2026-01-31")
+
+    assert len(filtered) == 2
+    assert filtered["closed_at"].min() == pd.Timestamp("2026-01-31T00:00:00Z")
+    assert filtered["closed_at"].max() == pd.Timestamp("2026-01-31T23:30:00Z")

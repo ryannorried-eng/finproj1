@@ -8,6 +8,7 @@ from line_tracker.bet_history import (
     delete_bet,
     init_bet_state,
     settle_bet,
+    settled_bet_summary,
     submit_bet,
 )
 
@@ -266,3 +267,39 @@ class TestRoundTrip:
         assert removed.id == bet.id
         assert state["active_bets"] == []
         assert state["settled_bets"] == []
+
+
+class TestSettledBetSummary:
+    def test_roi_and_record_counts_reconcile(self):
+        won = create_bet(sportsbook="DK", legs=[_leg()], stake=100.0)
+        won.status = "won"
+        won.profit = 50.0
+
+        lost = create_bet(sportsbook="DK", legs=[_leg()], stake=80.0)
+        lost.status = "lost"
+        lost.profit = -80.0
+
+        push = create_bet(sportsbook="DK", legs=[_leg()], stake=20.0)
+        push.status = "push"
+        push.profit = 0.0
+
+        active = create_bet(sportsbook="DK", legs=[_leg()], stake=25.0)
+        active.status = "active"
+
+        summary = settled_bet_summary([won, lost, push, active])
+
+        assert summary["settled_count"] == 3
+        assert summary["wins"] == 1
+        assert summary["losses"] == 1
+        assert summary["pushes"] == 1
+        assert summary["total_staked"] == 200.0
+        assert summary["net_profit"] == -30.0
+        assert summary["roi_pct"] == pytest.approx(-15.0)
+
+    def test_roi_zero_when_no_settled_bets(self):
+        summary = settled_bet_summary([])
+
+        assert summary["settled_count"] == 0
+        assert summary["total_staked"] == 0.0
+        assert summary["net_profit"] == 0.0
+        assert summary["roi_pct"] == 0.0

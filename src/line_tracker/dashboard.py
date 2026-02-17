@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+import logging
+
+
+_REPO_SRC = Path(__file__).resolve().parents[2] / "src"
+if _REPO_SRC.exists() and str(_REPO_SRC) not in sys.path:
+    # Support running `streamlit run src/line_tracker/dashboard.py` from repo root
+    # in src-layout checkouts that are not installed in editable mode.
+    sys.path.insert(0, str(_REPO_SRC))
 
 import pandas as pd
 import streamlit as st
+import line_tracker as _line_tracker_pkg
 
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
 from line_tracker.best_bets import recommend_best_bets
@@ -19,6 +30,7 @@ from line_tracker.bet_history import (
     persist_bet,
     settle_bet,
     settle_bet_persistent,
+    settled_bet_summary,
     snapshot_pick,
     submit_bet,
 )
@@ -95,6 +107,7 @@ _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
 _FAR_FUTURE = datetime.max.replace(tzinfo=None)
 
 DB_PATH = str(DEFAULT_DB_PATH)
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +129,26 @@ def _require_key() -> str | None:
 def _format_odds(val: float) -> str:
     """Format American odds with a + or - sign."""
     return f"{val:+.0f}" if val != 0 else "EVEN"
+
+
+def _debug_import_resolution() -> None:
+    """Optionally show package import origin to diagnose path-shadowing."""
+    if os.environ.get("LINE_TRACKER_DEBUG_IMPORTS") != "1":
+        return
+
+    package_file = Path(_line_tracker_pkg.__file__).resolve()
+    expected_pkg_dir = Path(__file__).resolve().parent
+    message = f"line_tracker imported from: {package_file}"
+    st.caption(message)
+    _LOGGER.warning(message)
+
+    if package_file.parent != expected_pkg_dir:
+        warning = (
+            "Import path mismatch detected. "
+            f"Expected package in {expected_pkg_dir}, got {package_file.parent}."
+        )
+        st.warning(warning)
+        _LOGGER.warning(warning)
 
 
 def _format_value(val: float, bet_type: BetType) -> str:
@@ -2680,22 +2713,16 @@ def _bet_history_dialog():
             st.info("No settled bets yet.")
         else:
             # Summary metrics
-            total_staked = sum(b.stake for b in settled)
-            total_profit = sum(
-                b.total_payout - b.stake if b.status == "won"
-                else (0.0 if b.status == "push" else -b.stake)
-                for b in settled
-            )
-            wins = sum(1 for b in settled if b.status == "won")
-            losses = sum(1 for b in settled if b.status == "lost")
-            pushes = sum(1 for b in settled if b.status == "push")
+            summary = settled_bet_summary(settled)
 
             mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Total Staked", fmt_money(total_staked))
-            mc2.metric("Net Profit", fmt_money(total_profit, sign=True))
-            mc3.metric("Record", f"{wins}W-{losses}L-{pushes}P")
-            roi = (total_profit / total_staked * 100) if total_staked else 0
-            mc4.metric("ROI", fmt_pct(roi, sign=True))
+            mc1.metric("Total Staked", fmt_money(summary["total_staked"]))
+            mc2.metric("Net Profit", fmt_money(summary["net_profit"], sign=True))
+            mc3.metric(
+                "Record",
+                f"{summary['wins']}W-{summary['losses']}L-{summary['pushes']}P",
+            )
+            mc4.metric("ROI", fmt_pct(summary["roi_pct"], sign=True))
 
             st.divider()
 
@@ -3056,6 +3083,7 @@ def main():
         page_icon="$",
         layout="wide",
     )
+    _debug_import_resolution()
 
     # Ensure bet slip exists in session state
     if "bet_slip" not in st.session_state:

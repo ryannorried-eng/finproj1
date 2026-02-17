@@ -150,6 +150,34 @@ def settle_bet(
     raise KeyError(f"No active bet with id {bet_id!r}")
 
 
+
+
+def settled_bet_summary(bets: list[Bet]) -> dict[str, float | int]:
+    """Summarize settled bet outcomes and ROI.
+
+    Definitions:
+      - total_staked = sum(stake)
+      - net_profit = sum(realized profit) where won/lost/push use bet.profit
+      - roi_pct = (net_profit / total_staked) * 100, or 0 when no stake.
+    """
+    settled = [b for b in bets if b.status in ("won", "lost", "push")]
+    total_staked = float(sum(b.stake for b in settled))
+    net_profit = float(sum(b.profit for b in settled))
+    wins = sum(1 for b in settled if b.status == "won")
+    losses = sum(1 for b in settled if b.status == "lost")
+    pushes = sum(1 for b in settled if b.status == "push")
+    roi_pct = (net_profit / total_staked * 100.0) if total_staked else 0.0
+    return {
+        "settled_count": len(settled),
+        "wins": wins,
+        "losses": losses,
+        "pushes": pushes,
+        "total_staked": total_staked,
+        "net_profit": net_profit,
+        "roi_pct": roi_pct,
+    }
+
+
 def delete_bet(state: dict, bet_id: str) -> Bet:
     """Remove a bet from active_bets or settled_bets and return it."""
     init_bet_state(state)

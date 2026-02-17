@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Streamlit: line_tracker dashboard",
+      "type": "python",
+      "request": "launch",
+      "module": "streamlit",
+      "args": [
+        "run",
+        "src/line_tracker/dashboard.py",
+        "--server.headless",
+        "true"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "LINE_TRACKER_DEBUG_IMPORTS": "1"
+      },
+      "justMyCode": true
+    }
+  ]
+}

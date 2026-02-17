@@ -311,3 +311,26 @@ class TestEdgeCases:
 
             # Only one bet in DB
             assert len(load_bets_from_db(store)) == 1
+
+
+def test_settled_record_counts_reconcile_with_db_rows(tmp_path):
+    db_path = tmp_path / "reconcile.db"
+    won = create_bet(stake=100, sportsbook="DK", legs=[_leg(odds=-150)])
+    lost = create_bet(stake=50, sportsbook="FD", legs=[_leg(odds=120, event_name="A @ B")])
+    push = create_bet(stake=25, sportsbook="MGM", legs=[_leg(odds=-110, event_name="C @ D")])
+
+    with LineStore(db_path=db_path) as store:
+        persist_bet(won, store)
+        persist_bet(lost, store)
+        persist_bet(push, store)
+        settle_bet_persistent(won.id, "won", store)
+        settle_bet_persistent(lost.id, "lost", store)
+        settle_bet_persistent(push.id, "push", store)
+
+        all_rows = store.get_bets()
+
+    statuses = [r["status"] for r in all_rows]
+    assert len(all_rows) == 3
+    assert statuses.count("won") == 1
+    assert statuses.count("lost") == 1
+    assert statuses.count("push") == 1

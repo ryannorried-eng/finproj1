@@ -238,12 +238,23 @@ def apply_filters(
 
     mask = pd.Series(True, index=df.index)
 
+    def _normalized_bound(value: str) -> pd.Timestamp:
+        bound = pd.Timestamp(value)
+        if "closed_at" in df.columns and isinstance(df["closed_at"].dtype, pd.DatetimeTZDtype):
+            tz = df["closed_at"].dt.tz
+            if bound.tzinfo is None:
+                return bound.tz_localize(tz)
+            return bound.tz_convert(tz)
+        if bound.tzinfo is not None:
+            return bound.tz_localize(None)
+        return bound
+
     if date_start and "closed_at" in df.columns:
-        mask &= df["closed_at"] >= pd.Timestamp(date_start)
+        mask &= df["closed_at"] >= _normalized_bound(date_start)
     if date_end and "closed_at" in df.columns:
         # End date is inclusive at the day level:
         # selecting YYYY-MM-DD should include all timestamps on that date.
-        end_exclusive = pd.Timestamp(date_end) + pd.Timedelta(days=1)
+        end_exclusive = _normalized_bound(date_end) + pd.Timedelta(days=1)
         mask &= df["closed_at"] < end_exclusive
     if sport and "sport" in df.columns:
         mask &= df["sport"] == sport
