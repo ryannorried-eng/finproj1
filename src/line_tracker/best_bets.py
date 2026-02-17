@@ -14,6 +14,10 @@ from line_tracker.bet_slip import (
     ev_per_dollar,
     implied_prob_from_american,
 )
+from line_tracker.core.math import (
+    kelly_fraction as _core_kelly_fraction,
+    kelly_suggested as _core_kelly_suggested,
+)
 from line_tracker.models import BettingLine, BetType
 
 # ---------------------------------------------------------------------------
@@ -70,10 +74,7 @@ def kelly_fraction(
 
     Returns 0.0 when EV is non-positive or odds are invalid.
     """
-    if decimal_odds <= 1.0 or p <= 0.0:
-        return 0.0
-    raw = (p * decimal_odds - 1.0) / (decimal_odds - 1.0)
-    return min(max(raw, 0.0), cap)
+    return _core_kelly_fraction(p, decimal_odds, cap)
 
 
 def kelly_suggested(
@@ -83,9 +84,7 @@ def kelly_suggested(
     cap: float = _KELLY_CAP,
 ) -> float:
     """Kelly fraction scaled by confidence multiplier."""
-    base = kelly_fraction(p, decimal_odds, cap)
-    mult = _CONFIDENCE_MULTIPLIER.get(confidence, 0.25)
-    return round(base * mult, 6)
+    return _core_kelly_suggested(p, decimal_odds, confidence, cap)
 
 
 def _sizing_note(frac: float) -> str:

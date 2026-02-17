@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from line_tracker.bet_history import compute_clv_metrics
+from line_tracker.core.clv import compute_clv_metrics
 
 
 def build_clv_dataframe(rows: list[dict]) -> pd.DataFrame:
