@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+import logging
+
+
+_REPO_SRC = Path(__file__).resolve().parents[2] / "src"
+if _REPO_SRC.exists() and str(_REPO_SRC) not in sys.path:
+    # Support running `streamlit run src/line_tracker/dashboard.py` from repo root
+    # in src-layout checkouts that are not installed in editable mode.
+    sys.path.insert(0, str(_REPO_SRC))
 
 import pandas as pd
 import streamlit as st
+import line_tracker as _line_tracker_pkg
 
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
 from line_tracker.best_bets import recommend_best_bets
@@ -95,6 +106,7 @@ _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
 _FAR_FUTURE = datetime.max.replace(tzinfo=None)
 
 DB_PATH = str(DEFAULT_DB_PATH)
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +128,26 @@ def _require_key() -> str | None:
 def _format_odds(val: float) -> str:
     """Format American odds with a + or - sign."""
     return f"{val:+.0f}" if val != 0 else "EVEN"
+
+
+def _debug_import_resolution() -> None:
+    """Optionally show package import origin to diagnose path-shadowing."""
+    if os.environ.get("LINE_TRACKER_DEBUG_IMPORTS") != "1":
+        return
+
+    package_file = Path(_line_tracker_pkg.__file__).resolve()
+    expected_pkg_dir = Path(__file__).resolve().parent
+    message = f"line_tracker imported from: {package_file}"
+    st.caption(message)
+    _LOGGER.warning(message)
+
+    if package_file.parent != expected_pkg_dir:
+        warning = (
+            "Import path mismatch detected. "
+            f"Expected package in {expected_pkg_dir}, got {package_file.parent}."
+        )
+        st.warning(warning)
+        _LOGGER.warning(warning)
 
 
 def _format_value(val: float, bet_type: BetType) -> str:
@@ -3056,6 +3088,7 @@ def main():
         page_icon="$",
         layout="wide",
     )
+    _debug_import_resolution()
 
     # Ensure bet slip exists in session state
     if "bet_slip" not in st.session_state:
