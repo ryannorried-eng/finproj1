@@ -390,6 +390,8 @@ class BetRecommendation:
     p_incl: float = 0.0  # consensus prob including evaluated book
     books_used_excl: int = 0  # books in the exclusion consensus
     consensus_method: str = ""  # "median" or "trimmed_mean"
+    # Pluggable tier assignment (set by assign_tiers)
+    bet_tier: str = ""  # "Tier 1", "Tier 2", "Tier 3", or "Stay Away"
 
 
 # ---------------------------------------------------------------------------
