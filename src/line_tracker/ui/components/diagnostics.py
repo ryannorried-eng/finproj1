@@ -29,8 +29,17 @@ def get_db_counts(store) -> dict:
 
 def get_latest_timestamps(store) -> dict:
     conn = store._conn
+    latest_line = conn.execute(
+        "SELECT MAX(timestamp) FROM lines",
+    ).fetchone()[0]
+    latest_bet = conn.execute(
+        "SELECT MAX(created_at) FROM bets",
+    ).fetchone()[0]
+    latest_clv = conn.execute(
+        "SELECT MAX(closed_at) FROM bet_clv",
+    ).fetchone()[0]
     return {
-        "latest_line_timestamp": conn.execute("SELECT MAX(timestamp) FROM lines").fetchone()[0],
-        "latest_bet_created_at": conn.execute("SELECT MAX(created_at) FROM bets").fetchone()[0],
-        "latest_clv_closed_at": conn.execute("SELECT MAX(closed_at) FROM bet_clv").fetchone()[0],
+        "latest_line_timestamp": latest_line,
+        "latest_bet_created_at": latest_bet,
+        "latest_clv_closed_at": latest_clv,
     }

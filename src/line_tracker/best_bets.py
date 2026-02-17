@@ -16,6 +16,8 @@ from line_tracker.bet_slip import (
 )
 from line_tracker.core.math import (
     kelly_fraction as _core_kelly_fraction,
+)
+from line_tracker.core.math import (
     kelly_suggested as _core_kelly_suggested,
 )
 from line_tracker.models import BettingLine, BetType

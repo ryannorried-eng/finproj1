@@ -1,24 +1,32 @@
-"""Streamlit web dashboard — run with: PYTHONPATH=src streamlit run src/line_tracker/dashboard.py"""
+"""Streamlit web dashboard.
+
+Run with: PYTHONPATH=src streamlit run src/line_tracker/dashboard.py
+"""
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-import logging
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import line_tracker as _line_tracker_pkg
 
+import line_tracker as _line_tracker_pkg
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
 from line_tracker.best_bets import recommend_best_bets
 from line_tracker.bet_history import (
     compute_clv,
     init_bet_state,
     load_bets_from_db,
-    settle_bet as settle_bet_state,
     settled_bet_summary,
+)
+from line_tracker.bet_history import (
+    settle_bet as settle_bet_state,
+)
+from line_tracker.bet_history import (
     submit_bet as submit_bet_state,
 )
 from line_tracker.bet_slip import (
@@ -43,7 +51,6 @@ from line_tracker.calibration import (
 from line_tracker.market_structure import analyze_market
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
-from line_tracker.scraper import OddsClient
 from line_tracker.performance import (
     all_breakdowns,
     apply_filters,
@@ -53,15 +60,18 @@ from line_tracker.performance import (
     rolling_clv_series,
     summary_kpis,
 )
-from line_tracker.slate import passes_relaxed_tier2
-from line_tracker.storage import DEFAULT_DB_PATH, LineStore
+from line_tracker.scraper import OddsClient
 from line_tracker.services.bet_service import (
     settle_bet as settle_bet_persisted,
+)
+from line_tracker.services.bet_service import (
     submit_bet as submit_bet_persisted,
 )
 from line_tracker.services.ingestion_service import fetch_and_persist_snapshot
 from line_tracker.services.performance_service import load_clv_df
 from line_tracker.services.slate_service import build_daily_slate_service
+from line_tracker.slate import passes_relaxed_tier2
+from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 from line_tracker.ui.components.diagnostics import (
     get_db_counts,
     get_db_status,

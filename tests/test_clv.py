@@ -299,7 +299,9 @@ class TestComputeCLV:
             ),
         ],
     )
-    def test_clv_sign_consistency(self, label, row, expected_prob_sign, expected_dec_sign):
+    def test_clv_sign_consistency(
+        self, label, row, expected_prob_sign, expected_dec_sign,
+    ):
         m = compute_clv(row)
         assert m is not None, label
 

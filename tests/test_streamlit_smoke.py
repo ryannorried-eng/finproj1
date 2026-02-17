@@ -26,4 +26,5 @@ def test_dashboard_smoke_startup() -> None:
     page_radios = [radio for radio in at.radio if radio.label == "Page"]
     assert page_radios, "Expected sidebar Page navigation radio"
     options = set(page_radios[0].options)
-    assert {"Dashboard", "Best Lines to Shop", "Daily Slate", "Performance"}.issubset(options)
+    expected = {"Dashboard", "Best Lines to Shop", "Daily Slate", "Performance"}
+    assert expected.issubset(options)

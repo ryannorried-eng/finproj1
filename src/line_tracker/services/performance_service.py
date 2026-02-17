@@ -5,7 +5,8 @@ from __future__ import annotations
 import pandas as pd
 
 from line_tracker.core.logging import get_logger
-from line_tracker.performance import build_clv_dataframe, summary_kpis as _summary_kpis
+from line_tracker.performance import build_clv_dataframe
+from line_tracker.performance import summary_kpis as _summary_kpis
 
 
 def load_clv_df(store, filters: dict | None = None) -> pd.DataFrame:

@@ -37,7 +37,7 @@ def test_settle_bet_calls_close_then_settle(monkeypatch):
     monkeypatch.setattr(
         bet_service,
         "settle_bet_persistent",
-        lambda bet_id, outcome, store: events.append(("settle", bet_id, outcome, store)),
+        lambda bid, out, s: events.append(("settle", bid, out, s)),
     )
 
     store = _Store()

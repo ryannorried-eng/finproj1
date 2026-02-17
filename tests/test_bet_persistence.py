@@ -317,8 +317,14 @@ class TestEdgeCases:
 def test_settled_record_counts_reconcile_with_db_rows(tmp_path):
     db_path = tmp_path / "reconcile.db"
     won = create_bet(stake=100, sportsbook="DK", legs=[_leg(odds=-150)])
-    lost = create_bet(stake=50, sportsbook="FD", legs=[_leg(odds=120, event_name="A @ B")])
-    push = create_bet(stake=25, sportsbook="MGM", legs=[_leg(odds=-110, event_name="C @ D")])
+    lost = create_bet(
+        stake=50, sportsbook="FD",
+        legs=[_leg(odds=120, event_name="A @ B")],
+    )
+    push = create_bet(
+        stake=25, sportsbook="MGM",
+        legs=[_leg(odds=-110, event_name="C @ D")],
+    )
 
     with LineStore(db_path=db_path) as store:
         persist_bet(won, store)
@@ -337,14 +343,17 @@ def test_settled_record_counts_reconcile_with_db_rows(tmp_path):
     assert statuses.count("push") == 1
 
 
-def test_persist_bet_with_snapshot_rolls_back_when_clv_write_fails(tmp_path, monkeypatch):
+def test_persist_bet_with_snapshot_rolls_back_when_clv_write_fails(
+    tmp_path, monkeypatch,
+):
     db_path = tmp_path / "atomic_snapshot.db"
     bet = create_bet(stake=100, sportsbook="DraftKings", legs=[_leg()])
 
     with LineStore(db_path=db_path) as store:
         # Ensure snapshot_pick will attempt a CLV write.
-        from line_tracker.models import BetType, BettingLine
         from datetime import datetime, timezone
+
+        from line_tracker.models import BettingLine, BetType
 
         ts = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
         store.save_lines([

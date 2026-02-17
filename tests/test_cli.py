@@ -1,9 +1,9 @@
-from datetime import datetime, timezone
-
 """Tests for the CLI entry point."""
 
+from datetime import datetime, timezone
+
 from line_tracker.__main__ import main
-from line_tracker.models import BetType, BettingLine
+from line_tracker.models import BettingLine, BetType
 from line_tracker.storage import LineStore
 
 

@@ -14,6 +14,8 @@ def test_get_logger_does_not_duplicate_handlers():
 
 
 def test_get_logger_includes_context_fields():
-    logger = get_logger("line_tracker.tests.logging_ctx", run_id="run-123", source="svc")
+    logger = get_logger(
+        "line_tracker.tests.logging_ctx", run_id="run-123", source="svc",
+    )
     assert logger.extra["run_id"] == "run-123"
     assert logger.extra["source"] == "svc"

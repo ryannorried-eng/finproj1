@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from line_tracker.models import BetType, BettingLine
+from line_tracker.models import BettingLine, BetType
 from line_tracker.storage import LineStore
 from line_tracker.ui.components.diagnostics import (
     get_db_counts,
@@ -65,7 +65,8 @@ def test_diagnostics_status_counts_and_latest(tmp_path):
 
         assert "db_path" in status
         assert status["schema_version"] >= 2
-        assert set(status["pragmas"].keys()) == {"journal_mode", "foreign_keys", "busy_timeout"}
+        expected_keys = {"journal_mode", "foreign_keys", "busy_timeout"}
+        assert set(status["pragmas"].keys()) == expected_keys
 
         assert counts["lines"] == 1
         assert counts["bets"] == 1
