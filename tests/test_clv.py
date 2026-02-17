@@ -228,33 +228,86 @@ class TestCLVStorage:
 
 
 class TestComputeCLV:
-    def test_positive_clv(self):
-        row = {
-            "pick_odds_decimal": 1.80,
-            "best_odds_close_decimal": 1.70,
-            "consensus_prob_at_pick": 0.55,
-            "consensus_prob_close": 0.59,
-        }
+    @pytest.mark.parametrize(
+        ("label", "row", "expected_prob_sign", "expected_dec_sign"),
+        [
+            (
+                "favorite_beats_close",
+                {
+                    "pick_odds_decimal": 1.80,
+                    "best_odds_close_decimal": 1.70,
+                    "consensus_prob_at_pick": 0.55,
+                    "consensus_prob_close": 0.59,
+                },
+                1,
+                1,
+            ),
+            (
+                "favorite_loses_close",
+                {
+                    "pick_odds_decimal": 1.80,
+                    "best_odds_close_decimal": 1.95,
+                    "consensus_prob_at_pick": 0.55,
+                    "consensus_prob_close": 0.50,
+                },
+                -1,
+                -1,
+            ),
+            (
+                "underdog_beats_close",
+                {
+                    "pick_odds_decimal": 2.40,
+                    "best_odds_close_decimal": 2.20,
+                    "consensus_prob_at_pick": 0.42,
+                    "consensus_prob_close": 0.46,
+                },
+                1,
+                1,
+            ),
+            (
+                "underdog_loses_close",
+                {
+                    "pick_odds_decimal": 2.20,
+                    "best_odds_close_decimal": 2.45,
+                    "consensus_prob_at_pick": 0.45,
+                    "consensus_prob_close": 0.40,
+                },
+                -1,
+                -1,
+            ),
+            (
+                "spread_like_beats_close",
+                {
+                    "pick_odds_decimal": 1.95,
+                    "best_odds_close_decimal": 1.87,
+                    "consensus_prob_at_pick": 0.52,
+                    "consensus_prob_close": 0.54,
+                },
+                1,
+                1,
+            ),
+            (
+                "spread_like_loses_close",
+                {
+                    "pick_odds_decimal": 1.91,
+                    "best_odds_close_decimal": 2.00,
+                    "consensus_prob_at_pick": 0.51,
+                    "consensus_prob_close": 0.49,
+                },
+                -1,
+                -1,
+            ),
+        ],
+    )
+    def test_clv_sign_consistency(self, label, row, expected_prob_sign, expected_dec_sign):
         m = compute_clv(row)
-        assert m is not None
-        # close_dec - pick_dec = 1.70 - 1.80 = -0.10
-        assert m["clv_decimal"] == pytest.approx(-0.10, abs=0.001)
-        # close_prob - pick_prob = 0.59 - 0.55 = 0.04
-        assert m["clv_prob"] == pytest.approx(0.04, abs=0.001)
+        assert m is not None, label
 
-    def test_negative_clv(self):
-        row = {
-            "pick_odds_decimal": 1.80,
-            "best_odds_close_decimal": 1.95,
-            "consensus_prob_at_pick": 0.55,
-            "consensus_prob_close": 0.50,
-        }
-        m = compute_clv(row)
-        assert m is not None
-        # 1.95 - 1.80 = +0.15
-        assert m["clv_decimal"] == pytest.approx(0.15, abs=0.001)
-        # 0.50 - 0.55 = -0.05
-        assert m["clv_prob"] == pytest.approx(-0.05, abs=0.001)
+        prob_sign = 0 if m["clv_prob"] == 0 else (1 if m["clv_prob"] > 0 else -1)
+        dec_sign = 0 if m["clv_decimal"] == 0 else (1 if m["clv_decimal"] > 0 else -1)
+
+        assert prob_sign == expected_prob_sign, label
+        assert dec_sign == expected_dec_sign, label
 
     def test_no_close_data_returns_none(self):
         row = {
@@ -533,6 +586,6 @@ class TestCLVEndToEnd:
             m = compute_clv(r)
             assert m is not None
             # Closing decimal odds should be lower (bigger fav)
-            assert m["clv_decimal"] < 0
+            assert m["clv_decimal"] > 0
             # Closing prob should be higher
             assert m["clv_prob"] > 0

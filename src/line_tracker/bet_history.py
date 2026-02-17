@@ -231,6 +231,15 @@ def persist_bet(bet: Bet, store) -> str:
     return store.insert_bet_with_legs(bet_row, leg_rows)
 
 
+
+
+def persist_bet_with_snapshot(bet: Bet, store) -> str:
+    """Persist bet + legs + CLV pick snapshots atomically."""
+    with store.transaction():
+        bet_id = persist_bet(bet, store)
+        snapshot_pick(bet, store)
+    return bet_id
+
 def load_bets_from_db(store, status: str | None = None) -> list[Bet]:
     """Read bets (and their legs) from SQLite and return Bet objects.
 
@@ -452,6 +461,6 @@ def compute_clv(row: dict) -> dict | None:
     pick_prob = row["consensus_prob_at_pick"]
     close_prob = row.get("consensus_prob_close", pick_prob)
     return {
-        "clv_decimal": round(close_dec - pick_dec, 4),
+        "clv_decimal": round(pick_dec - close_dec, 4),
         "clv_prob": round(close_prob - pick_prob, 4),
     }

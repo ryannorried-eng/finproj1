@@ -193,11 +193,19 @@ def _cmd_moves(args) -> int:
         print("Need at least 2 snapshots. Run 'fetch' again.")
         return 0
 
-    # Split into old vs new by timestamp median
-    sorted_lines = sorted(all_lines, key=lambda ln: ln.timestamp)
-    mid = len(sorted_lines) // 2
-    old_snap = sorted_lines[:mid]
-    new_snap = sorted_lines[mid:]
+    # Compare only the two most recent snapshot timestamps.
+    by_ts: dict = {}
+    for ln in all_lines:
+        by_ts.setdefault(ln.timestamp, []).append(ln)
+
+    snapshots = sorted(by_ts)
+    if len(snapshots) < 2:
+        print("Need at least 2 snapshots. Run 'fetch' again.")
+        return 0
+
+    prev_ts, latest_ts = snapshots[-2], snapshots[-1]
+    old_snap = by_ts[prev_ts]
+    new_snap = by_ts[latest_ts]
 
     moves = detect_moves(old_snap, new_snap, threshold=args.threshold)
 

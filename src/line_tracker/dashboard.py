@@ -1,20 +1,11 @@
-"""Streamlit web dashboard — run with: streamlit run src/line_tracker/dashboard.py"""
+"""Streamlit web dashboard — run with: PYTHONPATH=src streamlit run src/line_tracker/dashboard.py"""
 
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 import logging
-
-
-_REPO_SRC = Path(__file__).resolve().parents[2] / "src"
-if _REPO_SRC.exists() and str(_REPO_SRC) not in sys.path:
-    # Support running `streamlit run src/line_tracker/dashboard.py` from repo root
-    # in src-layout checkouts that are not installed in editable mode.
-    sys.path.insert(0, str(_REPO_SRC))
 
 import pandas as pd
 import streamlit as st
@@ -27,11 +18,10 @@ from line_tracker.bet_history import (
     compute_clv,
     init_bet_state,
     load_bets_from_db,
-    persist_bet,
+    persist_bet_with_snapshot,
     settle_bet,
     settle_bet_persistent,
     settled_bet_summary,
-    snapshot_pick,
     submit_bet,
 )
 from line_tracker.bet_slip import (
@@ -1778,8 +1768,7 @@ def _slip_dialog():
                 st.session_state["_slip_submitted"] = True
                 try:
                     with LineStore() as _s:
-                        persist_bet(bet, _s)
-                        snapshot_pick(bet, _s)
+                        persist_bet_with_snapshot(bet, _s)
                 except Exception:
                     pass  # DB + CLV snapshot is best-effort
             except ValueError as exc:

@@ -255,7 +255,7 @@ class TestBuildClvDataframe:
             "closed_at": "2026-01-20T12:00:00",
         }]
         df = build_clv_dataframe(rows)
-        assert df.iloc[0]["clv_decimal"] == pytest.approx(-0.2, abs=0.001)
+        assert df.iloc[0]["clv_decimal"] == pytest.approx(0.2, abs=0.001)
         assert df.iloc[0]["clv_prob"] == pytest.approx(0.05, abs=0.001)
 
 
@@ -470,11 +470,11 @@ def test_apply_filters_end_date_includes_full_day():
 def test_clv_color_uses_probability_semantics():
     from line_tracker.performance import clv_color
 
-    # Regression guard: decimal CLV can be negative while probability CLV is positive.
-    clv_decimal = -0.05
+    # Regression guard: decimal CLV should align with probability CLV direction.
+    clv_decimal = 0.05
     clv_prob = 0.012
 
-    assert clv_decimal < 0
+    assert clv_decimal > 0
     assert clv_prob > 0
     assert clv_color(clv_prob) == "green"
 
