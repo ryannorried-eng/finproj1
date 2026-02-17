@@ -1543,7 +1543,7 @@ def _detail_history(event_name: str):
 # Bet Slip: add controls (inside detail odds tab)
 # ---------------------------------------------------------------------------
 
-def _try_add_leg(leg: dict) -> None:
+def _try_add_leg(leg: dict, *, rec_meta: dict | None = None) -> None:
     """Validate and add a leg to the bet slip, enforcing sportsbook lock."""
     slip = st.session_state.setdefault("bet_slip", [])
     slip_book = _get_slip_book()
@@ -1569,6 +1569,8 @@ def _try_add_leg(leg: dict) -> None:
         st.toast("Added to bet slip!", icon="\u2705")
 
     slip.append(leg)
+    if rec_meta is not None:
+        st.session_state["_slip_rec_meta"] = rec_meta
     # Lock to this book on first leg
     if not slip_book:
         _lock_slip_book(leg["sportsbook"])
@@ -1810,11 +1812,20 @@ def _slip_dialog():
             use_container_width=True,
         ):
             try:
+                rec_meta = st.session_state.pop("_slip_rec_meta", None)
                 bet = submit_bet_state(st.session_state, stake)
                 st.session_state["_slip_submitted"] = True
                 try:
                     with LineStore() as _s:
-                        submit_bet_persisted(bet, _s)
+                        if rec_meta:
+                            submit_bet_persisted(
+                                bet, _s,
+                                source_page=rec_meta.get("source_page"),
+                                recommendation=rec_meta.get("recommendation"),
+                                rank=rec_meta.get("rank"),
+                            )
+                        else:
+                            submit_bet_persisted(bet, _s)
                 except Exception:
                     pass  # DB + CLV snapshot is best-effort
             except ValueError as exc:
@@ -2021,7 +2032,20 @@ def _page_best_lines():
                                 "odds": s["odds"],
                                 "fetched_at": "",
                             }
-                            _try_add_leg(leg)
+                            _try_add_leg(leg, rec_meta={
+                                "source_page": "shopping",
+                                "rank": rank,
+                                "recommendation": {
+                                    "market": s["market"],
+                                    "selection": s["selection"],
+                                    "line": s.get("line"),
+                                    "best_sportsbook": s["sportsbook"],
+                                    "best_odds": s["odds"],
+                                    "consensus_prob": s.get("consensus_prob", 0.0),
+                                    "quality_tier": None,
+                                    "edge_pct": s.get("edge", 0.0) * 100,
+                                },
+                            })
                     elif slip_book:
                         st.caption(f"Locked to {slip_book}")
             render_pick_explanation(
@@ -2509,6 +2533,9 @@ def _render_slate_date_groups(entries: list[dict], *, show_cards: bool) -> None:
     today = date.today()
     tomorrow = today + timedelta(days=1)
 
+    # Build rank lookup (1-indexed, preserving original list order)
+    _rank_of = {id(e): i + 1 for i, e in enumerate(entries)}
+
     # Check if any entry has commence_time
     has_dates = any(e.get("commence_time") is not None for e in entries)
 
@@ -2516,7 +2543,7 @@ def _render_slate_date_groups(entries: list[dict], *, show_cards: bool) -> None:
         # No grouping — render flat
         if show_cards:
             for entry in entries:
-                _render_slate_card(entry)
+                _render_slate_card(entry, rank=_rank_of.get(id(entry)))
         return
 
     # Group by local date
@@ -2548,10 +2575,10 @@ def _render_slate_date_groups(entries: list[dict], *, show_cards: bool) -> None:
 
         if show_cards:
             for entry in groups[group_date]:
-                _render_slate_card(entry)
+                _render_slate_card(entry, rank=_rank_of.get(id(entry)))
 
 
-def _render_slate_card(entry: dict) -> None:
+def _render_slate_card(entry: dict, rank: int | None = None) -> None:
     """Render a single Tier-1 slate card with Add-to-slip."""
     slip_book = _get_slip_book()
     market_label = _slate_market_label(entry)
@@ -2604,7 +2631,20 @@ def _render_slate_card(entry: dict) -> None:
                         "odds": entry["best_odds"],
                         "fetched_at": "",
                     }
-                    _try_add_leg(leg)
+                    _try_add_leg(leg, rec_meta={
+                        "source_page": "slate",
+                        "rank": rank,
+                        "recommendation": {
+                            "market": entry["market"],
+                            "selection": entry["selection"],
+                            "line": entry.get("line"),
+                            "best_sportsbook": entry["best_sportsbook"],
+                            "best_odds": entry["best_odds"],
+                            "consensus_prob": entry["consensus_prob"],
+                            "quality_tier": entry.get("quality_tier"),
+                            "edge_pct": entry.get("edge_pct_pp", entry["edge_pct"]),
+                        },
+                    })
             elif slip_book:
                 st.caption(f"Locked to {slip_book}")
 

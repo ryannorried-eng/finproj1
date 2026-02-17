@@ -195,10 +195,19 @@ def delete_bet(state: dict, bet_id: str) -> Bet:
 # DB persistence helpers
 # ---------------------------------------------------------------------------
 
-def persist_bet(bet: Bet, store) -> str:
+def persist_bet(
+    bet: Bet,
+    store,
+    recommendation_meta: dict | None = None,
+) -> str:
     """Write a Bet and its legs to SQLite in a single transaction.
 
     *store* is a ``LineStore`` instance.  Returns the bet_id.
+
+    *recommendation_meta*, when provided, is a dict with optional keys:
+    ``source_page``, ``recommendation_id``, ``rank_at_pick``,
+    ``quality_tier_at_pick``, ``edge_pct_at_pick``,
+    ``consensus_prob_at_pick``, ``execution_delta_decimal``.
     """
     bet_row = {
         "bet_id": bet.id,
@@ -213,6 +222,8 @@ def persist_bet(bet: Bet, store) -> str:
         "settled_at": bet.settled_at,
         "outcome": None,
     }
+    if recommendation_meta:
+        bet_row.update(recommendation_meta)
     leg_rows = []
     for lg in bet.legs:
         odds = lg["odds"]
@@ -232,10 +243,14 @@ def persist_bet(bet: Bet, store) -> str:
     return store.insert_bet_with_legs(bet_row, leg_rows)
 
 
-def persist_bet_with_snapshot(bet: Bet, store) -> str:
+def persist_bet_with_snapshot(
+    bet: Bet,
+    store,
+    recommendation_meta: dict | None = None,
+) -> str:
     """Persist bet + legs + CLV pick snapshots atomically."""
     with store.transaction():
-        bet_id = persist_bet(bet, store)
+        bet_id = persist_bet(bet, store, recommendation_meta=recommendation_meta)
         snapshot_pick(bet, store, bet_id=bet_id)
     return bet_id
 

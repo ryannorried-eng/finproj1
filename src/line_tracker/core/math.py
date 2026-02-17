@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 _KELLY_CAP = 0.25
 _CONFIDENCE_MULTIPLIER: dict[str, float] = {
     "High": 1.0,
@@ -96,3 +98,29 @@ def kelly_suggested(
     base = kelly_fraction(p, decimal_odds, cap)
     mult = _CONFIDENCE_MULTIPLIER.get(confidence, 0.25)
     return round(base * mult, 6)
+
+
+def build_recommendation_id(rec) -> str:
+    """Build a deterministic recommendation ID from a recommendation.
+
+    Accepts a ``BetRecommendation`` dataclass, a dict, or any object
+    exposing the required attributes: *market*, *selection*, *line*,
+    *best_sportsbook*, *best_odds*.
+
+    Returns a 16-character hex digest (SHA-256 prefix).
+    """
+
+    def _get(obj, key, default=""):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    parts = [
+        str(_get(rec, "market")),
+        str(_get(rec, "selection")),
+        str(_get(rec, "line")),
+        str(_get(rec, "best_sportsbook")),
+        str(_get(rec, "best_odds")),
+    ]
+    payload = "|".join(parts)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]

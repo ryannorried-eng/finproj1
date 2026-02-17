@@ -402,7 +402,7 @@ def test_persist_bet_with_snapshot_passes_persisted_bet_id(monkeypatch):
     bet = create_bet(stake=100, sportsbook="DraftKings", legs=[_leg()])
     calls = []
 
-    def fake_persist_bet(_bet, _store):
+    def fake_persist_bet(_bet, _store, recommendation_meta=None):
         return "persisted-id-123"
 
     def fake_snapshot_pick(_bet, _store, *, bet_id=None):
