@@ -77,6 +77,7 @@ from line_tracker.ui.components.diagnostics import (
     get_db_status,
     get_latest_timestamps,
 )
+from line_tracker.ui.components.explainability import render_pick_explanation
 
 # Toggle to show EV Math Debug expander on slate / shopping pages.
 SHOW_EV_DEBUG = False
@@ -2023,6 +2024,11 @@ def _page_best_lines():
                             _try_add_leg(leg)
                     elif slip_book:
                         st.caption(f"Locked to {slip_book}")
+            render_pick_explanation(
+                s,
+                debug_enabled=st.session_state.get("diag_debug_mode", False),
+                context="shopping",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2607,6 +2613,11 @@ def _render_slate_card(entry: dict) -> None:
                 st.session_state["selected_game"] = entry["event"]
                 st.rerun()
         _render_why_tooltip(entry)
+        render_pick_explanation(
+            entry,
+            debug_enabled=st.session_state.get("diag_debug_mode", False),
+            context="slate",
+        )
 
 
 def _render_slate_table(entries: list[dict]) -> None:
@@ -2642,8 +2653,10 @@ def _render_slate_table(entries: list[dict]) -> None:
         hide_index=True,
     )
     # Per-row Why? expanders below the table
+    _debug = st.session_state.get("diag_debug_mode", False)
     for entry in entries:
         _render_why_tooltip(entry)
+        render_pick_explanation(entry, debug_enabled=_debug, context="slate")
 
 
 # ---------------------------------------------------------------------------
