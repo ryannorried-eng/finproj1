@@ -449,3 +449,31 @@ class TestSnapshotMetadata:
             # Metadata columns should be None
             assert rows[0]["pick_sportsbook"] is None
             assert rows[0]["sport"] is None
+
+
+def test_apply_filters_end_date_includes_full_day():
+    df = pd.DataFrame({
+        "closed_at": pd.to_datetime([
+            "2026-01-31T00:00:00",
+            "2026-01-31T23:59:59",
+            "2026-02-01T00:00:00",
+        ]),
+        "market": ["ML", "ML", "ML"],
+    })
+
+    filtered = apply_filters(df, date_end="2026-01-31")
+
+    assert len(filtered) == 2
+    assert filtered["closed_at"].max() == pd.Timestamp("2026-01-31T23:59:59")
+
+
+def test_clv_color_uses_probability_semantics():
+    from line_tracker.performance import clv_color
+
+    # Regression guard: decimal CLV can be negative while probability CLV is positive.
+    clv_decimal = -0.05
+    clv_prob = 0.012
+
+    assert clv_decimal < 0
+    assert clv_prob > 0
+    assert clv_color(clv_prob) == "green"

@@ -5,17 +5,38 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from shutil import copy2
 
 from line_tracker.models import BettingLine, BetType
 
 DEFAULT_DB_PATH = Path.home() / ".line_tracker" / "lines.db"
+LEGACY_DB_PATH = Path("lines.db")
+
+
+def resolve_db_path(db_path: str | Path | None = None) -> Path:
+    """Resolve DB path with one-time legacy migration.
+
+    If using the default path and the new DB doesn't exist yet but a legacy
+    local ./lines.db exists, copy it into ~/.line_tracker/lines.db.
+    This is safe and idempotent: existing new DB is never overwritten.
+    """
+    target = DEFAULT_DB_PATH if db_path is None else Path(db_path)
+    if target != DEFAULT_DB_PATH:
+        return target
+
+    if target.exists() or not LEGACY_DB_PATH.exists():
+        return target
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    copy2(LEGACY_DB_PATH, target)
+    return target
 
 
 class LineStore:
     """Stores betting lines in SQLite for historical tracking."""
 
-    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        self.db_path = resolve_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),

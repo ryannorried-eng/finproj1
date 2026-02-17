@@ -241,7 +241,10 @@ def apply_filters(
     if date_start and "closed_at" in df.columns:
         mask &= df["closed_at"] >= pd.Timestamp(date_start)
     if date_end and "closed_at" in df.columns:
-        mask &= df["closed_at"] <= pd.Timestamp(date_end)
+        # End date is inclusive at the day level:
+        # selecting YYYY-MM-DD should include all timestamps on that date.
+        end_exclusive = pd.Timestamp(date_end) + pd.Timedelta(days=1)
+        mask &= df["closed_at"] < end_exclusive
     if sport and "sport" in df.columns:
         mask &= df["sport"] == sport
     if market and "market" in df.columns:
@@ -252,6 +255,19 @@ def apply_filters(
         mask &= df["quality_tier_at_pick"] == quality_tier
 
     return df[mask]
+
+
+def clv_color(clv_prob: float) -> str:
+    """Return display color for CLV based on probability CLV semantics.
+
+    Positive CLV probability means we beat the close (good = green),
+    negative means we lost to the close (bad = red), and zero is neutral.
+    """
+    if clv_prob > 0:
+        return "green"
+    if clv_prob < 0:
+        return "red"
+    return "gray"
 
 
 # ------------------------------------------------------------------

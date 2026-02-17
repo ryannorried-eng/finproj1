@@ -1,6 +1,7 @@
 """Tests for SQLite storage layer."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from line_tracker.models import BettingLine, BetType
 from line_tracker.storage import LineStore
@@ -108,3 +109,30 @@ def test_prices_roundtrip(tmp_path):
         result = store.get_lines()[0]
         assert result.home_price == -110
         assert result.away_price == -108
+
+
+def test_default_path_migrates_legacy_db(tmp_path, monkeypatch):
+    legacy_db = tmp_path / "lines.db"
+    new_db = tmp_path / ".line_tracker" / "lines.db"
+
+    with LineStore(legacy_db) as legacy_store:
+        legacy_store.save_lines([_make_line()])
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("line_tracker.storage.DEFAULT_DB_PATH", new_db)
+    monkeypatch.setattr("line_tracker.storage.LEGACY_DB_PATH", Path("lines.db"))
+
+    with LineStore() as store:
+        assert store.db_path == new_db
+
+    assert new_db.exists()
+    with LineStore(new_db) as migrated_store:
+        assert len(migrated_store.get_lines()) == 1
+
+    # Idempotent safety: existing new DB is not overwritten on re-open.
+    with LineStore(new_db) as explicit_store:
+        explicit_store.save_lines([_make_line(event="Eagles @ Cowboys")])
+    with LineStore() as store:
+        assert store.db_path == new_db
+    with LineStore(new_db) as persisted_store:
+        assert len(persisted_store.get_lines()) == 2
