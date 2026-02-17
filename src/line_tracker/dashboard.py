@@ -30,6 +30,7 @@ from line_tracker.bet_history import (
     persist_bet,
     settle_bet,
     settle_bet_persistent,
+    settled_bet_summary,
     snapshot_pick,
     submit_bet,
 )
@@ -2712,22 +2713,16 @@ def _bet_history_dialog():
             st.info("No settled bets yet.")
         else:
             # Summary metrics
-            total_staked = sum(b.stake for b in settled)
-            total_profit = sum(
-                b.total_payout - b.stake if b.status == "won"
-                else (0.0 if b.status == "push" else -b.stake)
-                for b in settled
-            )
-            wins = sum(1 for b in settled if b.status == "won")
-            losses = sum(1 for b in settled if b.status == "lost")
-            pushes = sum(1 for b in settled if b.status == "push")
+            summary = settled_bet_summary(settled)
 
             mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Total Staked", fmt_money(total_staked))
-            mc2.metric("Net Profit", fmt_money(total_profit, sign=True))
-            mc3.metric("Record", f"{wins}W-{losses}L-{pushes}P")
-            roi = (total_profit / total_staked * 100) if total_staked else 0
-            mc4.metric("ROI", fmt_pct(roi, sign=True))
+            mc1.metric("Total Staked", fmt_money(summary["total_staked"]))
+            mc2.metric("Net Profit", fmt_money(summary["net_profit"], sign=True))
+            mc3.metric(
+                "Record",
+                f"{summary['wins']}W-{summary['losses']}L-{summary['pushes']}P",
+            )
+            mc4.metric("ROI", fmt_pct(summary["roi_pct"], sign=True))
 
             st.divider()
 

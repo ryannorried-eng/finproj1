@@ -300,3 +300,28 @@ def test_standouts_groups_independently():
     # Each group should have opposite signs
     assert home[0]["edge"] > 0
     assert away[0]["edge"] > 0
+
+
+def test_implied_prob_formula_matches_requirements():
+    assert implied_prob_from_american(200) == 100 / (200 + 100)
+    assert implied_prob_from_american(-125) == 125 / (125 + 100)
+
+
+def test_decimal_mapping_from_american_matches_requirements():
+    assert american_to_decimal(250) == 1 + 250 / 100
+    assert american_to_decimal(-250) == 1 + 100 / 250
+
+
+def test_parlay_empty_legs_raises_value_error():
+    import pytest
+
+    with pytest.raises(ValueError, match="at least one leg"):
+        parlay_payout(100, [])
+
+
+def test_odds_random_invariants_loop_based():
+    for odds in list(range(-500, -99, 23)) + list(range(100, 501, 23)):
+        dec = american_to_decimal(odds)
+        prob = implied_prob_from_american(odds)
+        assert dec >= 1.0
+        assert 0.0 < prob < 1.0
