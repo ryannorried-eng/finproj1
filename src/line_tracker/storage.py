@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shutil import copy2
 
+from line_tracker.db.migrate import ensure_latest
 from line_tracker.models import BettingLine, BetType
 
 DEFAULT_DB_PATH = Path.home() / ".line_tracker" / "lines.db"
@@ -47,7 +48,8 @@ class LineStore:
         self._in_explicit_txn = False
         self._txn_depth = 0
         self._configure_connection()
-        self._create_tables()
+        migrations_path = Path(__file__).parent / "db" / "migrations"
+        ensure_latest(self._conn, migrations_path)
 
 
     def _configure_connection(self) -> None:
@@ -86,153 +88,6 @@ class LineStore:
             self._txn_depth -= 1
             if self._txn_depth == 0:
                 self._in_explicit_txn = False
-
-    def _create_tables(self) -> None:
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS lines (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sportsbook TEXT NOT NULL,
-                sport TEXT NOT NULL,
-                event TEXT NOT NULL,
-                bet_type TEXT NOT NULL,
-                home_team TEXT NOT NULL,
-                away_team TEXT NOT NULL,
-                home_value REAL NOT NULL,
-                away_value REAL NOT NULL,
-                home_price REAL,
-                away_price REAL,
-                timestamp TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS bet_clv (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bet_id TEXT NOT NULL,
-                leg_index INTEGER NOT NULL DEFAULT 0,
-                event TEXT NOT NULL,
-                market TEXT NOT NULL,
-                pick_side TEXT NOT NULL,
-                pick_line_value REAL,
-                pick_odds_american REAL NOT NULL,
-                pick_odds_decimal REAL NOT NULL,
-                consensus_prob_at_pick REAL NOT NULL,
-                market_hold_median_at_pick REAL DEFAULT 0.0,
-                market_volatility_sigma_at_pick REAL DEFAULT 0.0,
-                consensus_prob_close REAL,
-                best_odds_close_american REAL,
-                best_odds_close_decimal REAL,
-                closed_at TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(bet_id, leg_index)
-            )
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_bet_clv_bet_id
-            ON bet_clv (bet_id)
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_event_type
-            ON lines (event, bet_type)
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_timestamp
-            ON lines (timestamp)
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sportsbook
-            ON lines (sportsbook)
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_event_type_book
-            ON lines (event, bet_type, sportsbook)
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS calibration_thresholds (
-                key TEXT PRIMARY KEY,
-                json TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS bets (
-                bet_id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                sportsbook TEXT NOT NULL,
-                stake REAL NOT NULL,
-                total_odds_american INTEGER NOT NULL,
-                total_odds_decimal REAL NOT NULL,
-                potential_payout REAL NOT NULL,
-                profit REAL NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                settled_at TEXT,
-                outcome TEXT
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS bet_legs (
-                leg_id TEXT PRIMARY KEY,
-                bet_id TEXT NOT NULL REFERENCES bets(bet_id),
-                sport TEXT,
-                market TEXT,
-                event_name TEXT,
-                selection TEXT,
-                line_value REAL,
-                odds_american INTEGER NOT NULL,
-                odds_decimal REAL NOT NULL,
-                sportsbook TEXT,
-                pick_timestamp TEXT,
-                commence_time TEXT
-            )
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_bet_legs_bet_id
-            ON bet_legs (bet_id)
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_bets_status
-            ON bets (status)
-        """)
-        self._conn.commit()
-        self._migrate_commence_time()
-        self._migrate_clv_metadata()
-
-    def _migrate_commence_time(self) -> None:
-        """Add commence_time column if it doesn't exist yet."""
-        cols = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(lines)").fetchall()
-        }
-        if "commence_time" not in cols:
-            self._conn.execute(
-                "ALTER TABLE lines ADD COLUMN commence_time TEXT"
-            )
-            self._conn.commit()
-
-    def _migrate_clv_metadata(self) -> None:
-        """Add pick-time metadata columns to bet_clv if they don't exist."""
-        cols = {
-            row[1]
-            for row in self._conn.execute(
-                "PRAGMA table_info(bet_clv)"
-            ).fetchall()
-        }
-        new_cols = {
-            "pick_sportsbook": "TEXT",
-            "sport": "TEXT",
-            "confidence_at_pick": "TEXT",
-            "quality_tier_at_pick": "TEXT",
-            "edge_pct_at_pick": "REAL",
-            "edge_z_at_pick": "REAL",
-            "books_used_at_pick": "INTEGER",
-            "agreement_score_at_pick": "REAL",
-        }
-        for col, col_type in new_cols.items():
-            if col not in cols:
-                self._conn.execute(
-                    f"ALTER TABLE bet_clv ADD COLUMN {col} {col_type}"
-                )
-        self._conn.commit()
 
     def save_lines(self, lines: list[BettingLine]) -> int:
         """Save a batch of lines. Returns number of rows inserted."""
