@@ -329,6 +329,19 @@ class TestComputeCLV:
         assert m["clv_prob"] == 0.0
 
 
+    def test_none_close_prob_falls_back_to_pick_prob(self):
+        row = {
+            "pick_odds_decimal": 1.91,
+            "best_odds_close_decimal": 1.83,
+            "consensus_prob_at_pick": 0.52,
+            "consensus_prob_close": None,
+        }
+        m = compute_clv(row)
+        assert m is not None
+        assert m["clv_decimal"] == pytest.approx(0.08, abs=0.001)
+        assert m["clv_prob"] == 0.0
+
+
 # -------------------------------------------------------------------
 # snapshot_pick — integration (uses real consensus)
 # -------------------------------------------------------------------

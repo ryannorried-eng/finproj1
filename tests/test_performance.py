@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
-from line_tracker.bet_history import create_bet, snapshot_pick
+from line_tracker.bet_history import compute_clv, create_bet, snapshot_pick
 from line_tracker.models import BettingLine, BetType
 from line_tracker.performance import (
     all_breakdowns,
@@ -494,3 +494,20 @@ def test_apply_filters_handles_tz_aware_closed_at_with_naive_date_bounds():
     assert len(filtered) == 2
     assert filtered["closed_at"].min() == pd.Timestamp("2026-01-31T00:00:00Z")
     assert filtered["closed_at"].max() == pd.Timestamp("2026-01-31T23:30:00Z")
+
+
+def test_build_dataframe_matches_compute_clv_for_single_row():
+    row = {
+        "pick_odds_decimal": 1.95,
+        "best_odds_close_decimal": 1.84,
+        "consensus_prob_at_pick": 0.51,
+        "consensus_prob_close": None,
+        "closed_at": "2026-01-20T12:00:00",
+    }
+
+    single = compute_clv(row)
+    df = build_clv_dataframe([row])
+
+    assert single is not None
+    assert df.iloc[0]["clv_decimal"] == pytest.approx(single["clv_decimal"], abs=0.001)
+    assert df.iloc[0]["clv_prob"] == pytest.approx(single["clv_prob"], abs=0.001)

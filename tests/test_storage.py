@@ -183,3 +183,65 @@ def test_foreign_keys_are_enforced(tmp_path):
                     "commence_time": None,
                 }],
             )
+
+
+def test_transaction_commits_on_success(tmp_path):
+    db = tmp_path / "test.db"
+    with LineStore(db) as store:
+        with store.transaction():
+            store.insert_bet({
+                "bet_id": "ok1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "sportsbook": "DK",
+                "stake": 100.0,
+                "total_odds_american": -110,
+                "total_odds_decimal": 1.9091,
+                "potential_payout": 190.91,
+                "profit": 90.91,
+                "status": "active",
+                "settled_at": None,
+                "outcome": None,
+            })
+
+        bets = store.get_bets()
+        assert len(bets) == 1
+        assert bets[0]["bet_id"] == "ok1"
+
+
+def test_nested_transaction_savepoint_rolls_back_inner_only(tmp_path):
+    db = tmp_path / "test.db"
+    with LineStore(db) as store:
+        with store.transaction():
+            store.insert_bet({
+                "bet_id": "outer",
+                "created_at": "2026-01-01T00:00:00Z",
+                "sportsbook": "DK",
+                "stake": 100.0,
+                "total_odds_american": -110,
+                "total_odds_decimal": 1.9091,
+                "potential_payout": 190.91,
+                "profit": 90.91,
+                "status": "active",
+                "settled_at": None,
+                "outcome": None,
+            })
+
+            with pytest.raises(RuntimeError):
+                with store.transaction():
+                    store.insert_bet({
+                        "bet_id": "inner",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "sportsbook": "FD",
+                        "stake": 50.0,
+                        "total_odds_american": 120,
+                        "total_odds_decimal": 2.2,
+                        "potential_payout": 110.0,
+                        "profit": 60.0,
+                        "status": "active",
+                        "settled_at": None,
+                        "outcome": None,
+                    })
+                    raise RuntimeError("inner fail")
+
+        bet_ids = {b["bet_id"] for b in store.get_bets()}
+        assert bet_ids == {"outer"}

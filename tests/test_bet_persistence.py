@@ -385,3 +385,29 @@ def test_persist_bet_with_snapshot_rolls_back_when_clv_write_fails(tmp_path, mon
 
         assert store.get_bets() == []
         assert store.get_clv(bet.id) == []
+
+
+def test_persist_bet_with_snapshot_passes_persisted_bet_id(monkeypatch):
+    from line_tracker import bet_history as bh
+
+    bet = create_bet(stake=100, sportsbook="DraftKings", legs=[_leg()])
+    calls = []
+
+    def fake_persist_bet(_bet, _store):
+        return "persisted-id-123"
+
+    def fake_snapshot_pick(_bet, _store, *, bet_id=None):
+        calls.append(bet_id)
+
+    monkeypatch.setattr(bh, "persist_bet", fake_persist_bet)
+    monkeypatch.setattr(bh, "snapshot_pick", fake_snapshot_pick)
+
+    class _DummyStore:
+        def transaction(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    out = bh.persist_bet_with_snapshot(bet, _DummyStore())
+
+    assert out == "persisted-id-123"
+    assert calls == ["persisted-id-123"]
