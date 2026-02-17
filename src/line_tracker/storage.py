@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import copy2
@@ -43,7 +44,47 @@ class LineStore:
             detect_types=sqlite3.PARSE_DECLTYPES,
         )
         self._conn.row_factory = sqlite3.Row
+        self._in_explicit_txn = False
+        self._txn_depth = 0
+        self._configure_connection()
         self._create_tables()
+
+
+    def _configure_connection(self) -> None:
+        """Apply defensive SQLite connection settings."""
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+
+    @contextmanager
+    def transaction(self):
+        """Run statements in an explicit transaction with rollback safety."""
+        nested = self._txn_depth > 0
+        savepoint = f"sp_{self._txn_depth + 1}"
+        if nested:
+            self._conn.execute(f"SAVEPOINT {savepoint}")
+        else:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._in_explicit_txn = True
+        self._txn_depth += 1
+        try:
+            yield
+        except Exception:
+            if nested:
+                self._conn.execute(f"ROLLBACK TO {savepoint}")
+                self._conn.execute(f"RELEASE {savepoint}")
+            else:
+                self._conn.execute("ROLLBACK")
+            raise
+        else:
+            if nested:
+                self._conn.execute(f"RELEASE {savepoint}")
+            else:
+                self._conn.execute("COMMIT")
+        finally:
+            self._txn_depth -= 1
+            if self._txn_depth == 0:
+                self._in_explicit_txn = False
 
     def _create_tables(self) -> None:
         self._conn.execute("""
@@ -219,7 +260,8 @@ class LineStore:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
-        self._conn.commit()
+        if not self._in_explicit_txn:
+            self._conn.commit()
         return cursor.rowcount
 
     def get_lines(
@@ -334,7 +376,8 @@ class LineStore:
                 agreement_score_at_pick,
             ),
         )
-        self._conn.commit()
+        if not self._in_explicit_txn:
+            self._conn.commit()
 
     def close_clv(
         self,
@@ -405,7 +448,8 @@ class LineStore:
                 bet_row.get("outcome"),
             ),
         )
-        self._conn.commit()
+        if not self._in_explicit_txn:
+            self._conn.commit()
         return bet_row["bet_id"]
 
     def insert_legs(self, bet_id: str, legs: list[dict]) -> None:
@@ -435,14 +479,14 @@ class LineStore:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
-        self._conn.commit()
+        if not self._in_explicit_txn:
+            self._conn.commit()
 
     def insert_bet_with_legs(
         self, bet_row: dict, legs: list[dict],
     ) -> str:
         """Persist a bet + legs in a single transaction. Returns bet_id."""
-        try:
-            self._conn.execute("BEGIN")
+        with self.transaction():
             self._conn.execute(
                 """INSERT INTO bets
                    (bet_id, created_at, sportsbook, stake,
@@ -485,10 +529,6 @@ class LineStore:
                         lg.get("commence_time"),
                     ),
                 )
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
         return bet_row["bet_id"]
 
     def get_bets(

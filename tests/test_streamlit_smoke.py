@@ -13,12 +13,9 @@ except Exception:  # pragma: no cover - depends on installed streamlit version
 
 
 @pytest.mark.skipif(AppTest is None, reason="streamlit.testing.v1 is unavailable")
-def test_dashboard_smoke_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_smoke_startup() -> None:
     """Dashboard should render key UI without raising exceptions."""
     repo_root = Path(__file__).resolve().parents[1]
-    src_path = repo_root / "src"
-    monkeypatch.syspath_prepend(str(src_path))
-
     app_file = repo_root / "src" / "line_tracker" / "dashboard.py"
     at = AppTest.from_file(str(app_file))
     at.run(timeout=30)

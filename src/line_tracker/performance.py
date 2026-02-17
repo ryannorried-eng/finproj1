@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from line_tracker.bet_history import compute_clv_metrics
+
 
 def build_clv_dataframe(rows: list[dict]) -> pd.DataFrame:
     """Convert raw CLV rows from the database into an analytics DataFrame.
@@ -13,7 +15,7 @@ def build_clv_dataframe(rows: list[dict]) -> pd.DataFrame:
         consensus_prob_at_pick, consensus_prob_close, closed_at.
 
     Computed columns added:
-        clv_decimal  – close_dec - pick_dec (negative = got better price)
+        clv_decimal  – pick_dec - close_dec (positive = beat the close)
         clv_prob     – close_prob - pick_prob (positive = beat the close)
     """
     if not rows:
@@ -21,9 +23,18 @@ def build_clv_dataframe(rows: list[dict]) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
 
-    # Compute CLV metrics
-    df["clv_decimal"] = df["best_odds_close_decimal"] - df["pick_odds_decimal"]
-    df["clv_prob"] = df["consensus_prob_close"] - df["consensus_prob_at_pick"]
+    # Compute CLV metrics from the canonical helper.
+    pick_prob = pd.to_numeric(df["consensus_prob_at_pick"], errors="coerce")
+    close_prob_raw = pd.to_numeric(df["consensus_prob_close"], errors="coerce")
+    close_prob = close_prob_raw.where(close_prob_raw.notna(), pick_prob)
+    metrics = compute_clv_metrics(
+        pick_dec=pd.to_numeric(df["pick_odds_decimal"], errors="coerce"),
+        close_dec=pd.to_numeric(df["best_odds_close_decimal"], errors="coerce"),
+        pick_prob=pick_prob,
+        close_prob=close_prob,
+    )
+    df["clv_decimal"] = metrics["clv_decimal"]
+    df["clv_prob"] = metrics["clv_prob"]
 
     # Parse closed_at to datetime
     if "closed_at" in df.columns:
@@ -54,10 +65,9 @@ def summary_kpis(df: pd.DataFrame) -> dict:
         }
 
     total = len(df)
-    # clv_decimal > 0 means the closing decimal odds are higher than pick
-    # (i.e. pick got a better price → beat the close)
-    # BUT per convention: clv_prob > 0 means close_prob > pick_prob,
-    # which means the market moved toward your pick = you beat the close.
+    # Canonical CLV sign convention:
+    #   clv_prob > 0   => consensus moved toward your pick (beat close)
+    #   clv_decimal > 0 => pick decimal better than close (beat close)
     beating = (df["clv_prob"] > 0).sum()
 
     return {

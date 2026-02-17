@@ -231,6 +231,15 @@ def persist_bet(bet: Bet, store) -> str:
     return store.insert_bet_with_legs(bet_row, leg_rows)
 
 
+
+
+def persist_bet_with_snapshot(bet: Bet, store) -> str:
+    """Persist bet + legs + CLV pick snapshots atomically."""
+    with store.transaction():
+        bet_id = persist_bet(bet, store)
+        snapshot_pick(bet, store, bet_id=bet_id)
+    return bet_id
+
 def load_bets_from_db(store, status: str | None = None) -> list[Bet]:
     """Read bets (and their legs) from SQLite and return Bet objects.
 
@@ -329,13 +338,15 @@ _SIDE_MAP = {
 }
 
 
-def snapshot_pick(bet: Bet, store) -> None:
+def snapshot_pick(bet: Bet, store, *, bet_id: str | None = None) -> None:
     """Persist pick-time consensus snapshot for every leg.
 
     *store* is a ``LineStore`` instance.  For each leg we look up the
     latest lines, run consensus, and find the matching recommendation.
     """
     from line_tracker.best_bets import recommend_best_bets
+
+    target_bet_id = bet_id or bet.id
 
     for idx, leg in enumerate(bet.legs):
         event = leg["event_name"]
@@ -365,7 +376,7 @@ def snapshot_pick(bet: Bet, store) -> None:
 
         pick_odds = leg["odds"]
         store.save_clv_pick(
-            bet_id=bet.id,
+            bet_id=target_bet_id,
             leg_index=idx,
             event=event,
             market=market_label,
@@ -439,6 +450,31 @@ def close_bet_clv(bet_id: str, store) -> None:
         )
 
 
+
+
+def compute_clv_metrics(
+    *,
+    pick_dec,
+    close_dec,
+    pick_prob,
+    close_prob,
+) -> dict[str, object]:
+    """Canonical CLV metric formulas (positive = beat close)."""
+    clv_decimal = pick_dec - close_dec
+    clv_prob = close_prob - pick_prob
+    if hasattr(clv_decimal, "round"):
+        clv_decimal = clv_decimal.round(4)
+    else:
+        clv_decimal = round(clv_decimal, 4)
+    if hasattr(clv_prob, "round"):
+        clv_prob = clv_prob.round(4)
+    else:
+        clv_prob = round(clv_prob, 4)
+    return {
+        "clv_decimal": clv_decimal,
+        "clv_prob": clv_prob,
+    }
+
 def compute_clv(row: dict) -> dict | None:
     """Compute CLV metrics from a single bet_clv row.
 
@@ -450,8 +486,10 @@ def compute_clv(row: dict) -> dict | None:
     pick_dec = row["pick_odds_decimal"]
     close_dec = row["best_odds_close_decimal"]
     pick_prob = row["consensus_prob_at_pick"]
-    close_prob = row.get("consensus_prob_close", pick_prob)
-    return {
-        "clv_decimal": round(close_dec - pick_dec, 4),
-        "clv_prob": round(close_prob - pick_prob, 4),
-    }
+    close_prob = row.get("consensus_prob_close") or pick_prob
+    return compute_clv_metrics(
+        pick_dec=pick_dec,
+        close_dec=close_dec,
+        pick_prob=pick_prob,
+        close_prob=close_prob,
+    )

@@ -11,6 +11,7 @@ from line_tracker.bet_history import (
     delete_bet_persistent,
     load_bets_from_db,
     persist_bet,
+    persist_bet_with_snapshot,
     settle_bet_persistent,
     submit_bet,
 )
@@ -334,3 +335,79 @@ def test_settled_record_counts_reconcile_with_db_rows(tmp_path):
     assert statuses.count("won") == 1
     assert statuses.count("lost") == 1
     assert statuses.count("push") == 1
+
+
+def test_persist_bet_with_snapshot_rolls_back_when_clv_write_fails(tmp_path, monkeypatch):
+    db_path = tmp_path / "atomic_snapshot.db"
+    bet = create_bet(stake=100, sportsbook="DraftKings", legs=[_leg()])
+
+    with LineStore(db_path=db_path) as store:
+        # Ensure snapshot_pick will attempt a CLV write.
+        from line_tracker.models import BetType, BettingLine
+        from datetime import datetime, timezone
+
+        ts = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
+        store.save_lines([
+            BettingLine(
+                sportsbook="DraftKings",
+                sport="americanfootball_nfl",
+                event="Bills @ Chiefs",
+                bet_type=BetType.MONEYLINE,
+                home_team="Chiefs",
+                away_team="Bills",
+                home_value=-150,
+                away_value=130,
+                timestamp=ts,
+            ),
+            BettingLine(
+                sportsbook="FanDuel",
+                sport="americanfootball_nfl",
+                event="Bills @ Chiefs",
+                bet_type=BetType.MONEYLINE,
+                home_team="Chiefs",
+                away_team="Bills",
+                home_value=-145,
+                away_value=125,
+                timestamp=ts,
+            ),
+        ])
+
+        original = store.save_clv_pick
+
+        def boom(**kwargs):
+            original(**kwargs)
+            raise RuntimeError("forced after CLV write")
+
+        monkeypatch.setattr(store, "save_clv_pick", boom)
+
+        with pytest.raises(RuntimeError):
+            persist_bet_with_snapshot(bet, store)
+
+        assert store.get_bets() == []
+        assert store.get_clv(bet.id) == []
+
+
+def test_persist_bet_with_snapshot_passes_persisted_bet_id(monkeypatch):
+    from line_tracker import bet_history as bh
+
+    bet = create_bet(stake=100, sportsbook="DraftKings", legs=[_leg()])
+    calls = []
+
+    def fake_persist_bet(_bet, _store):
+        return "persisted-id-123"
+
+    def fake_snapshot_pick(_bet, _store, *, bet_id=None):
+        calls.append(bet_id)
+
+    monkeypatch.setattr(bh, "persist_bet", fake_persist_bet)
+    monkeypatch.setattr(bh, "snapshot_pick", fake_snapshot_pick)
+
+    class _DummyStore:
+        def transaction(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    out = bh.persist_bet_with_snapshot(bet, _DummyStore())
+
+    assert out == "persisted-id-123"
+    assert calls == ["persisted-id-123"]
