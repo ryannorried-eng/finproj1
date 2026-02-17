@@ -245,3 +245,50 @@ def test_nested_transaction_savepoint_rolls_back_inner_only(tmp_path):
 
         bet_ids = {b["bet_id"] for b in store.get_bets()}
         assert bet_ids == {"outer"}
+
+
+def test_repo_delegation_transaction_atomicity_for_bet_legs_and_clv(tmp_path):
+    db = tmp_path / "delegation.db"
+    with LineStore(db) as store:
+        with store.transaction():
+            store.insert_bet({
+                "bet_id": "txn1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "sportsbook": "DK",
+                "stake": 100.0,
+                "total_odds_american": -110,
+                "total_odds_decimal": 1.9091,
+                "potential_payout": 190.91,
+                "profit": 90.91,
+                "status": "active",
+                "settled_at": None,
+                "outcome": None,
+            })
+            store.insert_legs("txn1", [{
+                "leg_id": "leg-txn-1",
+                "sport": "NFL",
+                "market": "ML",
+                "event_name": "Bills @ Chiefs",
+                "selection": "Home",
+                "line_value": None,
+                "odds_american": -110,
+                "odds_decimal": 1.9091,
+                "sportsbook": "DK",
+                "pick_timestamp": "2026-01-01T00:00:00Z",
+                "commence_time": None,
+            }])
+            store.save_clv_pick(
+                bet_id="txn1",
+                leg_index=0,
+                event="Bills @ Chiefs",
+                market="ML",
+                pick_side="Home",
+                pick_line_value=None,
+                pick_odds_american=-110.0,
+                pick_odds_decimal=1.9091,
+                consensus_prob_at_pick=0.52,
+            )
+
+        assert len(store.get_bets()) == 1
+        assert len(store.get_bet_legs("txn1")) == 1
+        assert len(store.get_clv("txn1")) == 1
