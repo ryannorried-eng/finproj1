@@ -16,9 +16,11 @@ from line_tracker.bet_slip import (
 )
 from line_tracker.core.math import (
     kelly_fraction as _core_kelly_fraction,
+)
+from line_tracker.core.math import (
     kelly_suggested as _core_kelly_suggested,
 )
-from line_tracker.models import BettingLine, BetType
+from line_tracker.models import BestBetResult, BettingLine, BetType
 
 # ---------------------------------------------------------------------------
 # Book weights — higher weight = more influence on consensus probability.
@@ -722,6 +724,8 @@ def _build_rec(
     p_incl: float = 0.0,
     books_used_excl: int = 0,
     consensus_method: str = "",
+    books_used_names: list[str] | None = None,
+    recency_weights: list[float] | None = None,
 ) -> BetRecommendation:
     """Build a fully-populated BetRecommendation from core inputs.
 
@@ -815,7 +819,76 @@ def _build_rec(
     k_sugg = kelly_suggested(p_cons_w, dec_odds, confidence)
     s_note = _sizing_note(k_sugg)
 
-    return BetRecommendation(
+    # ── Build explanation dict ──────────────────────────────────────
+    _avg_recency = (
+        (sum(recency_weights) / len(recency_weights))
+        if recency_weights
+        else 0.0
+    )
+    _outliers_removed_count = max(0, total_books_count - books_used_count)
+
+    explanation: dict = {
+        "consensus_method": consensus_method or (
+            "trimmed_mean" if books_used_count >= 5 else "median"
+        ),
+        "edge_breakdown": {
+            "consensus_prob": round(consensus_prob, 6),
+            "breakeven_prob": round(be_prob, 6),
+            "edge_pp": _edge_pp,
+            "edge_pct": _edge_pct_pp,
+            "ev_roi": round(_ev_roi, 6),
+            "ev_100": _ev_100,
+        },
+        "ev_edge": {
+            "edge_ev": round(_edge_ev, 6),
+            "edge_ev_shrunk": round(_edge_ev_shrunk, 6),
+            "n_eff": round(_n_eff, 2),
+            "shrinkage_k": _SHRINKAGE_K,
+        },
+        "confidence_reasoning": {
+            "edge_z": ez,
+            "thresholds": {"High": 2.5, "Medium": 1.5},
+            "result": confidence,
+        },
+        "quality_factors": {
+            "edge_score": e_score,
+            "agreement_score": a_score,
+            "coverage_score": c_score,
+            "freshness_score": f_score,
+            "weights": {
+                "edge": _QW_EDGE,
+                "agreement": _QW_AGREEMENT,
+                "coverage": _QW_COVERAGE,
+                "freshness": _QW_FRESHNESS,
+            },
+            "quality_score": q_score,
+            "quality_tier": q_tier,
+        },
+        "outlier_info": {
+            "outlier_filtered": outlier_filtered,
+            "outliers_removed": _outliers_removed_count,
+            "outlier_rate": round(_outlier_rate, 4),
+            "market_unstable": market_unstable,
+        },
+        "market_context": {
+            "hold_median": mkt_hold_med,
+            "volatility_sigma": vol_sigma,
+            "robust_sigma": r_sigma,
+            "ev_sigma": round(_ev_sigma, 6),
+        },
+        "recency": {
+            "avg_weight": round(_avg_recency, 4),
+            "newest_age_min": round(newest_update_age_min, 1),
+            "oldest_age_min": round(oldest_update_age_min, 1),
+        },
+        "kelly": {
+            "base": round(k_base, 6),
+            "suggested": round(k_sugg, 6),
+            "sizing_note": s_note,
+        },
+    }
+
+    rec = BetRecommendation(
         market=market,
         selection=selection,
         side=side,
@@ -864,6 +937,45 @@ def _build_rec(
         books_used_excl=books_used_excl,
         consensus_method=consensus_method,
     )
+
+    # Attach structured result for downstream consumers
+    rec.best_bet_result = BestBetResult(
+        edge_pct=_edge_pct_pp,
+        consensus_prob=round(consensus_prob, 4),
+        best_odds_american=best_odds,
+        best_odds_decimal=round(dec_odds, 4),
+        books_used=books_used_names or [],
+        volatility_sigma=vol_sigma,
+        recency_weight=round(_avg_recency, 4),
+        outliers_removed=_outliers_removed_count,
+        explanation=explanation,
+        raw_inputs=None,
+        market=market,
+        selection=selection,
+        side=side,
+        line=line,
+        confidence=confidence,
+        quality_score=q_score,
+        quality_tier=q_tier,
+        ev_roi=round(_ev_roi, 6),
+        ev_100=_ev_100,
+        edge_z=ez,
+        edge_ev=round(_edge_ev, 6),
+        edge_ev_shrunk=round(_edge_ev_shrunk, 6),
+        kelly_suggested=round(k_sugg, 6),
+        sizing_note=s_note,
+        best_sportsbook=best_sportsbook,
+        books_used_count=books_used_count,
+        total_books_count=total_books_count,
+        outlier_filtered=outlier_filtered,
+        market_unstable=market_unstable,
+        market_hold_median=mkt_hold_med,
+        robust_sigma=r_sigma,
+        n_eff=round(_n_eff, 2),
+        agreement_score=a_score,
+    )
+
+    return rec
 
 
 def _mode_value(values: list[float]) -> float:
@@ -987,6 +1099,10 @@ def _moneyline_recommendations(
     # Per-book holds aligned with filtered probs (for weighted consensus)
     f_holds = [all_holds[i] for i in keep_idx]
 
+    # Book names and recency weights for BestBetResult
+    f_book_names = [ln.sportsbook for ln in f_lines]
+    f_recency = [_recency_multiplier(ln.timestamp, now) for ln in f_lines]
+
     results: list[BetRecommendation] = []
 
     n_total = len(lines)
@@ -1014,6 +1130,8 @@ def _moneyline_recommendations(
             p_incl=consensus_home_incl,
             books_used_excl=home_n_excl,
             consensus_method=home_method,
+            books_used_names=f_book_names,
+            recency_weights=f_recency,
         )
     )
 
@@ -1039,6 +1157,8 @@ def _moneyline_recommendations(
             p_incl=consensus_away_incl,
             books_used_excl=away_n_excl,
             consensus_method=away_method,
+            books_used_names=f_book_names,
+            recency_weights=f_recency,
         )
     )
 
@@ -1139,6 +1259,10 @@ def _spread_recommendations(
 
     f_holds = [all_holds[i] for i in keep_idx]
 
+    # Book names and recency weights for BestBetResult
+    f_book_names = [ln.sportsbook for ln in f_matching]
+    f_recency = [_recency_multiplier(ln.timestamp, now) for ln in f_matching]
+
     results: list[BetRecommendation] = []
 
     results.append(
@@ -1163,6 +1287,8 @@ def _spread_recommendations(
             p_incl=consensus_home_incl,
             books_used_excl=home_n_excl,
             consensus_method=home_method,
+            books_used_names=f_book_names,
+            recency_weights=f_recency,
         )
     )
 
@@ -1189,6 +1315,8 @@ def _spread_recommendations(
             p_incl=consensus_away_incl,
             books_used_excl=away_n_excl,
             consensus_method=away_method,
+            books_used_names=f_book_names,
+            recency_weights=f_recency,
         )
     )
 
@@ -1285,6 +1413,10 @@ def _total_recommendations(
 
     f_holds = [all_holds[i] for i in keep_idx]
 
+    # Book names and recency weights for BestBetResult
+    f_book_names = [ln.sportsbook for ln in f_matching]
+    f_recency = [_recency_multiplier(ln.timestamp, now) for ln in f_matching]
+
     results: list[BetRecommendation] = []
 
     results.append(
@@ -1309,6 +1441,8 @@ def _total_recommendations(
             p_incl=consensus_over_incl,
             books_used_excl=over_n_excl,
             consensus_method=over_method,
+            books_used_names=f_book_names,
+            recency_weights=f_recency,
         )
     )
 
@@ -1334,6 +1468,8 @@ def _total_recommendations(
             p_incl=consensus_under_incl,
             books_used_excl=under_n_excl,
             consensus_method=under_method,
+            books_used_names=f_book_names,
+            recency_weights=f_recency,
         )
     )
 
@@ -1404,3 +1540,62 @@ def recommend_best_bets(
 
     recs.sort(key=lambda r: r.ev, reverse=True)
     return recs[:top_n]
+
+
+def extract_best_bet_results(
+    recs: list[BetRecommendation],
+) -> list[BestBetResult]:
+    """Extract ``BestBetResult`` objects from a list of recommendations.
+
+    Each ``BetRecommendation`` carries its ``best_bet_result`` attribute
+    after being built by ``_build_rec``.  Skipped recommendations (e.g.
+    3-way market guards) that lack a ``best_bet_result`` are omitted.
+    """
+    results: list[BestBetResult] = []
+    for rec in recs:
+        bbr = getattr(rec, "best_bet_result", None)
+        if bbr is not None:
+            results.append(bbr)
+    return results
+
+
+def recommend_best_bet_results(
+    lines_for_event: list[BettingLine],
+    top_n: int = 3,
+    now: datetime | None = None,
+    *,
+    include_raw_inputs: bool = False,
+) -> list[BestBetResult]:
+    """Return ranked ``BestBetResult`` objects (highest EV first).
+
+    Thin wrapper around ``recommend_best_bets`` that extracts the
+    structured result objects.  When *include_raw_inputs* is True,
+    the ``raw_inputs`` field is populated with per-book probabilities
+    and weights for debugging.
+
+    Parameters
+    ----------
+    lines_for_event:
+        All betting lines for a single event.
+    top_n:
+        Maximum results (default 3).
+    now:
+        Reference time for recency weighting.
+    include_raw_inputs:
+        If True, populate ``raw_inputs`` on each result.
+
+    Returns
+    -------
+    list[BestBetResult]
+    """
+    recs = recommend_best_bets(lines_for_event, top_n=top_n, now=now)
+    results = extract_best_bet_results(recs)
+
+    if include_raw_inputs:
+        for bbr in results:
+            bbr.raw_inputs = {
+                "books_used": bbr.books_used,
+                "explanation": bbr.explanation,
+            }
+
+    return results

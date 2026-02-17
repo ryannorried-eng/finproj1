@@ -125,6 +125,100 @@ def load_clv_training_df(
     )
 
 
+# ── Rolling CLV statistics ──────────────────────────────────────────
+_ROLLING_WINDOW_DAYS = 30  # rolling window for CLV mean / volatility
+_ROLLING_VOL_PENALTY_MULT = 200.0  # score penalty per unit of CLV vol
+_ROLLING_MEAN_BONUS_MULT = 300.0  # score bonus per unit of rolling CLV mean
+
+
+def compute_rolling_clv_stats(
+    df: pd.DataFrame,
+    window_days: int = _ROLLING_WINDOW_DAYS,
+) -> dict:
+    """Compute rolling CLV mean and volatility from the training DataFrame.
+
+    Uses the most recent *window_days* of data (by ``date`` column) to
+    compute rolling statistics that inform threshold adjustment.
+
+    Returns
+    -------
+    dict with keys:
+        rolling_clv_mean, rolling_clv_std, rolling_beat_rate,
+        rolling_n, window_days, has_rolling_data.
+    """
+    if df.empty or "date" not in df.columns or "clv" not in df.columns:
+        return {
+            "rolling_clv_mean": 0.0,
+            "rolling_clv_std": 0.0,
+            "rolling_beat_rate": 0.0,
+            "rolling_n": 0,
+            "window_days": window_days,
+            "has_rolling_data": False,
+        }
+
+    dates = df["date"].dropna()
+    if dates.empty:
+        return {
+            "rolling_clv_mean": 0.0,
+            "rolling_clv_std": 0.0,
+            "rolling_beat_rate": 0.0,
+            "rolling_n": 0,
+            "window_days": window_days,
+            "has_rolling_data": False,
+        }
+
+    from datetime import timedelta
+
+    max_date = dates.max()
+    cutoff = max_date - timedelta(days=window_days)
+    recent = df[df["date"] > cutoff]
+
+    if len(recent) < 10:
+        return {
+            "rolling_clv_mean": 0.0,
+            "rolling_clv_std": 0.0,
+            "rolling_beat_rate": 0.0,
+            "rolling_n": len(recent),
+            "window_days": window_days,
+            "has_rolling_data": False,
+        }
+
+    clv_vals = recent["clv"].dropna()
+    beat_vals = recent["beat"] if "beat" in recent.columns else pd.Series(dtype=float)
+
+    return {
+        "rolling_clv_mean": round(float(clv_vals.mean()), 6),
+        "rolling_clv_std": (
+            round(float(clv_vals.std()), 6) if len(clv_vals) > 1 else 0.0
+        ),
+        "rolling_beat_rate": (
+            round(float(beat_vals.mean() * 100), 1)
+            if len(beat_vals) > 0 else 0.0
+        ),
+        "rolling_n": len(recent),
+        "window_days": window_days,
+        "has_rolling_data": True,
+    }
+
+
+def _rolling_score_adjustment(rolling_stats: dict) -> float:
+    """Compute a score adjustment based on rolling CLV statistics.
+
+    Positive adjustment = recent performance is good (relax thresholds).
+    Negative adjustment = recent performance is poor (tighten thresholds).
+
+    The adjustment modifies the grid search scoring function to prefer
+    combinations that account for recent CLV trends.
+    """
+    if not rolling_stats.get("has_rolling_data"):
+        return 0.0
+
+    mean_adj = _ROLLING_MEAN_BONUS_MULT * rolling_stats.get("rolling_clv_mean", 0.0)
+    vol_penalty = _ROLLING_VOL_PENALTY_MULT * rolling_stats.get("rolling_clv_std", 0.0)
+
+    return mean_adj - vol_penalty
+
+
 # ── Grid search ─────────────────────────────────────────────────────
 
 
@@ -132,12 +226,20 @@ def grid_search_thresholds(
     df: pd.DataFrame,
     tier_name: str,
     constraints: dict | None = None,
+    rolling_stats: dict | None = None,
 ) -> dict:
     """Search for best (edge_ev_100, edge_z, hold_max, books_min) combo.
 
+    When *rolling_stats* is provided (from ``compute_rolling_clv_stats``),
+    the scoring function is adjusted to account for recent CLV trends:
+    positive rolling CLV mean adds a bonus, high rolling volatility adds
+    a penalty.  This causes Auto mode to tighten thresholds when recent
+    performance is declining.
+
     Returns dict with keys: edge_ev_100, edge_z, hold_max, books_min,
     n, beat_rate, avg_clv, median_clv, score, legs_per_day,
-    fallback_used (bool).
+    fallback_used (bool), and optionally rolling_clv_mean,
+    rolling_clv_std.
     """
     cons = constraints or _TIER_TARGETS.get(tier_name, _TIER_TARGETS["tier2"])
     n_min = cons.get("n_min", 50)
@@ -152,6 +254,9 @@ def grid_search_thresholds(
             "legs_per_day": 0.0, "fallback_used": True,
         })
         return default
+
+    # Rolling CLV adjustment
+    roll_adj = _rolling_score_adjustment(rolling_stats or {})
 
     # Compute date range for legs/day
     num_days = 1.0
@@ -187,7 +292,7 @@ def grid_search_thresholds(
         if legs_day < legs_day_lo or legs_day > legs_day_hi:
             continue
 
-        score = 100.0 * (beat_rate / 100.0 - 0.50) + 500.0 * avg_clv
+        score = 100.0 * (beat_rate / 100.0 - 0.50) + 500.0 * avg_clv + roll_adj
 
         if score > best_score:
             best_score = score
@@ -206,6 +311,10 @@ def grid_search_thresholds(
             }
 
     if best_result is not None:
+        # Attach rolling stats metadata if available
+        if rolling_stats and rolling_stats.get("has_rolling_data"):
+            best_result["rolling_clv_mean"] = rolling_stats["rolling_clv_mean"]
+            best_result["rolling_clv_std"] = rolling_stats["rolling_clv_std"]
         return best_result
 
     # Fallback to conservative defaults
@@ -258,11 +367,20 @@ def _enforce_monotonicity(tiers: dict) -> dict:
     return tiers
 
 
-def calibrate_thresholds(df: pd.DataFrame) -> dict:
+def calibrate_thresholds(
+    df: pd.DataFrame,
+    *,
+    use_rolling: bool = True,
+) -> dict:
     """Run grid search for all three tiers and enforce monotonicity.
 
+    When *use_rolling* is True (default), rolling CLV statistics from
+    the most recent window are computed and used to adjust the scoring
+    function.  This causes the auto-calibration to adapt to recent
+    performance trends without requiring a schema change.
+
     Returns dict with keys: tier1a, tier1b, tier2 (each a threshold dict),
-    plus training_rows, date_range, fallback_used.
+    plus training_rows, date_range, fallback_used, and rolling_clv.
     """
     if df.empty:
         result = {
@@ -272,11 +390,14 @@ def calibrate_thresholds(df: pd.DataFrame) -> dict:
         result["training_rows"] = 0
         result["date_range"] = None
         result["fallback_used"] = True
+        result["rolling_clv"] = compute_rolling_clv_stats(df)
         return result
 
-    t1a = grid_search_thresholds(df, "tier1a")
-    t1b = grid_search_thresholds(df, "tier1b")
-    t2 = grid_search_thresholds(df, "tier2")
+    rolling_stats = compute_rolling_clv_stats(df) if use_rolling else {}
+
+    t1a = grid_search_thresholds(df, "tier1a", rolling_stats=rolling_stats)
+    t1b = grid_search_thresholds(df, "tier1b", rolling_stats=rolling_stats)
+    t2 = grid_search_thresholds(df, "tier2", rolling_stats=rolling_stats)
 
     tiers = {"tier1a": t1a, "tier1b": t1b, "tier2": t2}
     tiers = _enforce_monotonicity(tiers)
@@ -294,6 +415,7 @@ def calibrate_thresholds(df: pd.DataFrame) -> dict:
         "fallback_used": all(
             t.get("fallback_used", False) for t in (t1a, t1b, t2)
         ),
+        "rolling_clv": rolling_stats,
     }
 
 
@@ -310,6 +432,17 @@ def format_calibration_report(result: dict) -> str:
     if result.get("fallback_used"):
         lines.append("WARNING: Using fallback defaults (insufficient data)")
 
+    # Rolling CLV stats
+    rolling = result.get("rolling_clv", {})
+    if rolling.get("has_rolling_data"):
+        lines.append("")
+        lines.append("--- ROLLING CLV ---")
+        lines.append(f"  window:     {rolling.get('window_days', 30)} days")
+        lines.append(f"  n:          {rolling.get('rolling_n', 0)}")
+        lines.append(f"  CLV mean:   {rolling.get('rolling_clv_mean', 0):.6f}")
+        lines.append(f"  CLV std:    {rolling.get('rolling_clv_std', 0):.6f}")
+        lines.append(f"  beat rate:  {rolling.get('rolling_beat_rate', 0):.1f}%")
+
     for tier in ("tier1a", "tier1b", "tier2"):
         t = result.get(tier, {})
         lines.append("")
@@ -323,6 +456,9 @@ def format_calibration_report(result: dict) -> str:
             lines.append(f"  beat_rate   =  {t.get('beat_rate', 0)}%")
             lines.append(f"  avg_clv     =  {t.get('avg_clv', 0):.4f}")
             lines.append(f"  legs/day    =  {t.get('legs_per_day', 0)}")
+        if t.get("rolling_clv_mean") is not None:
+            lines.append(f"  roll_mean   =  {t.get('rolling_clv_mean', 0):.6f}")
+            lines.append(f"  roll_std    =  {t.get('rolling_clv_std', 0):.6f}")
         if t.get("fallback_used"):
             lines.append("  (fallback defaults)")
 
