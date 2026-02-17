@@ -5,6 +5,7 @@ description = "Track sports betting lines across sportsbooks"
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.27",
+    "matplotlib>=3.7",
     "pandas>=2.2",
     "streamlit>=1.38",
 ]
