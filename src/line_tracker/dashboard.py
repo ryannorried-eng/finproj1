@@ -49,6 +49,7 @@ from line_tracker.performance import (
     apply_filters,
     build_clv_dataframe,
     calibration_stats,
+    clv_color,
     clv_distribution,
     rolling_clv_series,
     summary_kpis,
@@ -2759,7 +2760,7 @@ def _bet_history_dialog():
                                 continue
                             cd = m["clv_decimal"]
                             cp = m["clv_prob"]
-                            color = "green" if cd >= 0 else "red"
+                            color = clv_color(cp)
                             parts.append(
                                 f"Leg {cr['leg_index']+1}: "
                                 f":{color}[CLV "
