@@ -23,6 +23,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"line_tracker" = ["db/migrations/*.sql"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 88

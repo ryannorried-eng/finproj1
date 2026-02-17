@@ -2927,7 +2927,11 @@ def _page_performance():
     st.title("Performance")
     st.caption("Closing Line Value (CLV) analytics across all settled legs.")
 
-    store = LineStore(DB_PATH)
+    with LineStore(DB_PATH) as store:
+        _page_performance_body(store)
+
+
+def _page_performance_body(store):
     df_full = load_clv_df(store)
     if df_full.empty:
         st.info("No settled legs with CLV data yet. Settle some bets first!")
