@@ -353,4 +353,6 @@ def test_parlay_single_leg_matches_straight_bet_property_like():
         assert parlay["total_return"] == pytest.approx(
             american_total_return(stake, odds), abs=0.001,
         )
-        assert parlay["profit"] == pytest.approx(american_profit(stake, odds), abs=0.001)
+        assert parlay["profit"] == pytest.approx(
+            american_profit(stake, odds), abs=0.001,
+        )

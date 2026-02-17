@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from line_tracker.models import BetType, BettingLine
+from line_tracker.models import BettingLine, BetType
 from line_tracker.services import ingestion_service
 
 

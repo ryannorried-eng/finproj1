@@ -250,7 +250,11 @@ def apply_filters(
 
     def _normalized_bound(value: str) -> pd.Timestamp:
         bound = pd.Timestamp(value)
-        if "closed_at" in df.columns and isinstance(df["closed_at"].dtype, pd.DatetimeTZDtype):
+        has_tz = (
+            "closed_at" in df.columns
+            and isinstance(df["closed_at"].dtype, pd.DatetimeTZDtype)
+        )
+        if has_tz:
             tz = df["closed_at"].dt.tz
             if bound.tzinfo is None:
                 return bound.tz_localize(tz)

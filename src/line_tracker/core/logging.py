@@ -24,9 +24,12 @@ def get_logger(name: str, *, run_id: str | None = None, source: str | None = Non
     if not any(getattr(h, "_line_tracker_handler", False) for h in logger.handlers):
         handler = logging.StreamHandler()
         handler._line_tracker_handler = True  # type: ignore[attr-defined]
-        formatter = logging.Formatter(
-            "%(asctime)s %(levelname)s [%(name)s] [run_id=%(run_id)s source=%(source)s] %(message)s"
+        fmt = (
+            "%(asctime)s %(levelname)s [%(name)s]"
+            " [run_id=%(run_id)s source=%(source)s]"
+            " %(message)s"
         )
+        formatter = logging.Formatter(fmt)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.propagate = False

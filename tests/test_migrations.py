@@ -10,7 +10,10 @@ from line_tracker.storage import LineStore
 
 
 def _migrations_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "src" / "line_tracker" / "db" / "migrations"
+    return (
+        Path(__file__).resolve().parents[1]
+        / "src" / "line_tracker" / "db" / "migrations"
+    )
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:

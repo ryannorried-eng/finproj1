@@ -542,8 +542,12 @@ def test_build_dataframe_matches_compute_clv_for_multiple_rows():
     for i, row in enumerate(rows):
         single = compute_clv(row)
         assert single is not None
-        assert df.iloc[i]["clv_decimal"] == pytest.approx(single["clv_decimal"], abs=0.001)
-        assert df.iloc[i]["clv_prob"] == pytest.approx(single["clv_prob"], abs=0.001)
+        assert df.iloc[i]["clv_decimal"] == pytest.approx(
+            single["clv_decimal"], abs=0.001,
+        )
+        assert df.iloc[i]["clv_prob"] == pytest.approx(
+            single["clv_prob"], abs=0.001,
+        )
 
 
 def test_compute_clv_zero_close_prob_not_treated_as_none():
