@@ -14,6 +14,7 @@ from line_tracker.bet_slip import (
     decimal_to_american,
     parlay_payout,
 )
+from line_tracker.core.clv import compute_clv_metrics as _compute_clv_metrics
 from line_tracker.models import BetType
 
 
@@ -457,20 +458,12 @@ def compute_clv_metrics(
     close_prob,
 ) -> dict[str, object]:
     """Canonical CLV metric formulas (positive = beat close)."""
-    clv_decimal = pick_dec - close_dec
-    clv_prob = close_prob - pick_prob
-    if hasattr(clv_decimal, "round"):
-        clv_decimal = clv_decimal.round(4)
-    else:
-        clv_decimal = round(clv_decimal, 4)
-    if hasattr(clv_prob, "round"):
-        clv_prob = clv_prob.round(4)
-    else:
-        clv_prob = round(clv_prob, 4)
-    return {
-        "clv_decimal": clv_decimal,
-        "clv_prob": clv_prob,
-    }
+    return _compute_clv_metrics(
+        pick_dec=pick_dec,
+        close_dec=close_dec,
+        pick_prob=pick_prob,
+        close_prob=close_prob,
+    )
 
 def compute_clv(row: dict) -> dict | None:
     """Compute CLV metrics from a single bet_clv row.
@@ -484,7 +477,7 @@ def compute_clv(row: dict) -> dict | None:
     close_dec = row["best_odds_close_decimal"]
     pick_prob = row["consensus_prob_at_pick"]
     # When close prob is missing/None, treat as no movement in probability CLV.
-    close_prob = row.get("consensus_prob_close") or pick_prob
+    close_prob = row.get("consensus_prob_close")
     return compute_clv_metrics(
         pick_dec=pick_dec,
         close_dec=close_dec,

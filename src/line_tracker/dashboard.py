@@ -14,15 +14,12 @@ import line_tracker as _line_tracker_pkg
 from line_tracker.arbitrage import find_moneyline_arbs, find_spread_arbs
 from line_tracker.best_bets import recommend_best_bets
 from line_tracker.bet_history import (
-    close_bet_clv,
     compute_clv,
     init_bet_state,
     load_bets_from_db,
-    persist_bet_with_snapshot,
-    settle_bet,
-    settle_bet_persistent,
+    settle_bet as settle_bet_state,
     settled_bet_summary,
-    submit_bet,
+    submit_bet as submit_bet_state,
 )
 from line_tracker.bet_slip import (
     american_profit,
@@ -46,23 +43,25 @@ from line_tracker.calibration import (
 from line_tracker.market_structure import analyze_market
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
+from line_tracker.scraper import OddsClient
 from line_tracker.performance import (
     all_breakdowns,
     apply_filters,
-    build_clv_dataframe,
     calibration_stats,
     clv_color,
     clv_distribution,
     rolling_clv_series,
     summary_kpis,
 )
-from line_tracker.scraper import OddsClient
-from line_tracker.slate import (
-    build_daily_slate,
-    passes_relaxed_tier2,
-    thresholds_from_calibration,
-)
+from line_tracker.slate import passes_relaxed_tier2
 from line_tracker.storage import DEFAULT_DB_PATH, LineStore
+from line_tracker.services.bet_service import (
+    settle_bet as settle_bet_persisted,
+    submit_bet as submit_bet_persisted,
+)
+from line_tracker.services.ingestion_service import fetch_and_persist_snapshot
+from line_tracker.services.performance_service import load_clv_df
+from line_tracker.services.slate_service import build_daily_slate_service
 
 # Toggle to show EV Math Debug expander on slate / shopping pages.
 SHOW_EV_DEBUG = False
@@ -564,8 +563,14 @@ def _fetch_odds():
 
     with st.spinner("Pulling odds from sportsbooks..."):
         try:
-            with OddsClient(api_key=api_key) as client:
-                lines = client.get_odds(sport=_sport_key())
+            with LineStore(DB_PATH) as store:
+                ingest = fetch_and_persist_snapshot(
+                    store,
+                    api_key,
+                    sport=_sport_key(),
+                )
+            lines = ingest["lines"]
+            count = ingest["saved_count"]
         except Exception as exc:
             st.error(f"Could not reach the API: {exc}")
             return
@@ -573,9 +578,6 @@ def _fetch_odds():
     if not lines:
         st.info(f"No {sport} games available right now.")
         return
-
-    with LineStore(DB_PATH) as store:
-        count = store.save_lines(lines)
 
     st.success(f"Got {len(lines)} lines across {sport}. Saved {count} new rows.")
     st.session_state["last_fetch"] = lines
@@ -1764,11 +1766,11 @@ def _slip_dialog():
             use_container_width=True,
         ):
             try:
-                bet = submit_bet(st.session_state, stake)
+                bet = submit_bet_state(st.session_state, stake)
                 st.session_state["_slip_submitted"] = True
                 try:
                     with LineStore() as _s:
-                        persist_bet_with_snapshot(bet, _s)
+                        submit_bet_persisted(bet, _s)
                 except Exception:
                     pass  # DB + CLV snapshot is best-effort
             except ValueError as exc:
@@ -2101,14 +2103,25 @@ def _page_daily_slate():
     for ln in lines:
         lines_by_event[ln.event].append(ln)
 
-    # --- Resolve thresholds for Auto mode ---
-    auto_thresholds = None
+    show_debug = show_debug_counts or st.session_state.get("slate_debug", False)
+    filters = {
+        "min_edge": min_edge,
+        "min_quality": min_quality,
+        "hide_low_confidence": hide_low,
+        "max_per_event": 2,
+        "debug": show_debug,
+    }
+    with LineStore(DB_PATH) as store:
+        has_calibration = bool(store.load_calibration("global"))
+        slate = build_daily_slate_service(
+            dict(lines_by_event),
+            filters=filters,
+            mode=mode,
+            store=store,
+        )
+
     if mode == "Auto":
-        store = LineStore(DB_PATH)
-        cal_json = store.load_calibration("global")
-        if cal_json:
-            cal_dict = calibration_from_json(cal_json)
-            auto_thresholds = thresholds_from_calibration(cal_dict)
+        if has_calibration:
             st.info(
                 "Using calibrated thresholds (global). "
                 "Run Calibrate on the Performance page to update."
@@ -2118,20 +2131,6 @@ def _page_daily_slate():
                 "No calibration found — using Standard defaults. "
                 "Run Calibrate on the Performance page first."
             )
-
-    show_debug = show_debug_counts or st.session_state.get("slate_debug", False)
-    filters = {
-        "min_edge": min_edge,
-        "min_quality": min_quality,
-        "hide_low_confidence": hide_low,
-        "max_per_event": 2,
-        "debug": show_debug,
-    }
-    slate = build_daily_slate(
-        dict(lines_by_event),
-        filters=filters,
-        thresholds=auto_thresholds,
-    )
 
     # ── Assemble display tiers based on mode ──────────────────────────
     if pro_mode:
@@ -2670,11 +2669,10 @@ def _bet_history_dialog():
                 def _settle(bid, outcome, _key=""):
                     try:
                         with LineStore() as _s:
-                            close_bet_clv(bid, _s)
-                            settle_bet_persistent(bid, outcome, _s)
+                            settle_bet_persisted(bid, outcome, _s)
                     except Exception:
                         pass  # CLV close + DB settle is best-effort
-                    settle_bet(st.session_state, bid, outcome)
+                    settle_bet_state(st.session_state, bid, outcome)
                     st.session_state["_reopen_history"] = True
                     st.rerun()
 
@@ -2834,15 +2832,9 @@ def _page_performance():
     st.caption("Closing Line Value (CLV) analytics across all settled legs.")
 
     store = LineStore(DB_PATH)
-    rows = store.get_all_clv()
-
-    if not rows:
-        st.info("No settled legs with CLV data yet. Settle some bets first!")
-        return
-
-    df_full = build_clv_dataframe(rows)
+    df_full = load_clv_df(store)
     if df_full.empty:
-        st.info("No CLV data available.")
+        st.info("No settled legs with CLV data yet. Settle some bets first!")
         return
 
     # ---- Filters ----

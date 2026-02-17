@@ -4,15 +4,23 @@ from __future__ import annotations
 
 from statistics import median as _median
 
+from line_tracker.core.math import (
+    american_profit as _american_profit,
+    american_to_decimal as _american_to_decimal,
+    american_total_return as _american_total_return,
+    decimal_to_american as _decimal_to_american,
+    ev_per_dollar as _ev_per_dollar,
+    implied_probability as _implied_probability,
+    parlay_payout as _parlay_payout,
+)
+
 
 def american_to_decimal(odds: float) -> float:
     """Convert American odds to decimal odds.
 
     Examples: +150 → 2.50, -200 → 1.50, +100 → 2.00
     """
-    if odds >= 0:
-        return odds / 100 + 1
-    return 100 / abs(odds) + 1
+    return _american_to_decimal(odds)
 
 
 def decimal_to_american(dec: float) -> float:
@@ -20,26 +28,17 @@ def decimal_to_american(dec: float) -> float:
 
     Examples: 2.50 → +150, 1.50 → -200
     """
-    if dec >= 2.0:
-        return round((dec - 1) * 100, 2)
-    if dec <= 1.0:
-        # Decimal odds of 1.0 means zero profit; not a valid line.
-        # Return 0.0 as a sentinel (EVEN display).
-        return 0.0
-    # 1.0 < dec < 2.0 → negative American favourite
-    return round(-100 / (dec - 1), 2)
+    return _decimal_to_american(dec)
 
 
 def american_profit(stake: float, odds: float) -> float:
     """Calculate profit from a winning straight bet at American odds."""
-    dec = american_to_decimal(odds)
-    return round(stake * (dec - 1), 2)
+    return _american_profit(stake, odds)
 
 
 def american_total_return(stake: float, odds: float) -> float:
     """Calculate total return (stake + profit) from a winning straight bet."""
-    dec = american_to_decimal(odds)
-    return round(stake * dec, 2)
+    return _american_total_return(stake, odds)
 
 
 def implied_prob_from_american(odds: float) -> float:
@@ -47,11 +46,7 @@ def implied_prob_from_american(odds: float) -> float:
 
     Examples: -200 → 0.6667, +150 → 0.4000
     """
-    if odds < 0:
-        return abs(odds) / (abs(odds) + 100)
-    if odds > 0:
-        return 100 / (odds + 100)
-    return 0.5  # EVEN
+    return _implied_probability(odds)
 
 
 def breakeven_prob_from_american(odds: float) -> float:
@@ -69,8 +64,7 @@ def ev_per_dollar(prob: float, odds: float) -> float:
 
     EV = p * (decimal - 1) - (1 - p)
     """
-    d = american_to_decimal(odds)
-    return prob * (d - 1) - (1 - prob)
+    return _ev_per_dollar(prob, odds)
 
 
 def parlay_payout(stake: float, legs_american: list[float]) -> dict:
@@ -78,23 +72,7 @@ def parlay_payout(stake: float, legs_american: list[float]) -> dict:
 
     Returns dict with combined_decimal, combined_american, profit, total_return.
     """
-    if not legs_american:
-        raise ValueError("Parlay requires at least one leg.")
-
-    combined_dec = 1.0
-    for odds in legs_american:
-        combined_dec *= american_to_decimal(odds)
-
-    combined_american = decimal_to_american(combined_dec)
-    total_return = round(stake * combined_dec, 2)
-    profit = round(total_return - stake, 2)
-
-    return {
-        "combined_decimal": round(combined_dec, 4),
-        "combined_american": combined_american,
-        "profit": profit,
-        "total_return": total_return,
-    }
+    return _parlay_payout(stake, legs_american)
 
 
 def format_american(odds: float) -> str:
