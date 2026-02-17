@@ -10,9 +10,10 @@ class _Store:
 def test_submit_bet_calls_persist_and_returns_id(monkeypatch):
     calls = {}
 
-    def _fake_persist(bet, store):
+    def _fake_persist(bet, store, recommendation_meta=None):
         calls["bet"] = bet
         calls["store"] = store
+        calls["recommendation_meta"] = recommendation_meta
         return "bet-123"
 
     monkeypatch.setattr(bet_service, "persist_bet_with_snapshot", _fake_persist)
@@ -24,6 +25,7 @@ def test_submit_bet_calls_persist_and_returns_id(monkeypatch):
     assert bet_id == "bet-123"
     assert calls["bet"] is bet
     assert calls["store"] is store
+    assert calls["recommendation_meta"] is None
 
 
 def test_settle_bet_calls_close_then_settle(monkeypatch):

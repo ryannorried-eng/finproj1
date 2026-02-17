@@ -14,8 +14,12 @@ class BetsRepo:
             """INSERT INTO bets
                (bet_id, created_at, sportsbook, stake,
                 total_odds_american, total_odds_decimal,
-                potential_payout, profit, status, settled_at, outcome)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                potential_payout, profit, status, settled_at, outcome,
+                source_page, recommendation_id, rank_at_pick,
+                quality_tier_at_pick, edge_pct_at_pick,
+                consensus_prob_at_pick, execution_delta_decimal)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?)""",
             (
                 bet_row["bet_id"],
                 bet_row["created_at"],
@@ -28,6 +32,13 @@ class BetsRepo:
                 bet_row.get("status", "active"),
                 bet_row.get("settled_at"),
                 bet_row.get("outcome"),
+                bet_row.get("source_page"),
+                bet_row.get("recommendation_id"),
+                bet_row.get("rank_at_pick"),
+                bet_row.get("quality_tier_at_pick"),
+                bet_row.get("edge_pct_at_pick"),
+                bet_row.get("consensus_prob_at_pick"),
+                bet_row.get("execution_delta_decimal"),
             ),
         )
 
