@@ -64,6 +64,7 @@ class LineStore:
         if nested:
             self._conn.execute(f"SAVEPOINT {savepoint}")
         else:
+            # Acquire a write lock up-front to reduce mid-transaction lock errors.
             self._conn.execute("BEGIN IMMEDIATE")
             self._in_explicit_txn = True
         self._txn_depth += 1
