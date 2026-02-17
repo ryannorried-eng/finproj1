@@ -62,6 +62,11 @@ from line_tracker.services.bet_service import (
 from line_tracker.services.ingestion_service import fetch_and_persist_snapshot
 from line_tracker.services.performance_service import load_clv_df
 from line_tracker.services.slate_service import build_daily_slate_service
+from line_tracker.ui.components.diagnostics import (
+    get_db_counts,
+    get_db_status,
+    get_latest_timestamps,
+)
 
 # Toggle to show EV Math Debug expander on slate / shopping pages.
 SHOW_EV_DEBUG = False
@@ -444,6 +449,13 @@ def _sidebar():
 
         st.header("Settings")
 
+        st.checkbox(
+            "Debug mode",
+            value=st.session_state.get("diag_debug_mode", False),
+            key="diag_debug_mode",
+            help="Enable extra diagnostics and verbose debug context in the UI.",
+        )
+
         st.text_input(
             "API Key",
             value=os.environ.get("ODDS_API_KEY", "09d11879822c9c7bd81c7eb210c82d92"),
@@ -518,6 +530,26 @@ def _sidebar():
             "Each \"Fetch\" uses 1-3 requests."
         )
 
+        with st.expander("Diagnostics", expanded=False):
+            try:
+                with LineStore(DB_PATH) as _diag_store:
+                    status = get_db_status(_diag_store)
+                    counts = get_db_counts(_diag_store)
+                    latest = get_latest_timestamps(_diag_store)
+                st.caption(f"DB: {status['db_path']}")
+                st.json({
+                    "schema_version": status["schema_version"],
+                    "pragmas": status["pragmas"],
+                })
+                st.json({"row_counts": counts, "latest": latest})
+                if st.session_state.get("diag_debug_mode", False):
+                    st.caption(
+                        "Debug mode is enabled; verbose service logs are "
+                        "emitted to the app logger."
+                    )
+            except Exception as exc:
+                st.caption(f"Diagnostics unavailable: {exc}")
+
 
 # ---------------------------------------------------------------------------
 # Arb stake calculator
@@ -548,6 +580,7 @@ def _compute_arb_stakes(
     roi = (profit / total_stake) * 100
 
     return stake_a, stake_b, profit, roi
+
 
 
 # ---------------------------------------------------------------------------
