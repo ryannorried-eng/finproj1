@@ -1,5 +1,7 @@
 """Tests for bet slip odds helpers and parlay math."""
 
+import pytest
+
 from line_tracker.bet_slip import (
     american_profit,
     american_to_decimal,
@@ -325,3 +327,30 @@ def test_odds_random_invariants_loop_based():
         prob = implied_prob_from_american(odds)
         assert dec >= 1.0
         assert 0.0 < prob < 1.0
+
+
+def test_odds_round_trip_property_like_sample():
+    for american in [-500, -250, -110, 100, 125, 200, 450]:
+        dec = american_to_decimal(american)
+        back = decimal_to_american(dec)
+        assert back == pytest.approx(float(american), abs=0.05)
+
+
+def test_total_return_profit_invariant_property_like_sample():
+    stakes = [10, 25.5, 100]
+    odds_list = [-200, -110, 100, 175]
+    for stake in stakes:
+        for odds in odds_list:
+            total = american_total_return(stake, odds)
+            profit = american_profit(stake, odds)
+            assert total == pytest.approx(round(stake + profit, 2), abs=0.001)
+
+
+def test_parlay_single_leg_matches_straight_bet_property_like():
+    for odds in [-180, -110, 130, 220]:
+        stake = 75
+        parlay = parlay_payout(stake, [odds])
+        assert parlay["total_return"] == pytest.approx(
+            american_total_return(stake, odds), abs=0.001,
+        )
+        assert parlay["profit"] == pytest.approx(american_profit(stake, odds), abs=0.001)

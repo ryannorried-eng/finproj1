@@ -511,3 +511,52 @@ def test_build_dataframe_matches_compute_clv_for_single_row():
     assert single is not None
     assert df.iloc[0]["clv_decimal"] == pytest.approx(single["clv_decimal"], abs=0.001)
     assert df.iloc[0]["clv_prob"] == pytest.approx(single["clv_prob"], abs=0.001)
+
+
+def test_build_dataframe_matches_compute_clv_for_multiple_rows():
+    rows = [
+        {
+            "pick_odds_decimal": 1.95,
+            "best_odds_close_decimal": 1.84,
+            "consensus_prob_at_pick": 0.51,
+            "consensus_prob_close": 0.54,
+            "closed_at": "2026-01-20T12:00:00",
+        },
+        {
+            "pick_odds_decimal": 2.10,
+            "best_odds_close_decimal": 2.20,
+            "consensus_prob_at_pick": 0.47,
+            "consensus_prob_close": 0.44,
+            "closed_at": "2026-01-21T12:00:00",
+        },
+        {
+            "pick_odds_decimal": 1.91,
+            "best_odds_close_decimal": 1.86,
+            "consensus_prob_at_pick": 0.52,
+            "consensus_prob_close": None,
+            "closed_at": "2026-01-22T12:00:00",
+        },
+    ]
+    df = build_clv_dataframe(rows)
+
+    for i, row in enumerate(rows):
+        single = compute_clv(row)
+        assert single is not None
+        assert df.iloc[i]["clv_decimal"] == pytest.approx(single["clv_decimal"], abs=0.001)
+        assert df.iloc[i]["clv_prob"] == pytest.approx(single["clv_prob"], abs=0.001)
+
+
+def test_compute_clv_zero_close_prob_not_treated_as_none():
+    row = {
+        "pick_odds_decimal": 1.8,
+        "best_odds_close_decimal": 1.8,
+        "consensus_prob_at_pick": 0.55,
+        "consensus_prob_close": 0.0,
+        "closed_at": "2026-01-20T12:00:00",
+    }
+    single = compute_clv(row)
+    df = build_clv_dataframe([row])
+
+    assert single is not None
+    assert single["clv_prob"] == -0.55
+    assert df.iloc[0]["clv_prob"] == pytest.approx(-0.55, abs=0.0001)
