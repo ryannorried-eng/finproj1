@@ -775,6 +775,7 @@ def build_daily_slate(
                 "kelly_base": rec.kelly_base,
                 "kelly_suggested": rec.kelly_suggested,
                 "sizing_note": rec.sizing_note,
+                "best_bet_result": getattr(rec, "best_bet_result", None),
             }
 
             # Classify — runs for EVERY rec, no pre-filtering
