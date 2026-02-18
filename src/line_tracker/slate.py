@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from line_tracker.best_bets import recommend_best_bets
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
 from line_tracker.models import BettingLine, BetType
+from line_tracker.tiering import assign_tiers
 
 # ── tier thresholds (EV/$100 space) ───────────────────────────────
 # edge_pct is now EV per $100 (= 100 * edge_ev).  All edge thresholds
@@ -688,6 +689,7 @@ def build_daily_slate(
     filters: dict | None = None,
     settings: dict | None = None,
     thresholds: TierThresholds | None = None,
+    tiering_method: str = "hybrid",
 ) -> dict:
     """Build the daily slate from lines grouped by event.
 
@@ -718,6 +720,9 @@ def build_daily_slate(
         recs = recommend_best_bets(lines)
         if not recs:
             continue
+
+        # Apply pluggable tiering to all recs for this event
+        assign_tiers(recs, method=tiering_method)
 
         top_recs = recs[: max(1, max_per_event)]
 
@@ -776,6 +781,7 @@ def build_daily_slate(
                 "kelly_suggested": rec.kelly_suggested,
                 "sizing_note": rec.sizing_note,
                 "best_bet_result": getattr(rec, "best_bet_result", None),
+                "bet_tier": rec.bet_tier,
             }
 
             # Classify — runs for EVERY rec, no pre-filtering
@@ -878,6 +884,7 @@ def build_daily_slate(
 
     # ── Thresholds used (always available) ─────────────────────────
     result["thresholds"] = th
+    result["tiering_method"] = tiering_method
 
     return result
 
