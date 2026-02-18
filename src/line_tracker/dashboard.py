@@ -120,6 +120,14 @@ _FAR_FUTURE = datetime.max.replace(tzinfo=None)
 DB_PATH = str(DEFAULT_DB_PATH)
 _LOGGER = logging.getLogger(__name__)
 
+# Map internal classify_rec tier keys → user-facing display labels.
+_TIER_DISPLAY = {
+    "tier1b": "Tier 1 (Core)",
+    "tier2": "Tier 2 (High Variance)",
+    "tier3": "Tier 3",
+    "avoid": "Stay Away",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2156,8 +2164,8 @@ def _page_daily_slate():
                 index=0,
                 key="slate_mode",
                 help=(
-                    "**Standard**: Top Plays = Tier 1A + 1B. "
-                    "**Pro**: Top Plays = Tier 1A only. "
+                    "**Standard**: Top Plays = Tier 1 (Core). "
+                    "**Pro**: Top Plays = Tier 1 (Core, stricter floors). "
                     "**Auto**: Use CLV-calibrated thresholds."
                 ),
                 horizontal=True,
@@ -2258,12 +2266,8 @@ def _page_daily_slate():
             )
 
     # ── Assemble display tiers based on mode ──────────────────────────
-    if pro_mode:
-        top_plays = list(slate["tier1a"])
-        more_plays = list(slate["tier1b"]) + list(slate["tier2"])
-    else:
-        top_plays = list(slate["tier1"])
-        more_plays = list(slate["tier2"])
+    top_plays = list(slate["tier1"])
+    more_plays = list(slate["tier2"])
 
     stay_away = list(slate["stay_away"])
     closest = list(slate["closest_candidates"])
@@ -2319,27 +2323,29 @@ def _page_daily_slate():
         f"Tiering: {_method_labels.get(_active_method, _active_method)}",
         expanded=False,
     ):
-        # Collect all recs that have a bet_tier from the pluggable system
+        # Collect slate-tier counts from classify_rec (entry["tier"])
         _all_slate_entries = top_plays + more_plays + stay_away
-        _tier_counts = {"Tier 1": 0, "Tier 2": 0, "Tier 3": 0, "Stay Away": 0}
-        _tier_edges: dict[str, list[float]] = {
-            "Tier 1": [], "Tier 2": [], "Tier 3": [], "Stay Away": [],
-        }
+        _tier_keys = [("tier1b", "Tier 1 (Core)"),
+                      ("tier2", "Tier 2 (High Variance)"),
+                      ("tier3", "Tier 3"),
+                      ("avoid", "Stay Away")]
+        _tier_counts = {label: 0 for _, label in _tier_keys}
+        _tier_edges: dict[str, list[float]] = {label: [] for _, label in _tier_keys}
         for _e in _all_slate_entries:
-            _bt = _e.get("bet_tier", "")
-            if _bt in _tier_counts:
-                _tier_counts[_bt] += 1
-                _tier_edges[_bt].append(_e.get("edge_pct", 0.0))
+            _label = _TIER_DISPLAY.get(_e.get("tier", ""), "")
+            if _label in _tier_counts:
+                _tier_counts[_label] += 1
+                _tier_edges[_label].append(_e.get("edge_pct", 0.0))
 
         tc1, tc2, tc3, tc4 = st.columns(4)
-        tc1.metric("Tier 1", _tier_counts["Tier 1"])
-        tc2.metric("Tier 2", _tier_counts["Tier 2"])
+        tc1.metric("Tier 1 (Core)", _tier_counts["Tier 1 (Core)"])
+        tc2.metric("Tier 2 (HV)", _tier_counts["Tier 2 (High Variance)"])
         tc3.metric("Tier 3", _tier_counts["Tier 3"])
         tc4.metric("Stay Away", _tier_counts["Stay Away"])
 
         # Mean edge per tier
         _tier_edge_lines = []
-        for _t in ("Tier 1", "Tier 2", "Tier 3", "Stay Away"):
+        for _, _t in _tier_keys:
             _edges = _tier_edges[_t]
             if _edges:
                 _avg = sum(_edges) / len(_edges)
@@ -2361,13 +2367,12 @@ def _page_daily_slate():
     ds = slate.get("debug_stats")
     if debug and ds:
         with st.expander("Debug: Classification Breakdown", expanded=False):
-            dc1, dc2, dc3, dc4, dc5, dc6 = st.columns(6)
+            dc1, dc2, dc3, dc4, dc5 = st.columns(5)
             dc1.metric("Total", debug["total_recs"])
-            dc2.metric("Tier 1A", debug.get("tier1a_count", 0))
-            dc3.metric("Tier 1B", debug.get("tier1b_count", 0))
-            dc4.metric("Tier 2", debug["tier2_count"])
-            dc5.metric("Tier 3", debug.get("tier3_count", 0))
-            dc6.metric("Stay Away", debug["stay_away_count"])
+            dc2.metric("Tier 1 (Core)", debug.get("tier1b_count", 0))
+            dc3.metric("Tier 2 (HV)", debug["tier2_count"])
+            dc4.metric("Tier 3", debug.get("tier3_count", 0))
+            dc5.metric("Stay Away", debug["stay_away_count"])
             st.markdown("**By Confidence:** " + ", ".join(
                 f"{k}: {v}" for k, v in sorted(debug["by_confidence"].items())
             ))
@@ -2449,23 +2454,16 @@ def _page_daily_slate():
 
     st.divider()
 
-    # ── Top Plays (Tier 1A, or 1A+1B in Standard mode) ───────────────
-    _top_label = "Top Plays (Tier 1A)" if pro_mode else "Top Plays (Tier 1)"
+    # ── Top Plays (Tier 1 — Core Value) ──────────────────────────────
+    _top_label = "Top Plays (Tier 1 — Core)"
     st.subheader(_top_label)
     if not top_display:
         st.info("No top plays today under current thresholds.")
-        if pro_mode:
-            st.caption(
-                "Tier 1A requires **High** confidence, **Elite/Strong** "
-                "quality, books >= 6, hold <= 6%, "
-                "edge >= (2.5 + 1.0 \u00d7 \u03c3)."
-            )
-        else:
-            st.caption(
-                "Tier 1 requires **High/Medium** confidence, "
-                "**Elite/Strong/Moderate** quality, "
-                "edge >= dynamic floor."
-            )
+        st.caption(
+            "Tier 1 (Core) requires edge_z >= 1.75, quality_score >= 70, "
+            "consensus_prob >= 0.30, books >= 5, hold <= 7.5%, "
+            "edge >= dynamic floor."
+        )
         # Show closest candidates when no top plays qualify
         if show_closest and closest:
             st.markdown("**Closest to qualifying:**")
@@ -2476,7 +2474,7 @@ def _page_daily_slate():
     st.divider()
 
     # ── More Plays (Tier 2, or 1B+Tier 2 in Pro mode) ────────────────
-    _more_label = "More Plays (Tier 1B + Tier 2)" if pro_mode else "More Plays (Tier 2)"
+    _more_label = "More Plays (Tier 2 — High Variance)"
     st.subheader(_more_label)
     if not more_display:
         st.info("No additional plays meet current filters.")
@@ -2500,8 +2498,7 @@ def _page_daily_slate():
     # ── Publish Slate button ──────────────────────────────────────────
     st.divider()
     _all_slate_picks = (
-        list(slate.get("tier1a", []))
-        + list(slate.get("tier1b", []))
+        list(slate.get("tier1b", []))
         + list(slate.get("tier2", []))
         + list(slate.get("tier3", []))
         + list(slate.get("stay_away", []))
@@ -2556,8 +2553,8 @@ def _render_why_tooltip(entry: dict) -> None:
         dyn_floor = entry.get("dynamic_edge_floor")
         r_sigma = entry.get("robust_sigma", 0.0)
         ev_sigma = entry.get("ev_sigma", 0.0)
-        _bt_label = entry.get("bet_tier", "")
-        _bt_line = f"- **Bet tier:** {_bt_label}\n" if _bt_label else ""
+        _bt_label = _TIER_DISPLAY.get(entry.get("tier", ""), "")
+        _bt_line = f"- **Slate tier:** {_bt_label}\n" if _bt_label else ""
         lines = [
             f"{_bt_line}"
             f"- **Confidence:** {entry.get('confidence', 'N/A')}",
@@ -2571,7 +2568,7 @@ def _render_why_tooltip(entry: dict) -> None:
         ]
         if dyn_floor is not None:
             lines.append(
-                f"- **Dynamic Tier 1 floor:** ${dyn_floor:.2f}"
+                f"- **Dynamic floor:** ${dyn_floor:.2f}"
             )
         hold = entry.get("market_hold_median")
         if hold is not None:
@@ -2730,7 +2727,7 @@ def _render_slate_card(entry: dict, rank: int | None = None) -> None:
         with cols[1]:
             st.metric("EV/$100", f"${entry['edge_pct']:+.2f}")
             ez = entry.get('edge_z', 0.0)
-            _card_bt = entry.get("bet_tier", "")
+            _card_bt = _TIER_DISPLAY.get(entry.get("tier", ""), "")
             _bt_suffix = f" | {_card_bt}" if _card_bt else ""
             st.caption(f"Z: {ez:+.2f} | Q: {entry['quality_score']}{_bt_suffix}")
         with cols[2]:
@@ -2821,7 +2818,7 @@ def _render_slate_table(entries: list[dict]) -> None:
             "EV/$100": f"${entry['edge_pct']:+.2f}",
             "Edge Z": f"{entry.get('edge_z', 0.0):+.2f}",
             "Quality": entry["quality_score"],
-            "Tier": entry.get("bet_tier", ""),
+            "Tier": _TIER_DISPLAY.get(entry.get("tier", ""), entry.get("tier", "")),
             "Confidence": entry["confidence"],
             "Sizing": sizing_str,
         })
