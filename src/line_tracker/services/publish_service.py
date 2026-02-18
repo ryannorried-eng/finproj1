@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 
 from line_tracker import __version__
 from line_tracker.core.logging import get_logger
@@ -27,6 +28,18 @@ def _compute_slate_hash(picks: list[dict]) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
+def _parse_sqlite_timestamp(ts: str) -> datetime:
+    """Parse SQLite ``CURRENT_TIMESTAMP`` format (``YYYY-MM-DD HH:MM:SS``)
+    or ISO-8601 into a timezone-aware UTC datetime."""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    # Fallback: fromisoformat handles most other valid shapes.
+    return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+
+
 def publish_slate(
     store,
     *,
@@ -36,6 +49,7 @@ def publish_slate(
     thresholds: dict,
     engine_config: dict | None = None,
     picks: list[dict],
+    min_publish_interval_seconds: int | None = None,
 ) -> int:
     """Persist a computed slate idempotently.
 
@@ -55,6 +69,10 @@ def publish_slate(
         Additional engine configuration snapshot.
     picks : list[dict]
         Slate entries from ``build_daily_slate`` (all tiers including stay_away).
+    min_publish_interval_seconds : int, optional
+        When set, if a slate for the same (slate_date, sport, mode) was
+        published less than this many seconds ago, return the existing
+        slate_id even if the slate_hash differs.
 
     Returns
     -------
@@ -75,6 +93,22 @@ def publish_slate(
             existing, slate_hash,
         )
         return existing
+
+    # Throttle check: skip if last publish was too recent.
+    if min_publish_interval_seconds is not None:
+        latest = store.slates_repo.get_latest_for_day(
+            slate_date, sport, mode,
+        )
+        if latest is not None:
+            latest_id, created_at_str, _ = latest
+            created_at = _parse_sqlite_timestamp(created_at_str)
+            age = (datetime.now(timezone.utc) - created_at).total_seconds()
+            if age < min_publish_interval_seconds:
+                _log.info(
+                    "publish_slate throttled slate_id=%s age=%.0fs limit=%ds",
+                    latest_id, age, min_publish_interval_seconds,
+                )
+                return latest_id
 
     # New slate — insert in a single transaction.
     with store.transaction():

@@ -52,3 +52,22 @@ class SlatesRepo:
             ),
         )
         return cursor.lastrowid
+
+    def get_latest_for_day(
+        self,
+        slate_date: str,
+        sport: str,
+        mode: str,
+    ) -> tuple[int, str, str] | None:
+        """Return ``(id, created_at, slate_hash)`` for the most recent slate
+        matching the given (slate_date, sport, mode), or ``None``."""
+        row = self._conn.execute(
+            """SELECT id, created_at, slate_hash FROM published_slates
+               WHERE slate_date = ? AND sport = ? AND mode = ?
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            (slate_date, sport, mode),
+        ).fetchone()
+        if row is None:
+            return None
+        return (row["id"], row["created_at"], row["slate_hash"])

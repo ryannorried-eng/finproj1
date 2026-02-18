@@ -292,3 +292,41 @@ def test_repo_delegation_transaction_atomicity_for_bet_legs_and_clv(tmp_path):
         assert len(store.get_bets()) == 1
         assert len(store.get_bet_legs("txn1")) == 1
         assert len(store.get_clv("txn1")) == 1
+
+
+def test_save_lines_populates_events_table(tmp_path):
+    """Lines with api_event_id should upsert corresponding events rows."""
+    db = tmp_path / "events.db"
+    with LineStore(db) as store:
+        store.save_lines([
+            _make_line(
+                api_event_id="evt-001",
+                event="Bills @ Chiefs",
+                commence_time=datetime(2026, 1, 19, 20, 0, tzinfo=timezone.utc),
+            ),
+            _make_line(
+                api_event_id="evt-001",
+                sportsbook="FanDuel",
+                event="Bills @ Chiefs",
+                commence_time=datetime(2026, 1, 19, 20, 0, tzinfo=timezone.utc),
+            ),
+            _make_line(
+                api_event_id="evt-002",
+                event="Eagles @ Cowboys",
+                home_team="Cowboys",
+                away_team="Eagles",
+                commence_time=datetime(2026, 1, 19, 21, 0, tzinfo=timezone.utc),
+            ),
+            # Legacy line without api_event_id — should NOT appear in events.
+            _make_line(event="Jets @ Dolphins"),
+        ])
+
+        events = store.events_repo.list_events()
+        ids = {e["api_event_id"] for e in events}
+        assert ids == {"evt-001", "evt-002"}
+        assert len(events) == 2
+
+        # Check fields round-trip correctly.
+        by_id = {e["api_event_id"]: e for e in events}
+        assert by_id["evt-001"]["event_display"] == "Bills @ Chiefs"
+        assert by_id["evt-002"]["home_team"] == "Cowboys"
