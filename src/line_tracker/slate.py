@@ -289,7 +289,7 @@ def classify_rec(
     settings: dict | None = None,
     thresholds: TierThresholds | None = None,
 ) -> dict:
-    """Classify a recommendation into tier1a/tier1b/tier2/tier3/avoid.
+    """Classify a recommendation into tier1b/tier2/tier3/avoid.
 
     Runs for **every** recommendation — nothing is skipped before
     classification.
@@ -297,19 +297,20 @@ def classify_rec(
     Tier cascade:
         1. Hard disqualifiers → **avoid** (unstable, <4 books, stale, outlier)
         2. hold >= 8% or edge <= 0 → **avoid**
-        3. Tier 1A (Institutional): High conf, Elite/Strong quality,
-           books >= 6, hold <= 6%, edge >= dyn_floor_1a
-        4. Tier 1B (Standard): High/Medium conf (or Low with override),
-           Elite/Strong/Moderate quality (or Thin with override),
-           books >= 5, hold <= 7.5%, edge >= dyn_floor_1b
-        5. Tier 2: High/Medium conf (or Low with override),
-           Elite/Strong/Moderate quality, edge > 0, books >= 4
-        6. Tier 3: positive-edge plays that don't meet higher tiers
+        3. Tier 1 — Core Value: edge_ev_shrunk > 0, edge_z >= 1.75,
+           quality_score >= 70, consensus_prob >= 0.30, books >= 5,
+           hold <= 7.5%, edge >= dyn_floor_1b
+        4. Tier 2 — High Variance Value: edge_ev_shrunk > 0,
+           edge_z >= 1.75, quality_score >= 65, consensus_prob < 0.30,
+           books >= 4, hold <= 7.5%  (no dynamic floor)
+        5. Tier 3 — Moderate Edge: edge_ev_shrunk > 0,
+           1.0 <= edge_z < 1.75, quality_score >= 60, books >= 4
+        6. Tier 3 catch-all: positive-edge plays that don't meet above
 
     Parameters
     ----------
     entry:
-        A dict with at least: edge_pct, confidence, quality_tier,
+        A dict with at least: edge_pct, edge_ev_shrunk, consensus_prob,
         quality_score, market_volatility_sigma, edge_z, books_used,
         oldest_update_age_min, market_unstable, market_hold_median.
     settings:
@@ -321,8 +322,7 @@ def classify_rec(
     Returns
     -------
     dict with keys:
-        tier: ``"tier1a"`` | ``"tier1b"`` | ``"tier2"`` | ``"tier3"``
-              | ``"avoid"``
+        tier: ``"tier1b"`` | ``"tier2"`` | ``"tier3"`` | ``"avoid"``
         reasons: list[str]  (empty except for avoid)
         dynamic_edge_floor: float  (Tier 1A floor, for debugging)
     """
@@ -377,73 +377,52 @@ def classify_rec(
         _add_market_quality_flags(reasons, entry)
         return {"tier": "avoid", "reasons": reasons, "dynamic_edge_floor": floor_1a}
 
-    # ── Tier 1A (Institutional / Pro) ─────────────────────────────
-    if (
-        confidence == "High"
-        and quality_tier in ("Elite", "Strong")
-        and edge >= floor_1a
-        and books_used >= th.tier1a_books_min
-        and hold_median <= th.tier1a_hold_max
-    ):
-        return {"tier": "tier1a", "reasons": [], "dynamic_edge_floor": floor_1a}
+    # ── New fields for updated tiering ─────────────────────────────
+    edge_ev_shrunk = entry.get("edge_ev_shrunk", 0.0)
+    consensus_prob = entry.get("consensus_prob", 0.0)
+    quality_score = entry.get("quality_score", 0)
 
-    # ── Tier 1B (Standard / Aggressive) ───────────────────────────
-    # Confidence: High/Medium by default, Low allowed with override
-    t1b_conf = confidence in ("High", "Medium")
-    if not t1b_conf and confidence == "Low":
-        if (
-            edge_z >= th.tier1b_low_conf_edge_z_min
-            and edge >= th.tier1b_low_conf_edge_pct_min
-        ):
-            t1b_conf = True
-
-    # Quality: Elite/Strong/Moderate by default, Thin allowed with override
-    t1b_qt = quality_tier in ("Elite", "Strong", "Moderate")
-    if not t1b_qt and quality_tier == "Thin":
-        if (
-            edge >= th.tier1b_thin_edge_pct_min
-            and hold_median <= th.tier1b_thin_hold_max
-            and books_used >= th.tier1b_thin_books_min
-        ):
-            t1b_qt = True
-
+    # ── Tier 1 — Core Value ───────────────────────────────────────
+    # Dynamic edge floor kept for Tier 1 only (per existing behaviour).
     floor_1b = max(
         th.tier1b_floor_min,
         th.tier1b_sigma_mult * sigma,
     )
     if (
-        t1b_conf
-        and t1b_qt
+        edge_ev_shrunk > 0
+        and edge_z >= 1.75
+        and quality_score >= 70
+        and consensus_prob >= 0.30
+        and books_used >= 5
+        and hold_median <= 7.5
         and edge >= floor_1b
-        and books_used >= th.tier1b_books_min
-        and hold_median <= th.tier1b_hold_max
     ):
         return {"tier": "tier1b", "reasons": [], "dynamic_edge_floor": floor_1a}
 
-    # ── Tier 2 ────────────────────────────────────────────────────
-    # Confidence: High/Medium by default, Low allowed with override
-    t2_conf = confidence in ("High", "Medium")
-    if not t2_conf and confidence == "Low":
-        if (
-            edge_z >= th.tier2_low_conf_edge_z_min
-            and edge >= th.tier2_low_conf_edge_pct_min
-        ):
-            t2_conf = True
-
-    t2_qt = quality_tier in ("Elite", "Strong", "Moderate")
-    t2_edge = edge >= th.tier2_edge_min if th.tier2_edge_min > 0 else True
-    # edge_z gate: disabled when tier2_edge_z_min == 0
-    if th.tier2_edge_z_min > 0:
-        t2_ez = edge_z >= th.tier2_edge_z_min if edge_z else True
-    else:
-        t2_ez = True
-    t2_books = books_used >= th.min_books
-
-    if t2_conf and t2_qt and t2_edge and t2_ez and t2_books:
+    # ── Tier 2 — High Variance Value (Longshot EV) ────────────────
+    # No dynamic floor; requires low consensus_prob (longshot gate).
+    if (
+        edge_ev_shrunk > 0
+        and edge_z >= 1.75
+        and quality_score >= 65
+        and consensus_prob < 0.30
+        and books_used >= 4
+        and hold_median <= 7.5
+    ):
         return {"tier": "tier2", "reasons": [], "dynamic_edge_floor": floor_1a}
 
-    # ── Tier 3: positive edge, no hard Stay Away flags ────────────
+    # ── Tier 3 — Moderate Edge ────────────────────────────────────
+    if (
+        edge_ev_shrunk > 0
+        and 1.0 <= edge_z < 1.75
+        and quality_score >= 60
+        and books_used >= 4
+    ):
+        return {"tier": "tier3", "reasons": [], "dynamic_edge_floor": floor_1a}
+
+    # ── Tier 3 catch-all: positive edge, no hard Stay Away flags ──
     # Edge > 0 already guaranteed (checked above).
+    # Do NOT promote negative EV/edge into named tiers above.
     return {"tier": "tier3", "reasons": [], "dynamic_edge_floor": floor_1a}
 
 

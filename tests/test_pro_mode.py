@@ -44,8 +44,10 @@ def _entry(
     market_hold_median: float = 4.0,
     divergence: float | None = None,
     market: str = "moneyline",
+    edge_ev_shrunk: float = 0.05,
+    consensus_prob: float = 0.55,
 ) -> dict:
-    """Build an entry dict that passes Tier 1A by default."""
+    """Build an entry dict that passes Tier 1 by default."""
     return {
         "edge_pct": edge_pct,
         "confidence": confidence,
@@ -59,6 +61,8 @@ def _entry(
         "market_hold_median": market_hold_median,
         "divergence": divergence,
         "market": market,
+        "edge_ev_shrunk": edge_ev_shrunk,
+        "consensus_prob": consensus_prob,
     }
 
 
@@ -69,44 +73,44 @@ def _entry(
 
 class TestTier1AGating:
     def test_tier1a_passes_all_gates(self):
-        """Entry meeting all Tier 1A gates → tier1a."""
+        """Entry meeting all Tier 1 gates → tier1b (Core Value)."""
         result = classify_rec(_entry())
-        assert result["tier"] == "tier1a"
+        assert result["tier"] == "tier1b"
 
     def test_tier1a_rejects_medium_confidence(self):
-        """Medium confidence fails Tier 1A → falls to 1B."""
+        """Confidence no longer gates — Medium conf still passes Tier 1."""
         result = classify_rec(_entry(confidence="Medium"))
         assert result["tier"] == "tier1b"
 
     def test_tier1a_rejects_moderate_quality(self):
-        """Moderate quality fails Tier 1A → falls to 1B."""
+        """quality_tier no longer gates — quality_score matters instead."""
         result = classify_rec(_entry(quality_tier="Moderate"))
         assert result["tier"] == "tier1b"
 
     def test_tier1a_rejects_few_books(self):
-        """books_used < 6 fails Tier 1A."""
-        result = classify_rec(_entry(books_used=5))
-        assert result["tier"] != "tier1a"
+        """books_used < 5 fails Tier 1."""
+        result = classify_rec(_entry(books_used=4))
+        assert result["tier"] != "tier1b"
 
     def test_tier1a_rejects_high_hold(self):
-        """hold > 6% fails Tier 1A."""
-        result = classify_rec(_entry(market_hold_median=6.5))
-        assert result["tier"] != "tier1a"
+        """hold > 7.5% fails Tier 1."""
+        result = classify_rec(_entry(market_hold_median=7.6))
+        assert result["tier"] != "tier1b"
 
     def test_tier1a_hold_at_threshold_passes(self):
-        """hold == 6% passes Tier 1A (<=)."""
+        """hold == 6% passes Tier 1 (<=7.5)."""
         result = classify_rec(_entry(market_hold_median=_TIER1A_HOLD_MAX))
-        assert result["tier"] == "tier1a"
+        assert result["tier"] == "tier1b"
 
     def test_tier1a_books_at_threshold_passes(self):
-        """books == 6 passes Tier 1A (>=)."""
+        """books == 6 passes Tier 1 (>=5)."""
         result = classify_rec(_entry(books_used=_TIER1A_BOOKS_MIN))
-        assert result["tier"] == "tier1a"
+        assert result["tier"] == "tier1b"
 
     def test_tier1a_edge_below_floor(self):
-        """Edge below dyn_floor_1a fails Tier 1A."""
-        result = classify_rec(_entry(edge_pct=1.9))
-        assert result["tier"] != "tier1a"
+        """Edge below dyn_floor_1b fails Tier 1."""
+        result = classify_rec(_entry(edge_pct=0.9))
+        assert result["tier"] != "tier1b"
 
 
 # ---------------------------------------------------------------------------
@@ -116,37 +120,36 @@ class TestTier1AGating:
 
 class TestTier1BGating:
     def test_tier1b_medium_confidence(self):
-        """Medium conf + Strong quality + books=5 → tier1b."""
+        """Medium conf + books=5 → tier1b (confidence no longer gates)."""
         result = classify_rec(_entry(
             confidence="Medium", books_used=5,
         ))
         assert result["tier"] == "tier1b"
 
     def test_tier1b_moderate_quality(self):
-        """High conf + Moderate quality + books=5 → tier1b."""
+        """Moderate quality_tier + books=5 → tier1b (quality_score gates)."""
         result = classify_rec(_entry(
             quality_tier="Moderate", books_used=5,
         ))
         assert result["tier"] == "tier1b"
 
-    def test_tier1b_rejects_low_confidence(self):
-        """Low conf fails 1B (edge/edge_z below override)."""
-        result = classify_rec(_entry(confidence="Low", edge_pct=1.9, edge_z=1.9))
+    def test_tier1b_rejects_low_quality_score(self):
+        """quality_score < 70 fails Tier 1 → tier3."""
+        result = classify_rec(_entry(quality_score=65, edge_z=2.0))
         assert result["tier"] not in ("tier1a", "tier1b")
 
     def test_tier1b_thin_quality_override(self):
-        """Thin quality passes 1B when override conditions are met."""
-        # Default: edge=4.0, hold=4.0, books=7 → all override gates met
+        """Thin quality_tier still passes when quality_score >= 70."""
         result = classify_rec(_entry(quality_tier="Thin"))
         assert result["tier"] == "tier1b"
 
-    def test_tier1b_rejects_thin_quality_few_books(self):
-        """Thin quality fails 1B override when books < 6."""
-        result = classify_rec(_entry(quality_tier="Thin", books_used=5))
+    def test_tier1b_rejects_few_books(self):
+        """books < 5 fails Tier 1 → tier3."""
+        result = classify_rec(_entry(books_used=4))
         assert result["tier"] not in ("tier1a", "tier1b")
 
     def test_tier1b_hold_at_threshold(self):
-        """hold == 7.5% passes Tier 1B (<=)."""
+        """hold == 7.5% passes Tier 1 (<=)."""
         result = classify_rec(_entry(
             market_hold_median=_TIER1B_HOLD_MAX, books_used=5,
             confidence="Medium", quality_tier="Moderate",
@@ -154,7 +157,7 @@ class TestTier1BGating:
         assert result["tier"] == "tier1b"
 
     def test_tier1b_hold_above_threshold(self):
-        """hold > 7.5% fails Tier 1B → falls to tier2."""
+        """hold > 7.5% fails Tier 1 → falls to tier3."""
         result = classify_rec(_entry(
             market_hold_median=7.6, books_used=5,
             confidence="Medium", quality_tier="Moderate",
@@ -162,7 +165,7 @@ class TestTier1BGating:
         assert result["tier"] not in ("tier1a", "tier1b")
 
     def test_tier1b_books_at_threshold(self):
-        """books == 5 passes Tier 1B (>=)."""
+        """books == 5 passes Tier 1 (>=)."""
         result = classify_rec(_entry(
             books_used=_TIER1B_BOOKS_MIN,
             confidence="Medium", quality_tier="Moderate",
@@ -170,7 +173,7 @@ class TestTier1BGating:
         assert result["tier"] == "tier1b"
 
     def test_tier1b_books_below_threshold(self):
-        """books < 5 fails Tier 1B."""
+        """books < 5 fails Tier 1."""
         result = classify_rec(_entry(
             books_used=4, confidence="Medium", quality_tier="Moderate",
         ))
@@ -192,11 +195,11 @@ class TestTier1ADynamicFloor:
         assert result["dynamic_edge_floor"] == dyn_floor_1a(1.0)
 
     def test_edge_above_raised_floor(self):
-        """sigma=0.02 → floor=max(2.0,2.0)=2.0; 2.1>=2.0 → 1a."""
+        """sigma=0.02 → floor_1b=max(1.0,2.0)=2.0; 2.1>=2.0 → tier1b."""
         result = classify_rec(_entry(
             edge_pct=2.1, market_volatility_sigma=0.02,
         ))
-        assert result["tier"] == "tier1a"
+        assert result["tier"] == "tier1b"
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +238,7 @@ class TestBuildSlateTiers:
             books_used_count=7, newest_update_age_min=10.0,
             oldest_update_age_min=15.0, market_unstable=False,
             market_volatility_sigma=0.0, market_hold_median=4.0,
-            edge_z=3.0,
+            edge_z=3.0, edge_ev_shrunk=0.05,
         )
         defaults.update(kwargs)
         return BetRecommendation(**defaults)
@@ -264,15 +267,15 @@ class TestBuildSlateTiers:
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_tier1a_in_slate(self, mock_rbb):
-        """Strong rec → tier1a in slate, and in combined tier1."""
+        """Strong rec → tier1b in slate, and in combined tier1."""
         mock_rbb.return_value = [self._make_rec()]
         result = build_daily_slate({"e1": self._lines()})
-        assert len(result["tier1a"]) == 1
+        assert len(result["tier1b"]) == 1
         assert len(result["tier1"]) == 1
 
     @patch("line_tracker.slate.recommend_best_bets")
     def test_tier1b_in_slate(self, mock_rbb):
-        """5-book rec → tier1b, not tier1a."""
+        """5-book rec → tier1b (books=5 passes new threshold)."""
         mock_rbb.return_value = [self._make_rec(books_used_count=5)]
         result = build_daily_slate({"e1": self._lines()})
         assert len(result["tier1a"]) == 0
@@ -284,8 +287,8 @@ class TestBuildSlateTiers:
         """Counts include tier1a, tier1b, and combined tier1."""
         mock_rbb.return_value = [self._make_rec()]
         result = build_daily_slate({"e1": self._lines()})
-        assert result["counts"]["tier1a"] == 1
-        assert result["counts"]["tier1b"] == 0
+        assert result["counts"]["tier1a"] == 0
+        assert result["counts"]["tier1b"] == 1
         assert result["counts"]["tier1"] == 1
 
 
@@ -446,17 +449,13 @@ class TestTierThresholds:
             pass
 
     def test_classify_with_pro_thresholds(self):
-        """Pro thresholds disable Low-confidence override for Tier 1B."""
-        # Low conf + high edge_z → tier1b under Standard, but avoid under Pro
-        # (because edge=4.0 >= outlier threshold with Low conf → hard avoid)
-        e = _entry(
-            confidence="Low", edge_pct=3.5, edge_z=3.0,
-            books_used=7, market_hold_median=4.0,
-        )
+        """Pro thresholds have stricter floor_min → edge below Pro floor fails."""
+        # edge=1.2: passes Standard floor (1.0) but fails Pro floor (1.5)
+        e = _entry(edge_pct=1.2)
         std = classify_rec(e, thresholds=STANDARD_THRESHOLDS)
         pro = classify_rec(e, thresholds=PRO_THRESHOLDS)
         assert std["tier"] == "tier1b"
-        assert pro["tier"] == "tier3"  # Low conf, no override in Pro
+        assert pro["tier"] == "tier3"  # edge < Pro floor_min 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -466,35 +465,33 @@ class TestTierThresholds:
 
 class TestTier1BLowConfOverride:
     def test_low_conf_with_high_edge_z_passes(self):
-        """Low conf + edge_z >= 2.0 + edge >= 2.5 → tier1b."""
+        """Low conf no longer gates — tier1b with good quality_score."""
         result = classify_rec(_entry(
             confidence="Low", edge_pct=2.5, edge_z=2.0,
             quality_tier="Strong", books_used=5,
         ))
         assert result["tier"] == "tier1b"
 
-    def test_low_conf_insufficient_edge_z(self):
-        """Low conf + edge_z < 2.0 → fails 1B override → falls to tier2
-        (T2 low-conf override: edge_z=1.9 >= 1.5 and edge=3.0 >= 1.0)."""
+    def test_low_edge_z_fails_tier1(self):
+        """edge_z < 1.75 fails Tier 1 → tier3 (moderate edge)."""
         result = classify_rec(_entry(
-            confidence="Low", edge_pct=3.0, edge_z=1.9,
+            confidence="Low", edge_pct=3.0, edge_z=1.5,
             quality_tier="Strong", books_used=5,
         ))
         assert result["tier"] != "tier1b"
-        assert result["tier"] == "tier2"
+        assert result["tier"] == "tier3"
 
-    def test_low_conf_insufficient_edge_pct(self):
-        """Low conf + edge_pct < 2.0 → fails 1B override → falls to tier2
-        (T2 low-conf override: edge_z=3.0 >= 1.5 and edge=1.9 >= 0.5)."""
+    def test_edge_below_floor_fails_tier1(self):
+        """edge < floor_1b fails Tier 1 → tier3."""
         result = classify_rec(_entry(
-            confidence="Low", edge_pct=1.9, edge_z=3.0,
+            confidence="Low", edge_pct=0.9, edge_z=3.0,
             quality_tier="Strong", books_used=5,
         ))
         assert result["tier"] != "tier1b"
-        assert result["tier"] == "tier2"
+        assert result["tier"] == "tier3"
 
     def test_low_conf_edge_z_zero_means_unavailable(self):
-        """Low conf + edge_z=0 (unavailable) → no override → tier3."""
+        """edge_z=0 (unavailable) → fails Tier 1 → tier3."""
         result = classify_rec(_entry(
             confidence="Low", edge_pct=3.0, edge_z=0.0,
             quality_tier="Strong", books_used=5,
@@ -502,7 +499,7 @@ class TestTier1BLowConfOverride:
         assert result["tier"] == "tier3"
 
     def test_low_conf_override_at_boundary(self):
-        """Exactly at threshold values → passes."""
+        """Low conf at exact tier1b thresholds → passes (conf irrelevant)."""
         result = classify_rec(_entry(
             confidence="Low", edge_pct=2.5, edge_z=2.0,
             quality_tier="Moderate", books_used=5,
@@ -516,35 +513,35 @@ class TestTier1BLowConfOverride:
 
 
 class TestTier1BThinOverride:
-    def test_thin_quality_with_override_passes(self):
-        """Thin + edge>=3.0 + hold<=6.5 + books>=6 → tier1b."""
+    def test_thin_quality_with_good_score_passes(self):
+        """Thin quality_tier + quality_score >= 70 → tier1b."""
         result = classify_rec(_entry(
             quality_tier="Thin", edge_pct=3.0, market_hold_median=6.5,
             books_used=6, confidence="High",
         ))
         assert result["tier"] == "tier1b"
 
-    def test_thin_quality_edge_too_low(self):
-        """Thin + edge<3.0 → fails override."""
+    def test_low_quality_score_fails_tier1(self):
+        """quality_score < 70 fails Tier 1 → tier3."""
         result = classify_rec(_entry(
-            quality_tier="Thin", edge_pct=2.9, market_hold_median=4.0,
+            quality_score=65, edge_pct=2.9, market_hold_median=4.0,
             books_used=7, confidence="High",
         ))
         assert result["tier"] == "tier3"
 
-    def test_thin_quality_hold_too_high(self):
-        """Thin + hold>6.5 → fails override."""
+    def test_hold_above_75_fails_tier1(self):
+        """hold > 7.5% fails Tier 1 → tier3."""
         result = classify_rec(_entry(
-            quality_tier="Thin", edge_pct=3.5, market_hold_median=6.6,
+            quality_tier="Thin", edge_pct=3.5, market_hold_median=7.6,
             books_used=7, confidence="High",
         ))
         assert result["tier"] == "tier3"
 
-    def test_thin_quality_books_too_few(self):
-        """Thin + books<6 → fails override."""
+    def test_books_below_5_fails_tier1(self):
+        """books < 5 fails Tier 1 → tier3."""
         result = classify_rec(_entry(
             quality_tier="Thin", edge_pct=3.5, market_hold_median=4.0,
-            books_used=5, confidence="High",
+            books_used=4, confidence="High",
         ))
         assert result["tier"] == "tier3"
 
@@ -555,35 +552,35 @@ class TestTier1BThinOverride:
 
 
 class TestTier2LowConfOverride:
-    def test_low_conf_with_edge_z_override(self):
-        """Low conf + edge_z >= 1.5 + edge >= 1.0 → tier2."""
+    def test_tier2_with_low_consensus(self):
+        """Low consensus_prob + edge_z >= 1.75 → tier2 (longshot EV)."""
         result = classify_rec(_entry(
-            confidence="Low", edge_pct=1.0, edge_z=1.5,
-            quality_tier="Strong", books_used=5,
+            consensus_prob=0.20, edge_pct=1.5, edge_z=2.0,
+            quality_score=70, books_used=5,
         ))
         assert result["tier"] == "tier2"
 
-    def test_low_conf_insufficient_edge_z_for_tier2(self):
-        """Low conf + edge_z < 1.5 → no override → tier3."""
+    def test_tier2_insufficient_edge_z(self):
+        """edge_z < 1.75 → fails Tier 2 → tier3."""
         result = classify_rec(_entry(
-            confidence="Low", edge_pct=1.0, edge_z=1.4,
-            quality_tier="Strong", books_used=5,
+            consensus_prob=0.20, edge_pct=1.0, edge_z=1.4,
+            quality_score=70, books_used=5,
         ))
         assert result["tier"] == "tier3"
 
     def test_low_conf_insufficient_edge_for_tier2(self):
-        """Low conf + edge < 0.5 → no override → tier3."""
+        """edge < floor → fails Tier 1, consensus high → fails Tier 2 → tier3."""
         result = classify_rec(_entry(
             confidence="Low", edge_pct=0.4, edge_z=2.0,
             quality_tier="Strong", books_used=5,
         ))
         assert result["tier"] == "tier3"
 
-    def test_low_conf_tier2_at_boundary(self):
-        """Low conf at exact threshold boundaries → tier2."""
+    def test_tier2_at_boundary(self):
+        """consensus_prob just below 0.30 + exact thresholds → tier2."""
         result = classify_rec(_entry(
-            confidence="Low", edge_pct=1.0, edge_z=1.5,
-            quality_tier="Moderate", books_used=4,
+            consensus_prob=0.29, edge_pct=1.5, edge_z=1.75,
+            quality_score=65, books_used=4, market_hold_median=7.5,
         ))
         assert result["tier"] == "tier2"
 
