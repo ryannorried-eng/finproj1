@@ -356,6 +356,7 @@ def classify_rec(
 
     if hard_reasons:
         _add_market_quality_flags(hard_reasons, entry)
+        print(f"DEBUG TIER: → avoid (hard)  reasons={hard_reasons}  |  {entry.get('market', '?')} {entry.get('pick', '?')}")
         return {
             "tier": "avoid",
             "reasons": hard_reasons,
@@ -369,12 +370,14 @@ def classify_rec(
             f"({hold_median:.1f}% >= {th.stay_away_hold_max:.0f}%)"
         ]
         _add_market_quality_flags(reasons, entry)
+        print(f"DEBUG TIER: → avoid (hold)  hold={hold_median}  |  {entry.get('market', '?')} {entry.get('pick', '?')}")
         return {"tier": "avoid", "reasons": reasons, "dynamic_edge_floor": floor_1a}
 
     # ── Negative / zero edge → Stay Away ──────────────────────────
     if edge <= 0:
         reasons = [f"Edge not positive ({edge:.1f}%)"]
         _add_market_quality_flags(reasons, entry)
+        print(f"DEBUG TIER: → avoid (edge<=0)  edge={edge}  |  {entry.get('market', '?')} {entry.get('pick', '?')}")
         return {"tier": "avoid", "reasons": reasons, "dynamic_edge_floor": floor_1a}
 
     # ── New fields for updated tiering ─────────────────────────────
@@ -397,6 +400,7 @@ def classify_rec(
         and hold_median <= 7.5
         and edge >= floor_1b
     ):
+        print(f"DEBUG TIER: edge_z={edge_z} consensus_prob={consensus_prob} edge={edge} floor_1b={floor_1b} qs={quality_score} books={books_used} hold={hold_median} ev_shrunk={edge_ev_shrunk} → tier1b  |  {entry.get('market', '?')} {entry.get('pick', '?')}")
         return {"tier": "tier1b", "reasons": [], "dynamic_edge_floor": floor_1a}
 
     # ── Tier 2 — High Variance Value (Longshot EV) ────────────────
@@ -409,6 +413,7 @@ def classify_rec(
         and books_used >= 4
         and hold_median <= 7.5
     ):
+        print(f"DEBUG TIER: edge_z={edge_z} consensus_prob={consensus_prob} edge={edge} qs={quality_score} books={books_used} hold={hold_median} ev_shrunk={edge_ev_shrunk} → tier2  |  {entry.get('market', '?')} {entry.get('pick', '?')}")
         return {"tier": "tier2", "reasons": [], "dynamic_edge_floor": floor_1a}
 
     # ── Tier 3 — Moderate Edge ────────────────────────────────────
@@ -418,11 +423,13 @@ def classify_rec(
         and quality_score >= 60
         and books_used >= 4
     ):
+        print(f"DEBUG TIER: edge_z={edge_z} consensus_prob={consensus_prob} edge={edge} qs={quality_score} books={books_used} ev_shrunk={edge_ev_shrunk} → tier3  |  {entry.get('market', '?')} {entry.get('pick', '?')}")
         return {"tier": "tier3", "reasons": [], "dynamic_edge_floor": floor_1a}
 
     # ── Tier 3 catch-all: positive edge, no hard Stay Away flags ──
     # Edge > 0 already guaranteed (checked above).
     # Do NOT promote negative EV/edge into named tiers above.
+    print(f"DEBUG TIER: edge_z={edge_z} consensus_prob={consensus_prob} edge={edge} qs={quality_score} books={books_used} ev_shrunk={edge_ev_shrunk} → tier3(catch-all)  |  {entry.get('market', '?')} {entry.get('pick', '?')}")
     return {"tier": "tier3", "reasons": [], "dynamic_edge_floor": floor_1a}
 
 
