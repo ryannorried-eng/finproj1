@@ -11,6 +11,7 @@ def build_daily_slate_service(
     filters: dict,
     mode: str,
     store,
+    tiering_method: str = "hybrid",
 ):
     """Build daily slate using optional calibration thresholds in Auto mode."""
     thresholds = None
@@ -21,4 +22,9 @@ def build_daily_slate_service(
 
             cal_dict = calibration_from_json(cal_json)
             thresholds = thresholds_from_calibration(cal_dict)
-    return build_daily_slate(lines_by_event, filters=filters, thresholds=thresholds)
+    return build_daily_slate(
+        lines_by_event,
+        filters=filters,
+        thresholds=thresholds,
+        tiering_method=tiering_method,
+    )

@@ -89,3 +89,4 @@ class BestBetResult:
     n_eff: float = 0.0
     agreement_score: float = 0.0
     skipped_reason: str = ""
+    bet_tier: str = ""  # "Tier 1", "Tier 2", "Tier 3", or "Stay Away"

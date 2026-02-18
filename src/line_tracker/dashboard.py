@@ -71,6 +71,11 @@ from line_tracker.services.ingestion_service import fetch_and_persist_snapshot
 from line_tracker.services.performance_service import load_clv_df
 from line_tracker.services.slate_service import build_daily_slate_service
 from line_tracker.slate import passes_relaxed_tier2
+from line_tracker.tiering import (
+    assign_tiers,
+    slate_distribution_stats,
+    tier_frequency_report,
+)
 from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 from line_tracker.ui.components.diagnostics import (
     get_db_counts,
@@ -514,6 +519,19 @@ def _sidebar():
                 help=(
                     "Hides juice columns and uses shorter bet-type labels "
                     "for a denser view."
+                ),
+            )
+            st.selectbox(
+                "Tiering method",
+                options=["hybrid", "absolute", "percentile", "composite"],
+                index=0,
+                key="tiering_method",
+                help=(
+                    "How bet tiers are assigned on the Daily Slate.\n"
+                    "**hybrid** (recommended): absolute Z floor + slate percentile.\n"
+                    "**absolute**: legacy fixed thresholds.\n"
+                    "**percentile**: pure within-slate ranking.\n"
+                    "**composite**: EV-weighted composite score."
                 ),
             )
             st.toggle(
@@ -2184,6 +2202,7 @@ def _page_daily_slate():
         "max_per_event": 2,
         "debug": show_debug,
     }
+    tiering_method = st.session_state.get("tiering_method", "hybrid")
     with LineStore(DB_PATH) as store:
         has_calibration = bool(store.load_calibration("global"))
         slate = build_daily_slate_service(
@@ -2191,6 +2210,7 @@ def _page_daily_slate():
             filters=filters,
             mode=mode,
             store=store,
+            tiering_method=tiering_method,
         )
 
     if mode == "Auto":
@@ -2254,6 +2274,50 @@ def _page_daily_slate():
     mc2.metric("More Plays", len(more_display))
     mc3.metric("Tier 3", counts.get("tier3", 0))
     mc4.metric("Stay Away", len(stay_away_display))
+
+    # ── Pluggable Tiering Distribution ────────────────────────────────
+    _method_labels = {
+        "hybrid": "Hybrid (absolute floor + percentile)",
+        "absolute": "Absolute (legacy thresholds)",
+        "percentile": "Percentile (within-slate ranking)",
+        "composite": "Composite (EV-weighted score)",
+    }
+    _active_method = slate.get("tiering_method", tiering_method)
+    with st.expander(
+        f"Tiering: {_method_labels.get(_active_method, _active_method)}",
+        expanded=False,
+    ):
+        # Collect all recs that have a bet_tier from the pluggable system
+        _all_slate_entries = top_plays + more_plays + stay_away
+        _tier_counts = {"Tier 1": 0, "Tier 2": 0, "Tier 3": 0, "Stay Away": 0}
+        _tier_edges: dict[str, list[float]] = {
+            "Tier 1": [], "Tier 2": [], "Tier 3": [], "Stay Away": [],
+        }
+        for _e in _all_slate_entries:
+            _bt = _e.get("bet_tier", "")
+            if _bt in _tier_counts:
+                _tier_counts[_bt] += 1
+                _tier_edges[_bt].append(_e.get("edge_pct", 0.0))
+
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        tc1.metric("Tier 1", _tier_counts["Tier 1"])
+        tc2.metric("Tier 2", _tier_counts["Tier 2"])
+        tc3.metric("Tier 3", _tier_counts["Tier 3"])
+        tc4.metric("Stay Away", _tier_counts["Stay Away"])
+
+        # Mean edge per tier
+        _tier_edge_lines = []
+        for _t in ("Tier 1", "Tier 2", "Tier 3", "Stay Away"):
+            _edges = _tier_edges[_t]
+            if _edges:
+                _avg = sum(_edges) / len(_edges)
+                _tier_edge_lines.append(f"**{_t}:** avg EV/${_avg:+.2f}/100")
+            else:
+                _tier_edge_lines.append(f"**{_t}:** --")
+        st.caption(" | ".join(_tier_edge_lines))
+        st.caption(
+            "Tiering method can be changed in Settings > Advanced."
+        )
 
     # Sanity-check warnings (shown when debug env is on)
     if _debug_env:
@@ -2427,7 +2491,10 @@ def _render_why_tooltip(entry: dict) -> None:
         dyn_floor = entry.get("dynamic_edge_floor")
         r_sigma = entry.get("robust_sigma", 0.0)
         ev_sigma = entry.get("ev_sigma", 0.0)
+        _bt_label = entry.get("bet_tier", "")
+        _bt_line = f"- **Bet tier:** {_bt_label}\n" if _bt_label else ""
         lines = [
+            f"{_bt_line}"
             f"- **Confidence:** {entry.get('confidence', 'N/A')}",
             f"- **Quality tier:** {entry.get('quality_tier', 'N/A')}",
             f"- **Quality score:** {entry.get('quality_score', 'N/A')}",
@@ -2598,7 +2665,9 @@ def _render_slate_card(entry: dict, rank: int | None = None) -> None:
         with cols[1]:
             st.metric("EV/$100", f"${entry['edge_pct']:+.2f}")
             ez = entry.get('edge_z', 0.0)
-            st.caption(f"Z: {ez:+.2f} | Q: {entry['quality_score']}")
+            _card_bt = entry.get("bet_tier", "")
+            _bt_suffix = f" | {_card_bt}" if _card_bt else ""
+            st.caption(f"Z: {ez:+.2f} | Q: {entry['quality_score']}{_bt_suffix}")
         with cols[2]:
             st.metric("Slate Score", f"{entry['slate_score']:.0f}")
             st.caption(f"Confidence: {entry['confidence']}")
@@ -2684,6 +2753,7 @@ def _render_slate_table(entries: list[dict]) -> None:
             "EV/$100": f"${entry['edge_pct']:+.2f}",
             "Edge Z": f"{entry.get('edge_z', 0.0):+.2f}",
             "Quality": entry["quality_score"],
+            "Tier": entry.get("bet_tier", ""),
             "Confidence": entry["confidence"],
             "Sizing": sizing_str,
         })
