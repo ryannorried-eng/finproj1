@@ -30,6 +30,7 @@ class BettingLine:
     home_price: float | None = None
     away_price: float | None = None
     commence_time: datetime | None = None
+    api_event_id: str | None = None
 
     # For moneylines: home_value/away_value are the odds (e.g., -150, +130)
     # For spreads: values are the spread, prices are the juice

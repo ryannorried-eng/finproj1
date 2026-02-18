@@ -69,6 +69,7 @@ from line_tracker.services.bet_service import (
 )
 from line_tracker.services.ingestion_service import fetch_and_persist_snapshot
 from line_tracker.services.performance_service import load_clv_df
+from line_tracker.services.publish_service import publish_slate
 from line_tracker.services.slate_service import build_daily_slate_service
 from line_tracker.slate import passes_relaxed_tier2
 from line_tracker.tiering import (
@@ -672,6 +673,7 @@ def _build_game_index(lines) -> dict[str, dict]:
                 "sport": ln.sport,
                 "bet_types": set(),
                 "commence_time": getattr(ln, "commence_time", None),
+                "api_event_id": getattr(ln, "api_event_id", None),
             }
         g = games[ln.event]
         g["books"].add(ln.sportsbook)
@@ -681,6 +683,9 @@ def _build_game_index(lines) -> dict[str, dict]:
         # Prefer non-None commence_time
         if g["commence_time"] is None:
             g["commence_time"] = getattr(ln, "commence_time", None)
+        # Prefer non-None api_event_id
+        if g["api_event_id"] is None:
+            g["api_event_id"] = getattr(ln, "api_event_id", None)
     return games
 
 
@@ -789,6 +794,9 @@ def _page_dashboard():
                 if st.button("View", key=f"view_{event_name}"):
                     st.session_state["page"] = "detail"
                     st.session_state["selected_game"] = event_name
+                    st.session_state["selected_api_event_id"] = info.get(
+                        "api_event_id"
+                    )
                     st.rerun()
 
     # Sports list (collapsed)
@@ -835,6 +843,7 @@ def _sports_list():
 
 def _page_detail():
     event_name = st.session_state.get("selected_game", "")
+    api_event_id = st.session_state.get("selected_api_event_id")
 
     if st.button("\u2190 Back to Dashboard", key="btn_back"):
         st.session_state["page"] = "dashboard"
@@ -873,7 +882,7 @@ def _page_detail():
     with tabs[2]:
         _detail_movements(event_name)
     with tabs[3]:
-        _detail_history(event_name)
+        _detail_history(event_name, api_event_id=api_event_id)
 
 
 # -- Detail: Best Bet (Consensus EV) ---------------------------------------
@@ -1537,10 +1546,23 @@ def _detail_movements(event_name: str):
 
 # -- Detail tab: History ----------------------------------------------------
 
-def _detail_history(event_name: str):
+def _detail_history(event_name: str, *, api_event_id: str | None = None):
     """Shows stored line history for this game."""
     with LineStore(DB_PATH) as store:
-        lines = store.get_lines(event=event_name, limit=_max_display_rows())
+        if api_event_id:
+            # Prefer stable identity lookup — avoids full table scan.
+            all_bt_lines: list = []
+            for bt in (BetType.MONEYLINE, BetType.SPREAD, BetType.TOTAL):
+                all_bt_lines.extend(
+                    store.get_latest_for_api_event(api_event_id, bt)
+                )
+            lines = (
+                all_bt_lines
+                if all_bt_lines
+                else store.get_lines(event=event_name, limit=_max_display_rows())
+            )
+        else:
+            lines = store.get_lines(event=event_name, limit=_max_display_rows())
 
     if not lines:
         st.info("No stored history for this game yet.")
@@ -2032,6 +2054,9 @@ def _page_best_lines():
                     if st.button("View", key=f"bl_view_{rank}"):
                         st.session_state["page"] = "detail"
                         st.session_state["selected_game"] = s["event"]
+                        st.session_state["selected_api_event_id"] = s.get(
+                            "api_event_id"
+                        )
                         st.rerun()
 
                     # Add to slip (respects lock)
@@ -2212,6 +2237,13 @@ def _page_daily_slate():
             store=store,
             tiering_method=tiering_method,
         )
+
+    # Cache the computed slate in session_state for the Publish button.
+    st.session_state["_computed_slate"] = slate
+    st.session_state["_computed_slate_mode"] = mode
+    st.session_state["_computed_slate_sport"] = (
+        lines[0].sport if lines else "unknown"
+    )
 
     if mode == "Auto":
         if has_calibration:
@@ -2464,6 +2496,39 @@ def _page_daily_slate():
         else:
             for entry in stay_away_display:
                 _render_stay_away_entry(entry)
+
+    # ── Publish Slate button ──────────────────────────────────────────
+    st.divider()
+    _all_slate_picks = (
+        list(slate.get("tier1a", []))
+        + list(slate.get("tier1b", []))
+        + list(slate.get("tier2", []))
+        + list(slate.get("tier3", []))
+        + list(slate.get("stay_away", []))
+    )
+    if _all_slate_picks and st.button(
+        "Publish Slate", type="primary", key="btn_publish_slate"
+    ):
+        from datetime import date as _date_type
+
+        _slate_sport = st.session_state.get("_computed_slate_sport", "unknown")
+        _slate_mode = st.session_state.get("_computed_slate_mode", mode)
+        _thresholds = slate.get("thresholds")
+        _th_dict = (
+            {k: getattr(_thresholds, k) for k in _thresholds.__dataclass_fields__}
+            if _thresholds and hasattr(_thresholds, "__dataclass_fields__")
+            else {}
+        )
+        with LineStore(DB_PATH) as pub_store:
+            _sid = publish_slate(
+                pub_store,
+                slate_date=_date_type.today().isoformat(),
+                sport=_slate_sport,
+                mode=_slate_mode,
+                thresholds=_th_dict,
+                picks=_all_slate_picks,
+            )
+        st.success(f"Slate published (slate_id={_sid})")
 
 
 def _render_stay_away_entry(entry: dict) -> None:
@@ -2720,6 +2785,9 @@ def _render_slate_card(entry: dict, rank: int | None = None) -> None:
             if st.button("View", key=f"slate_view_{safe_key}_{entry['market']}"):
                 st.session_state["page"] = "detail"
                 st.session_state["selected_game"] = entry["event"]
+                st.session_state["selected_api_event_id"] = entry.get(
+                    "api_event_id"
+                )
                 st.rerun()
         _render_why_tooltip(entry)
         render_pick_explanation(

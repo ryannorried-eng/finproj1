@@ -9,7 +9,15 @@ from pathlib import Path
 from shutil import copy2
 
 from line_tracker.db.migrate import ensure_latest
-from line_tracker.db.repos import BetsRepo, CalibrationRepo, ClvRepo, LinesRepo
+from line_tracker.db.repos import (
+    BetsRepo,
+    CalibrationRepo,
+    ClvRepo,
+    EventsRepo,
+    LinesRepo,
+    SlatePicksRepo,
+    SlatesRepo,
+)
 from line_tracker.models import BettingLine, BetType
 
 DEFAULT_DB_PATH = Path.home() / ".line_tracker" / "lines.db"
@@ -56,6 +64,9 @@ class LineStore:
         self.bets_repo = BetsRepo(self._conn)
         self.clv_repo = ClvRepo(self._conn)
         self.calibration_repo = CalibrationRepo(self._conn)
+        self.events_repo = EventsRepo(self._conn)
+        self.slates_repo = SlatesRepo(self._conn)
+        self.slate_picks_repo = SlatePicksRepo(self._conn)
 
     def _maybe_commit(self) -> None:
         if not self._in_explicit_txn:
@@ -98,7 +109,10 @@ class LineStore:
                 self._in_explicit_txn = False
 
     def save_lines(self, lines: list[BettingLine]) -> int:
-        """Save a batch of lines. Returns number of rows inserted."""
+        """Save a batch of lines in a single transaction.
+
+        Returns number of rows inserted/upserted.
+        """
         rows = [
             (
                 ln.sportsbook,
@@ -113,11 +127,27 @@ class LineStore:
                 ln.away_price,
                 ln.timestamp.isoformat(),
                 ln.commence_time.isoformat() if ln.commence_time else None,
+                ln.api_event_id,
             )
             for ln in lines
         ]
-        count = self.lines_repo.insert_many(rows)
-        self._maybe_commit()
+        # Build unique set of events from lines that have api_event_id.
+        seen_events: dict[str, tuple] = {}
+        for ln in lines:
+            if ln.api_event_id and ln.api_event_id not in seen_events:
+                seen_events[ln.api_event_id] = (
+                    ln.api_event_id,
+                    ln.sport,
+                    ln.commence_time.isoformat() if ln.commence_time else "",
+                    ln.home_team,
+                    ln.away_team,
+                    ln.event,
+                )
+
+        with self.transaction():
+            if seen_events:
+                self.events_repo.insert_many_upsert(list(seen_events.values()))
+            count = self.lines_repo.insert_many(rows)
         return count
 
     def get_lines(
@@ -145,10 +175,36 @@ class LineStore:
         rows = self.lines_repo.get_latest_for_event(event, bet_type.value)
         return [_row_to_line(row) for row in rows]
 
+    def get_latest_for_api_event(
+        self,
+        api_event_id: str,
+        bet_type: BetType,
+    ) -> list[BettingLine]:
+        """Get the most recent line per sportsbook using stable api_event_id."""
+        rows = self.lines_repo.get_latest_for_api_event(
+            api_event_id, bet_type.value,
+        )
+        return [_row_to_line(row) for row in rows]
+
     def get_events(self) -> list[str]:
-        """List all distinct events in the database."""
+        """List all distinct events in the database.
+
+        Prefers the ``events`` table (fast, indexed) and falls back
+        to ``SELECT DISTINCT event FROM lines`` for legacy data.
+        """
+        event_rows = self.events_repo.list_events()
+        if event_rows:
+            return sorted({r["event_display"] for r in event_rows})
         rows = self.lines_repo.get_events()
         return [row["event"] for row in rows]
+
+    def get_events_rich(
+        self,
+        sport: str | None = None,
+        since_iso: str | None = None,
+    ) -> list[dict]:
+        """Return rich event dicts from the events table."""
+        return self.events_repo.list_events(sport=sport, since_iso=since_iso)
 
     def save_clv_pick(
         self,
@@ -303,6 +359,9 @@ def _row_to_line(row: sqlite3.Row) -> BettingLine:
         if ct_raw
         else None
     )
+    # api_event_id may not exist in rows from older queries (e.g. get_recent_lines)
+    keys = row.keys() if hasattr(row, "keys") else []
+    api_event_id = row["api_event_id"] if "api_event_id" in keys else None
     return BettingLine(
         sportsbook=row["sportsbook"],
         sport=row["sport"],
@@ -318,4 +377,5 @@ def _row_to_line(row: sqlite3.Row) -> BettingLine:
             tzinfo=timezone.utc,
         ),
         commence_time=commence_time,
+        api_event_id=api_event_id,
     )
