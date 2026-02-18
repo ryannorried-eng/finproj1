@@ -1,7 +1,7 @@
 PRAGMA foreign_keys=ON;
 
 ALTER TABLE lines ADD COLUMN api_event_id TEXT;
-ALTER TABLE lines ADD COLUMN ingested_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP);
+ALTER TABLE lines ADD COLUMN ingested_at TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_lines_api_event_id
 ON lines (api_event_id);
