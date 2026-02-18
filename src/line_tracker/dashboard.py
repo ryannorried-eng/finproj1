@@ -69,6 +69,7 @@ from line_tracker.services.bet_service import (
 )
 from line_tracker.services.ingestion_service import fetch_and_persist_snapshot
 from line_tracker.services.performance_service import load_clv_df
+from line_tracker.services.publish_service import publish_slate
 from line_tracker.services.slate_service import build_daily_slate_service
 from line_tracker.slate import passes_relaxed_tier2
 from line_tracker.tiering import (
@@ -2212,6 +2213,33 @@ def _page_daily_slate():
             store=store,
             tiering_method=tiering_method,
         )
+
+        # Persist the slate idempotently.
+        _all_slate_picks = (
+            list(slate.get("tier1a", []))
+            + list(slate.get("tier1b", []))
+            + list(slate.get("tier2", []))
+            + list(slate.get("tier3", []))
+            + list(slate.get("stay_away", []))
+        )
+        if _all_slate_picks:
+            from datetime import date as _date_type
+
+            _slate_sport = lines[0].sport if lines else "unknown"
+            _thresholds = slate.get("thresholds")
+            _th_dict = (
+                {k: getattr(_thresholds, k) for k in _thresholds.__dataclass_fields__}
+                if _thresholds and hasattr(_thresholds, "__dataclass_fields__")
+                else {}
+            )
+            publish_slate(
+                store,
+                slate_date=_date_type.today().isoformat(),
+                sport=_slate_sport,
+                mode=mode,
+                thresholds=_th_dict,
+                picks=_all_slate_picks,
+            )
 
     if mode == "Auto":
         if has_calibration:

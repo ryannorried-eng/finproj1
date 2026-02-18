@@ -89,6 +89,7 @@ def _parse_events(events: list[dict], sport: str) -> list[BettingLine]:
         home_team = event["home_team"]
         away_team = event["away_team"]
         event_name = f"{away_team} @ {home_team}"
+        api_event_id = event.get("id")
         ct_raw = event.get("commence_time")
         commence_time = _parse_timestamp(ct_raw) if ct_raw else None
 
@@ -113,6 +114,7 @@ def _parse_events(events: list[dict], sport: str) -> list[BettingLine]:
                 )
                 if line is not None:
                     line.commence_time = commence_time
+                    line.api_event_id = api_event_id
                     lines.append(line)
     return lines
 

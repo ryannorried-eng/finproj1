@@ -9,7 +9,14 @@ from pathlib import Path
 from shutil import copy2
 
 from line_tracker.db.migrate import ensure_latest
-from line_tracker.db.repos import BetsRepo, CalibrationRepo, ClvRepo, LinesRepo
+from line_tracker.db.repos import (
+    BetsRepo,
+    CalibrationRepo,
+    ClvRepo,
+    LinesRepo,
+    SlatePicksRepo,
+    SlatesRepo,
+)
 from line_tracker.models import BettingLine, BetType
 
 DEFAULT_DB_PATH = Path.home() / ".line_tracker" / "lines.db"
@@ -56,6 +63,8 @@ class LineStore:
         self.bets_repo = BetsRepo(self._conn)
         self.clv_repo = ClvRepo(self._conn)
         self.calibration_repo = CalibrationRepo(self._conn)
+        self.slates_repo = SlatesRepo(self._conn)
+        self.slate_picks_repo = SlatePicksRepo(self._conn)
 
     def _maybe_commit(self) -> None:
         if not self._in_explicit_txn:
@@ -98,7 +107,10 @@ class LineStore:
                 self._in_explicit_txn = False
 
     def save_lines(self, lines: list[BettingLine]) -> int:
-        """Save a batch of lines. Returns number of rows inserted."""
+        """Save a batch of lines in a single transaction.
+
+        Returns number of rows inserted/upserted.
+        """
         rows = [
             (
                 ln.sportsbook,
@@ -113,11 +125,12 @@ class LineStore:
                 ln.away_price,
                 ln.timestamp.isoformat(),
                 ln.commence_time.isoformat() if ln.commence_time else None,
+                ln.api_event_id,
             )
             for ln in lines
         ]
-        count = self.lines_repo.insert_many(rows)
-        self._maybe_commit()
+        with self.transaction():
+            count = self.lines_repo.insert_many(rows)
         return count
 
     def get_lines(
@@ -303,6 +316,9 @@ def _row_to_line(row: sqlite3.Row) -> BettingLine:
         if ct_raw
         else None
     )
+    # api_event_id may not exist in rows from older queries (e.g. get_recent_lines)
+    keys = row.keys() if hasattr(row, "keys") else []
+    api_event_id = row["api_event_id"] if "api_event_id" in keys else None
     return BettingLine(
         sportsbook=row["sportsbook"],
         sport=row["sport"],
@@ -318,4 +334,5 @@ def _row_to_line(row: sqlite3.Row) -> BettingLine:
             tzinfo=timezone.utc,
         ),
         commence_time=commence_time,
+        api_event_id=api_event_id,
     )
