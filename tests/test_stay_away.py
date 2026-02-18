@@ -29,13 +29,15 @@ def _entry(
     quality_tier: str = "Strong",
     quality_score: int = 80,
     market_volatility_sigma: float = 0.0,
-    edge_z: float = 0.0,
+    edge_z: float = 2.0,
     market_unstable: bool = False,
     books_used: int = 5,
     oldest_update_age_min: float = 15.0,
     market_hold_median: float = 0.0,
     divergence: float | None = None,
     market: str = "moneyline",
+    edge_ev_shrunk: float = 0.05,
+    consensus_prob: float = 0.55,
 ) -> dict:
     """Build a minimal entry dict for classify_rec / _avoid_score."""
     return {
@@ -51,6 +53,8 @@ def _entry(
         "market_hold_median": market_hold_median,
         "divergence": divergence,
         "market": market,
+        "edge_ev_shrunk": edge_ev_shrunk,
+        "consensus_prob": consensus_prob,
     }
 
 
@@ -94,11 +98,12 @@ def _make_rec(
     market_unstable: bool = False,
     market_volatility_sigma: float = 0.0,
     market_hold_median: float = 0.0,
-    edge_z: float = 0.0,
+    edge_z: float = 2.0,
     ev: float = 0.05,
     best_sportsbook: str = "FanDuel",
     best_odds: float = -110.0,
     ev_100: float | None = None,
+    edge_ev_shrunk: float = 0.05,
 ) -> BetRecommendation:
     _ev_100 = ev_100 if ev_100 is not None else edge_pct
     return BetRecommendation(
@@ -124,6 +129,7 @@ def _make_rec(
         market_volatility_sigma=market_volatility_sigma,
         market_hold_median=market_hold_median,
         edge_z=edge_z,
+        edge_ev_shrunk=edge_ev_shrunk,
     )
 
 
@@ -343,6 +349,7 @@ class TestClassifyRecMarketFlags:
         e = _entry(
             edge_pct=2.0, confidence="Medium", quality_tier="Moderate",
             market_hold_median=7.0, divergence=0.06, books_used=4,
+            consensus_prob=0.20, quality_score=70,
         )
         result = classify_rec(e)
         assert result["tier"] == "tier2"

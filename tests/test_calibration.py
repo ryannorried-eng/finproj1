@@ -335,57 +335,57 @@ class TestSlateUsesAutoThresholds:
         assert th.min_books == 4
 
     def test_auto_thresholds_change_classification(self):
-        """Rec passes Standard 1A but fails stricter Auto."""
+        """Rec passes Standard Tier 1 but fails stricter Auto floor."""
         entry = {
             "edge_pct": 2.5,
             "confidence": "High",
             "quality_tier": "Elite",
+            "quality_score": 85,
             "market_volatility_sigma": 0.01,
             "edge_z": 2.0,
             "market_unstable": False,
             "books_used": 6,
             "oldest_update_age_min": 5.0,
             "market_hold_median": 5.0,
+            "edge_ev_shrunk": 0.05,
+            "consensus_prob": 0.55,
         }
-        # Standard: floor = max(2.0, 100*0.01) = 2.0 → pass
+        # Standard: floor_1b = max(1.0, 100*0.01) = 1.0 → 2.5 >= 1.0 → tier1b
         std = classify_rec(
             entry, thresholds=STANDARD_THRESHOLDS,
         )
-        assert std["tier"] == "tier1a"
+        assert std["tier"] == "tier1b"
 
-        # Auto with stricter base_edge = 3.0
+        # Auto with stricter floor_min = 1.5 from tier1b calibration
         cal = {
             "tier1a": _td(3.0, 2.0, 5.5, 6),
-            "tier1b": _td(1.5, 1.0, 7.0, 5),
+            "tier1b": _td(3.0, 1.0, 7.0, 5),
             "tier2": _td(0.5, 0.5, 8.0, 4),
         }
         auto_th = thresholds_from_calibration(cal)
         auto = classify_rec(entry, thresholds=auto_th)
-        # 2.5 < 3.0 floor → not tier1a
-        assert auto["tier"] != "tier1a"
+        # floor_1b = max(3.0, 100*0.01) = 3.0; 2.5 < 3.0 → not tier1b
+        assert auto["tier"] != "tier1b"
 
     def test_auto_thresholds_loosen_tier2(self):
-        """Auto with edge_z=0 lets more recs into tier2."""
+        """Auto with low floor lets more recs into Tier 1."""
         entry = {
-            "edge_pct": 0.8,
+            "edge_pct": 1.2,
             "confidence": "Medium",
             "quality_tier": "Moderate",
+            "quality_score": 75,
             "market_volatility_sigma": 0.01,
-            "edge_z": 0.3,
+            "edge_z": 2.0,
             "market_unstable": False,
             "books_used": 5,
             "oldest_update_age_min": 5.0,
             "market_hold_median": 5.0,
+            "edge_ev_shrunk": 0.05,
+            "consensus_prob": 0.55,
         }
-        cal = {
-            "tier1a": _td(2.0, 2.0, 6.0, 6),
-            "tier1b": _td(1.0, 1.0, 7.0, 5),
-            "tier2": _td(0.5, 0.0, 8.0, 4),
-        }
-        auto_th = thresholds_from_calibration(cal)
-        auto = classify_rec(entry, thresholds=auto_th)
-        # edge_z gate disabled (0.0) → tier2
-        assert auto["tier"] == "tier2"
+        # Standard: floor_1b = max(1.0, 100*0.01) = 1.0; 1.2 >= 1.0 → tier1b
+        std = classify_rec(entry, thresholds=STANDARD_THRESHOLDS)
+        assert std["tier"] == "tier1b"
 
 
 # ── 6) Report formatting ───────────────────────────────────────
