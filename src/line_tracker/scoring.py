@@ -85,6 +85,11 @@ def compute_hybrid_fields(entry: dict) -> dict:
 
 RANKING_MODES = ("hybrid", "hit", "value")
 
+# Longshot guard for "hit" mode: bets where consensus_prob is below this
+# floor are considered longshots and are demoted unless the alpha_label is
+# "Strong" (indicating the edge is robust despite the low probability).
+LONGSHOT_PROB_FLOOR = 0.20
+
 
 def _hybrid_sort_key(e: dict) -> tuple:
     """Primary: hybrid_score (desc), then edge_ev_shrunk, quality_score."""
@@ -99,19 +104,27 @@ def _hit_sort_key(e: dict) -> tuple:
     """Prioritise most-likely-to-hit while keeping basic sanity.
 
     Order:
-    1. Require non-negative shrunk edge (demote negatives to bottom).
-    2. Higher consensus_prob first.
-    3. Higher alpha_score (penalises longshots via alpha penalties).
-    4. Higher agreement_score (tighter book consensus).
-    5. Lower sigma (less market noise).
+    1. Non-negative shrunk edge (hard demotion for negative edge).
+    2. Longshot guard: demote if consensus_prob < LONGSHOT_PROB_FLOOR
+       AND alpha_label != "Strong".  Strong-alpha longshots are not
+       auto-demoted since a robust signal justifies the low probability.
+    3. Higher consensus_prob first.
+    4. Higher alpha_score (further penalises unrobust longshots).
+    5. Higher agreement_score (tighter book consensus).
+    6. Lower sigma (less market noise).
     """
     edge_ok = 1 if e.get("edge_ev_shrunk", 0.0) >= 0 else 0
+    # not_longshot = 0 means "is a demotable longshot", sorts last
+    prob = e.get("consensus_prob", 0.0)
+    is_longshot = prob < LONGSHOT_PROB_FLOOR and e.get("alpha_label") != "Strong"
+    not_longshot = 0 if is_longshot else 1
     return (
-        -edge_ok,                                    # non-neg edge first
-        -e.get("consensus_prob", 0.0),               # highest prob first
-        -e.get("alpha_score", 0),                    # highest alpha first
-        -e.get("agreement_score", 0.0),              # highest agreement first
-        e.get("market_volatility_sigma", 0.0),       # lowest sigma first
+        -edge_ok,                                    # 1. non-neg edge first
+        -not_longshot,                               # 2. non-longshot first
+        -prob,                                       # 3. highest prob first
+        -e.get("alpha_score", 0),                    # 4. highest alpha first
+        -e.get("agreement_score", 0.0),              # 5. highest agreement first
+        e.get("market_volatility_sigma", 0.0),       # 6. lowest sigma first
     )
 
 

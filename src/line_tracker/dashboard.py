@@ -891,6 +891,7 @@ def _page_detail():
 
 def _rec_to_entry(rec) -> dict:
     """Convert a BetRecommendation to a scoring-compatible entry dict."""
+    shrunk = rec.edge_ev_shrunk or 0.0
     return {
         "market": rec.market,
         "selection": rec.selection,
@@ -906,7 +907,9 @@ def _rec_to_entry(rec) -> dict:
         "ev_per_100": rec.ev_per_100,
         "edge_pp": rec.edge_pp,
         "edge_ev": rec.edge_ev,
-        "edge_ev_shrunk": rec.edge_ev_shrunk,
+        "edge_ev_shrunk": shrunk,
+        # edge_shrunk_pct: shrunk edge in % — aligned with Slate conventions
+        "edge_shrunk_pct": round(shrunk * 100, 4),
         "edge_ev_100": rec.edge_ev_100,
         "ev_sigma": rec.ev_sigma,
         "edge_z": rec.edge_z,
@@ -959,12 +962,13 @@ def _detail_best_bet_section(game_lines):
         )
     with ctrl_cols[1]:
         min_edge = st.slider(
-            "Min edge (%)",
+            "Min edge (%, shrunk)",
             min_value=0.0,
             max_value=5.0,
             value=0.5,
             step=0.1,
             key=f"min_edge_{id(game_lines)}",
+            help="Filters on shrunk edge (same basis as Daily Slate)",
         )
     with ctrl_cols[2]:
         min_quality = st.slider(
@@ -977,12 +981,16 @@ def _detail_best_bet_section(game_lines):
         )
 
     # ── Build enriched entries and rank ──────────────────────────
+    # enrich_entry adds alpha + hybrid fields; rank_candidates sorts
+    # in-place AND returns the sorted list — capture it explicitly.
     entries = [enrich_entry(_rec_to_entry(r)) for r in recs]
-    rank_candidates(entries, mode=ranking_mode)
+    ranked = rank_candidates(entries, mode=ranking_mode)
 
+    # Filter preserves ranked order; use shrunk edge (aligned with Slate).
     qualified = [
-        e for e in entries
-        if e["edge_pct"] >= min_edge and e["quality_score"] >= min_quality
+        e for e in ranked
+        if e.get("edge_shrunk_pct", e["edge_pct"]) >= min_edge
+        and e["quality_score"] >= min_quality
     ]
 
     if qualified:
@@ -1049,7 +1057,8 @@ def _detail_best_bet_section(game_lines):
             "No bets meet your edge + quality thresholds."
             " Showing closest candidates:"
         )
-        for e in entries[:3]:
+        # Use ranked order for fallback display too
+        for e in ranked[:3]:
             r = e["_rec"]
             ml = _best_bet_market_label(r)
             ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
