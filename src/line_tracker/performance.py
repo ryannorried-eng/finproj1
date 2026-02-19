@@ -355,6 +355,89 @@ def rec_snapshot_clv_summary(rows: list[dict]) -> dict[str, dict]:
     return out
 
 
+# ------------------------------------------------------------------
+# Alpha CLV Report (read-only analytics)
+# ------------------------------------------------------------------
+
+_LABEL_ORDER = ["Strong", "Neutral", "Weak"]
+
+
+def alpha_clv_report(rows: list[dict]) -> dict:
+    """Build an observational report correlating alpha labels with CLV.
+
+    Parameters
+    ----------
+    rows:
+        Output of ``store.get_alpha_clv_stats()`` — each dict has
+        ``alpha_label``, ``cnt``, ``avg_clv_implied``, ``avg_clv_american``,
+        ``avg_edge_z``, ``avg_edge_ev_shrunk``, ``beat_close_cnt``.
+
+    Returns
+    -------
+    ``{"summary": {...}, "rows": [...]}``.
+    """
+    if not rows:
+        return {
+            "summary": {
+                "total_closed": 0,
+                "alpha_clv_spread": None,
+                "strong_avg_clv": None,
+                "neutral_avg_clv": None,
+                "weak_avg_clv": None,
+            },
+            "rows": [],
+        }
+
+    by_label: dict[str, dict] = {}
+    total_closed = 0
+    for r in rows:
+        label = r.get("alpha_label")
+        if label not in _LABEL_ORDER:
+            continue
+        cnt = r.get("cnt", 0)
+        total_closed += cnt
+        beat = r.get("beat_close_cnt", 0)
+        by_label[label] = {
+            "alpha_label": label,
+            "count": cnt,
+            "beat_close_pct": round(100.0 * beat / cnt, 1) if cnt else 0.0,
+            "avg_clv_prob": round(float(r.get("avg_clv_implied") or 0), 6),
+            "avg_clv_american": round(float(r.get("avg_clv_american") or 0), 2),
+            "avg_edge_z": (
+                round(float(r["avg_edge_z"]), 4)
+                if r.get("avg_edge_z") is not None
+                else None
+            ),
+            "avg_edge_ev_shrunk": (
+                round(float(r["avg_edge_ev_shrunk"]), 4)
+                if r.get("avg_edge_ev_shrunk") is not None
+                else None
+            ),
+        }
+
+    report_rows = [by_label[lb] for lb in _LABEL_ORDER if lb in by_label]
+
+    strong_clv = by_label.get("Strong", {}).get("avg_clv_prob")
+    neutral_clv = by_label.get("Neutral", {}).get("avg_clv_prob")
+    weak_clv = by_label.get("Weak", {}).get("avg_clv_prob")
+
+    if strong_clv is not None and weak_clv is not None:
+        spread = round(strong_clv - weak_clv, 6)
+    else:
+        spread = None
+
+    return {
+        "summary": {
+            "total_closed": total_closed,
+            "alpha_clv_spread": spread,
+            "strong_avg_clv": strong_clv,
+            "neutral_avg_clv": neutral_clv,
+            "weak_avg_clv": weak_clv,
+        },
+        "rows": report_rows,
+    }
+
+
 def calibration_stats(df: pd.DataFrame) -> dict[str, dict]:
     """Compare CLV performance across proxy tier groups.
 
