@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -61,7 +62,7 @@ from line_tracker.performance import (
     rolling_clv_series,
     summary_kpis,
 )
-from line_tracker.scoring import enrich_entry, rank_candidates
+from line_tracker.scoring import enrich_entry, filter_candidates, rank_candidates
 from line_tracker.scraper import OddsClient
 from line_tracker.services.bet_service import (
     settle_bet as settle_bet_persisted,
@@ -992,12 +993,37 @@ def _detail_best_bet_section(game_lines):
     entries = [enrich_entry(_rec_to_entry(r)) for r in recs]
     ranked = rank_candidates(entries, mode=ranking_mode)
 
-    # Filter preserves ranked order; use shrunk edge (aligned with Slate).
-    qualified = [
-        e for e in ranked
-        if e.get("edge_shrunk_pct", e["edge_pct"]) >= min_edge
-        and e["quality_score"] >= min_quality
-    ]
+    # Mode-aware filtering (hit mode skips edge gate).
+    qualified = filter_candidates(ranked, ranking_mode, min_edge, min_quality)
+
+    # ── Thin-market UX note ──────────────────────────────────────
+    ranked_markets = {e.get("market", "").lower() for e in ranked}
+    has_ml = "moneyline" in ranked_markets
+    missing_spread = "spread" not in ranked_markets
+    missing_total = "total" not in ranked_markets
+    if has_ml and (missing_spread or missing_total):
+        st.caption(
+            "Thin market: spreads/totals not ranked due to "
+            "insufficient market depth (need 2+ books at same number)."
+        )
+
+    # Stable key for dedup: avoid identity (``is``) comparisons.
+    def _entry_key(e: dict) -> tuple:
+        r = e.get("_rec")
+        if r is not None:
+            return (
+                getattr(r, "event_id", None),
+                e.get("market"),
+                e.get("selection"),
+                e.get("line"),
+                e.get("best_sportsbook"),
+            )
+        return (
+            e.get("market"),
+            e.get("selection"),
+            e.get("line"),
+            e.get("best_sportsbook"),
+        )
 
     if qualified:
         top_e = qualified[0]
@@ -1043,7 +1069,10 @@ def _detail_best_bet_section(game_lines):
         # Show next candidates from the full ranked list so that even
         # when only one entry passes the edge+quality threshold, the
         # closest alternatives are still visible.
-        others = [e for e in ranked if e is not top_e][:2]
+        # Uses stable key comparison instead of identity (``is``) to
+        # prevent duplicates even when dict copies exist.
+        top_key = _entry_key(top_e)
+        others = [e for e in ranked if _entry_key(e) != top_key][:2]
         if others:
             st.markdown("**Other candidates:**")
             for oe in others:
@@ -3404,7 +3433,10 @@ def _page_performance_body(store):
         "correlate with better closing line value."
     )
 
-    alpha_stats = store.get_alpha_clv_stats()
+    try:
+        alpha_stats = store.get_alpha_clv_stats()
+    except sqlite3.OperationalError:
+        alpha_stats = []
     alpha_report = alpha_clv_report(alpha_stats)
     alpha_summary = alpha_report["summary"]
     alpha_rows = alpha_report["rows"]
