@@ -3,9 +3,13 @@
 from datetime import datetime
 from unittest.mock import patch
 
+import pytest
+
 from line_tracker.best_bets import BetRecommendation
 from line_tracker.models import BettingLine, BetType
 from line_tracker.slate import (
+    TIER3_MIN_EDGE_Z,
+    TIER3_MIN_EV_100,
     _EDGE_OUTLIER_THRESHOLD,
     _STAY_AWAY_LIMIT,
     _TIER1_BASE_EDGE,
@@ -565,12 +569,14 @@ class TestBuildDailySlate:
             quality_score=80, edge_pct=0.5, quality_tier="Strong",
             confidence="High",
             books_used_count=4,  # < 5 → fails Tier 1 books gate
+            edge_ev_shrunk=0.004,  # shrunk_pct = 0.4, below min_edge=2.0
         )]
         result = build_daily_slate(
             {"evt1": _event_lines()}, filters={"min_edge": 2.0}
         )
         # Entry is classified as tier3 (catch-all: positive edge),
-        # display-filtered from tier3 list, but counts still reflect it.
+        # display-filtered from tier3 list (shrunk edge < min_edge),
+        # but counts still reflect it.
         assert result["counts"]["tier3"] == 1
         assert len(result["tier3"]) == 0  # filtered out of display
 
@@ -1653,3 +1659,178 @@ class TestNewTieringRules:
         ))
         # Fails T1 (hold), fails T2 (prob >= 0.30), catch-all tier3
         assert result["tier"] == "tier3"
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 tightened thresholds (edge_z >= 1.15, ev_100 >= 0.50)
+# ---------------------------------------------------------------------------
+
+
+class TestTier3Tightened:
+    """Tests for the tightened Tier 3 criteria:
+    - edge_z >= 1.15 (was 1.0)
+    - ev_100 >= 0.50 (new EV floor for strict Tier 3)
+    Tier 1 and Tier 2 are unchanged.
+    """
+
+    def test_tier3_constants(self):
+        """Verify the exported Tier 3 constants match spec."""
+        assert TIER3_MIN_EDGE_Z == 1.15
+        assert TIER3_MIN_EV_100 == 0.50
+
+    def test_edge_z_1_10_falls_to_catchall(self):
+        """edge_z = 1.10 < 1.15 → doesn't qualify for strict Tier 3.
+        Falls to catch-all tier3 (positive edge guaranteed)."""
+        result = classify_rec(_entry(
+            edge_pct=2.0,
+            edge_ev_shrunk=0.03,
+            edge_z=1.10,
+            quality_score=65,
+            consensus_prob=0.40,
+            books_used=4,
+        ))
+        # Still tier3 via catch-all, but NOT via the strict Tier 3 block
+        assert result["tier"] == "tier3"
+
+    def test_edge_z_1_15_qualifies_strict_tier3(self):
+        """edge_z = 1.15 (exactly at new floor) qualifies for strict Tier 3."""
+        result = classify_rec(_entry(
+            edge_pct=2.0,
+            edge_ev_shrunk=0.03,
+            edge_z=1.15,
+            quality_score=65,
+            consensus_prob=0.40,
+            books_used=4,
+        ))
+        assert result["tier"] == "tier3"
+
+    def test_edge_z_1_20_qualifies_strict_tier3(self):
+        """edge_z = 1.20 qualifies for strict Tier 3."""
+        result = classify_rec(_entry(
+            edge_pct=2.0,
+            edge_ev_shrunk=0.03,
+            edge_z=1.20,
+            quality_score=65,
+            consensus_prob=0.40,
+            books_used=4,
+        ))
+        assert result["tier"] == "tier3"
+
+    def test_ev_100_below_floor_falls_to_catchall(self):
+        """ev_100 < 0.50 fails the strict Tier 3 EV floor → catch-all tier3."""
+        result = classify_rec({
+            **_entry(
+                edge_pct=0.3,
+                edge_ev_shrunk=0.003,
+                edge_z=1.30,
+                quality_score=65,
+                consensus_prob=0.40,
+                books_used=4,
+            ),
+            "ev_100": 0.3,  # below TIER3_MIN_EV_100
+        })
+        # Positive edge → tier3 catch-all (but not strict T3)
+        assert result["tier"] == "tier3"
+
+    def test_ev_100_at_floor_qualifies(self):
+        """ev_100 = 0.50 (exactly at floor) qualifies for strict Tier 3."""
+        result = classify_rec({
+            **_entry(
+                edge_pct=0.5,
+                edge_ev_shrunk=0.005,
+                edge_z=1.30,
+                quality_score=65,
+                consensus_prob=0.40,
+                books_used=4,
+            ),
+            "ev_100": 0.50,
+        })
+        assert result["tier"] == "tier3"
+
+    def test_tier1_unchanged_by_tier3_tightening(self):
+        """Tier 1 criteria are unaffected by Tier 3 changes."""
+        result = classify_rec(_entry(
+            edge_pct=3.0,
+            edge_ev_shrunk=0.05,
+            edge_z=2.0,
+            quality_score=80,
+            consensus_prob=0.55,
+            books_used=5,
+        ))
+        assert result["tier"] == "tier1b"
+
+    def test_tier2_unchanged_by_tier3_tightening(self):
+        """Tier 2 criteria are unaffected by Tier 3 changes."""
+        result = classify_rec(_entry(
+            edge_pct=3.0,
+            edge_ev_shrunk=0.04,
+            edge_z=2.0,
+            quality_score=68,
+            consensus_prob=0.20,
+            books_used=4,
+        ))
+        assert result["tier"] == "tier2"
+
+
+# ---------------------------------------------------------------------------
+# Min edge filter uses shrunk edge (consistency)
+# ---------------------------------------------------------------------------
+
+
+class TestMinEdgeShrunkAlignment:
+    """Verify that _passes_filters uses edge_shrunk_pct (shrunk edge)
+    rather than raw edge_pct for the min_edge filter."""
+
+    def test_higher_raw_lower_shrunk_filtered_correctly(self):
+        """Entry with higher raw edge but lower shrunk edge should be
+        filtered out when min_edge exceeds the shrunk edge."""
+        high_raw = {
+            "edge_pct": 4.0,        # raw edge high
+            "edge_shrunk_pct": 1.5,  # shrunk edge low
+            "quality_score": 80,
+            "market": "moneyline",
+            "confidence": "High",
+            "books_used": 5,
+        }
+        low_raw = {
+            "edge_pct": 2.0,        # raw edge lower
+            "edge_shrunk_pct": 2.5,  # but shrunk edge higher
+            "quality_score": 80,
+            "market": "moneyline",
+            "confidence": "High",
+            "books_used": 5,
+        }
+
+        filters = {"min_edge": 2.0}
+
+        # high_raw has shrunk 1.5 < 2.0 → filtered OUT
+        assert _passes_filters(high_raw, filters) is False
+        # low_raw has shrunk 2.5 >= 2.0 → passes
+        assert _passes_filters(low_raw, filters) is True
+
+    def test_fallback_to_edge_pct_when_no_shrunk(self):
+        """When edge_shrunk_pct is missing, falls back to edge_pct."""
+        entry = {
+            "edge_pct": 3.0,
+            "quality_score": 80,
+            "market": "moneyline",
+            "confidence": "High",
+            "books_used": 5,
+        }
+        assert _passes_filters(entry, {"min_edge": 2.0}) is True
+        assert _passes_filters(entry, {"min_edge": 4.0}) is False
+
+    def test_shrunk_edge_present_in_build_daily_slate(self):
+        """Entries from build_daily_slate include edge_shrunk_pct."""
+        from unittest.mock import patch
+
+        with patch("line_tracker.slate.recommend_best_bets") as mock_rbb:
+            mock_rbb.return_value = [_make_rec(
+                quality_score=80, edge_pct=3.0,
+                quality_tier="Strong", confidence="High",
+                edge_ev_shrunk=0.025,
+            )]
+            result = build_daily_slate({"evt1": _event_lines()})
+            entry = result["tier1"][0]
+            assert "edge_shrunk_pct" in entry
+            assert entry["edge_shrunk_pct"] == pytest.approx(2.5, abs=0.01)

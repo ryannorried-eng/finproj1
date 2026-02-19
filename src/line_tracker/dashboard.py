@@ -2119,12 +2119,14 @@ def _page_daily_slate():
     fcols = st.columns(3)
     with fcols[0]:
         min_edge = st.slider(
-            "Min edge (%)",
+            "Min edge (%, shrunk)",
             min_value=0.0,
             max_value=5.0,
             value=0.5,
             step=0.1,
             key="slate_min_edge",
+            help="Filters on shrunk edge (edge_ev_shrunk × 100), "
+            "the same edge basis used for tier gating.",
         )
     with fcols[1]:
         min_quality = st.slider(
