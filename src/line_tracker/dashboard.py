@@ -2588,14 +2588,29 @@ def _render_why_tooltip(entry: dict) -> None:
             lines.append(
                 f"- **Alpha:** {_a_label} ({_a_score})"
             )
+        # Hybrid risk-adjusted ranking score
+        _hybrid = entry.get("hybrid_score")
+        if _hybrid is not None:
+            lines.append(f"- **Hybrid score:** {_hybrid:.4f}")
         st.markdown("\n".join(lines))
-        # Debug mode: show alpha components
+        # Debug mode: show alpha components and hybrid breakdown
         _debug = st.session_state.get("diag_debug_mode", False)
         _a_comp = entry.get("alpha_components")
         if _debug and _a_comp:
             import json as _json
 
             st.code(_json.dumps(_a_comp, indent=2), language="json")
+        if _debug and _hybrid is not None:
+            _h_alpha = (entry.get("alpha_score") or 0) / 100.0
+            _h_kelly_raw = entry.get("kelly_suggested") or 0
+            _h_kelly = max(0.0, min(_h_kelly_raw / 0.05, 1.0))
+            _h_prob = entry.get("consensus_prob") or 0
+            st.caption(
+                f"Hybrid breakdown: "
+                f"alpha_norm={_h_alpha:.3f} × 0.40 = {0.40 * _h_alpha:.4f} | "
+                f"kelly_norm={_h_kelly:.3f} × 0.40 = {0.40 * _h_kelly:.4f} | "
+                f"prob_norm={_h_prob:.3f} × 0.20 = {0.20 * _h_prob:.4f}"
+            )
 
 
 def _slate_market_label(entry: dict) -> str:
@@ -2841,6 +2856,7 @@ def _render_slate_table(entries: list[dict]) -> None:
         _a_lbl = entry.get("alpha_label", "")
         _a_sc = entry.get("alpha_score")
         _alpha_col = f"{_a_lbl} ({_a_sc})" if _a_lbl and _a_sc is not None else ""
+        _hybrid = entry.get("hybrid_score", 0.0)
         rows.append({
             "Event": entry["event"],
             "Start": time_str,
@@ -2848,6 +2864,7 @@ def _render_slate_table(entries: list[dict]) -> None:
             "Odds": format_american(entry["best_odds"]),
             "Book": entry["best_sportsbook"],
             "EV/$100": f"${entry['edge_pct']:+.2f}",
+            "Hybrid": f"{_hybrid:.3f}",
             "Edge Z": f"{entry.get('edge_z', 0.0):+.2f}",
             "Quality": entry["quality_score"],
             "Alpha": _alpha_col,

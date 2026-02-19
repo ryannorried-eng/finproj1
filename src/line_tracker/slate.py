@@ -226,6 +226,43 @@ def _slate_score(quality_score: float, edge_pct: float) -> float:
     return 0.6 * quality_score + 0.4 * min(edge_pct, 5) * 20
 
 
+# ── hybrid risk-adjusted ranking score ─────────────────────────────
+
+
+def compute_hybrid_score(entry: dict) -> float:
+    """Compute a hybrid risk-adjusted ranking score for slate sorting.
+
+    Blends alpha robustness, Kelly sizing, and consensus probability
+    into a single 0-1 score that prioritises sustainable edge over
+    raw EV.
+
+    Formula:
+        alpha_norm   = alpha_score / 100
+        kelly_norm   = clamp(kelly_suggested / 0.05, 0, 1)
+        prob_norm    = consensus_prob
+
+        hybrid_score = 0.40 * alpha_norm
+                     + 0.40 * kelly_norm
+                     + 0.20 * prob_norm
+
+    Safe defaults: missing alpha → 0, missing kelly → 0,
+    missing consensus_prob → 0.
+
+    The score is stored as ``entry["hybrid_score"]`` and also returned.
+    """
+    alpha = entry.get("alpha_score") or 0
+    kelly = entry.get("kelly_suggested") or 0
+    prob = entry.get("consensus_prob") or 0
+
+    alpha_norm = alpha / 100.0
+    kelly_norm = max(0.0, min(kelly / 0.05, 1.0))
+    prob_norm = prob
+
+    score = round(0.40 * alpha_norm + 0.40 * kelly_norm + 0.20 * prob_norm, 4)
+    entry["hybrid_score"] = score
+    return score
+
+
 # ── market-quality avoid flags ─────────────────────────────────────
 
 
@@ -810,6 +847,9 @@ def build_daily_slate(
             ):
                 entry["tier"] = "tier2"
 
+            # ── Hybrid risk-adjusted ranking score ──────────────────
+            compute_hybrid_score(entry)
+
             all_entries.append(entry)
 
     # Sort by slate_score descending
@@ -843,6 +883,21 @@ def build_daily_slate(
                 markets_filter["markets"] = filters["markets"]
             if _passes_filters(entry, markets_filter):
                 result["stay_away"].append(entry)
+
+    # ── Hybrid-score sort within actionable tiers ────────────────────
+    # Primary: hybrid_score (desc), secondary: edge_ev_shrunk (desc),
+    # tertiary: quality_score (desc).
+    def _hybrid_sort_key(e: dict) -> tuple:
+        return (
+            -e.get("hybrid_score", 0.0),
+            -e.get("edge_ev_shrunk", 0.0),
+            -e.get("quality_score", 0),
+        )
+
+    result["tier1b"].sort(key=_hybrid_sort_key)
+    result["tier1"].sort(key=_hybrid_sort_key)
+    result["tier2"].sort(key=_hybrid_sort_key)
+    result["tier3"].sort(key=_hybrid_sort_key)
 
     # Rank Stay Away by "worst-ness" and cap at _STAY_AWAY_LIMIT
     result["stay_away"].sort(key=_stay_away_sort_key)

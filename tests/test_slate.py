@@ -19,6 +19,7 @@ from line_tracker.slate import (
     _stay_away_sort_key,
     build_daily_slate,
     classify_rec,
+    compute_hybrid_score,
     compute_slate_debug_stats,
     passes_relaxed_tier2,
 )
@@ -1834,3 +1835,214 @@ class TestMinEdgeShrunkAlignment:
             entry = result["tier1"][0]
             assert "edge_shrunk_pct" in entry
             assert entry["edge_shrunk_pct"] == pytest.approx(2.5, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid risk-adjusted ranking score
+# ---------------------------------------------------------------------------
+
+
+class TestComputeHybridScore:
+    """Tests for the hybrid risk-adjusted ranking score."""
+
+    def test_basic_formula(self):
+        """Verify the formula: 0.40*alpha_norm + 0.40*kelly_norm + 0.20*prob_norm."""
+        entry = {
+            "alpha_score": 80,          # alpha_norm = 0.80
+            "kelly_suggested": 0.025,   # kelly_norm = 0.025/0.05 = 0.50
+            "consensus_prob": 0.60,     # prob_norm = 0.60
+        }
+        score = compute_hybrid_score(entry)
+        expected = 0.40 * 0.80 + 0.40 * 0.50 + 0.20 * 0.60  # 0.64
+        assert score == pytest.approx(expected, abs=0.001)
+        assert entry["hybrid_score"] == score
+
+    def test_perfect_score(self):
+        """All components maxed out → score = 1.0."""
+        entry = {
+            "alpha_score": 100,
+            "kelly_suggested": 0.05,    # exactly at cap
+            "consensus_prob": 1.0,
+        }
+        score = compute_hybrid_score(entry)
+        assert score == pytest.approx(1.0, abs=0.001)
+
+    def test_zero_score(self):
+        """All components zero → score = 0.0."""
+        entry = {
+            "alpha_score": 0,
+            "kelly_suggested": 0,
+            "consensus_prob": 0,
+        }
+        score = compute_hybrid_score(entry)
+        assert score == pytest.approx(0.0, abs=0.001)
+
+    def test_kelly_clamped_at_1(self):
+        """Kelly > 0.05 is clamped to 1.0 (not unbounded)."""
+        entry = {
+            "alpha_score": 50,
+            "kelly_suggested": 0.10,  # 0.10 / 0.05 = 2.0 → clamped to 1.0
+            "consensus_prob": 0.50,
+        }
+        score = compute_hybrid_score(entry)
+        expected = 0.40 * 0.50 + 0.40 * 1.0 + 0.20 * 0.50  # 0.70
+        assert score == pytest.approx(expected, abs=0.001)
+
+    def test_kelly_negative_clamped_at_0(self):
+        """Negative kelly is clamped to 0."""
+        entry = {
+            "alpha_score": 50,
+            "kelly_suggested": -0.01,
+            "consensus_prob": 0.50,
+        }
+        score = compute_hybrid_score(entry)
+        expected = 0.40 * 0.50 + 0.40 * 0.0 + 0.20 * 0.50  # 0.30
+        assert score == pytest.approx(expected, abs=0.001)
+
+    def test_missing_alpha_defaults_to_zero(self):
+        """Missing alpha_score treated as 0."""
+        entry = {"kelly_suggested": 0.025, "consensus_prob": 0.50}
+        score = compute_hybrid_score(entry)
+        expected = 0.40 * 0.0 + 0.40 * 0.50 + 0.20 * 0.50
+        assert score == pytest.approx(expected, abs=0.001)
+
+    def test_missing_kelly_defaults_to_zero(self):
+        """Missing kelly_suggested treated as 0."""
+        entry = {"alpha_score": 80, "consensus_prob": 0.50}
+        score = compute_hybrid_score(entry)
+        expected = 0.40 * 0.80 + 0.40 * 0.0 + 0.20 * 0.50
+        assert score == pytest.approx(expected, abs=0.001)
+
+    def test_missing_consensus_prob_defaults_to_zero(self):
+        """Missing consensus_prob treated as 0."""
+        entry = {"alpha_score": 80, "kelly_suggested": 0.025}
+        score = compute_hybrid_score(entry)
+        expected = 0.40 * 0.80 + 0.40 * 0.50 + 0.20 * 0.0
+        assert score == pytest.approx(expected, abs=0.001)
+
+    def test_no_crash_with_empty_dict(self):
+        """Empty dict doesn't crash — all defaults to 0."""
+        score = compute_hybrid_score({})
+        assert score == pytest.approx(0.0, abs=0.001)
+
+    def test_none_fields_treated_as_zero(self):
+        """Explicit None values treated as 0."""
+        entry = {
+            "alpha_score": None,
+            "kelly_suggested": None,
+            "consensus_prob": None,
+        }
+        score = compute_hybrid_score(entry)
+        assert score == pytest.approx(0.0, abs=0.001)
+
+    def test_higher_kelly_beats_equal_ev_longshot(self):
+        """A bet with higher kelly (= better sizing) ranks above an
+        equal-EV longshot with tiny kelly."""
+        # High kelly, moderate prob
+        high_kelly = {
+            "alpha_score": 60,
+            "kelly_suggested": 0.04,    # kelly_norm = 0.80
+            "consensus_prob": 0.55,
+        }
+        # Low kelly, low prob (longshot)
+        low_kelly = {
+            "alpha_score": 60,
+            "kelly_suggested": 0.005,   # kelly_norm = 0.10
+            "consensus_prob": 0.15,
+        }
+        s_high = compute_hybrid_score(high_kelly)
+        s_low = compute_hybrid_score(low_kelly)
+        assert s_high > s_low
+
+    def test_alpha_influences_ranking(self):
+        """Higher alpha score pushes the hybrid score up when other
+        components are equal."""
+        strong_alpha = {
+            "alpha_score": 90,
+            "kelly_suggested": 0.025,
+            "consensus_prob": 0.50,
+        }
+        weak_alpha = {
+            "alpha_score": 30,
+            "kelly_suggested": 0.025,
+            "consensus_prob": 0.50,
+        }
+        assert compute_hybrid_score(strong_alpha) > compute_hybrid_score(weak_alpha)
+
+    def test_sort_stability_when_equal(self):
+        """Entries with identical hybrid scores maintain insertion order."""
+        entries = [
+            {"alpha_score": 50, "kelly_suggested": 0.025,
+             "consensus_prob": 0.50, "event": "A"},
+            {"alpha_score": 50, "kelly_suggested": 0.025,
+             "consensus_prob": 0.50, "event": "B"},
+            {"alpha_score": 50, "kelly_suggested": 0.025,
+             "consensus_prob": 0.50, "event": "C"},
+        ]
+        for e in entries:
+            compute_hybrid_score(e)
+        # All scores identical
+        assert entries[0]["hybrid_score"] == entries[1]["hybrid_score"]
+        assert entries[1]["hybrid_score"] == entries[2]["hybrid_score"]
+        # Python's sort is stable — order preserved when keys are equal
+        sorted_entries = sorted(
+            entries, key=lambda e: -e["hybrid_score"],
+        )
+        assert [e["event"] for e in sorted_entries] == ["A", "B", "C"]
+
+
+class TestHybridScoreIntegration:
+    """Integration tests: hybrid_score is computed and used for sorting."""
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_hybrid_score_populated(self, mock_rbb):
+        """Every entry has hybrid_score after build_daily_slate."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=80, edge_pct=3.0,
+            quality_tier="Strong", confidence="High",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        entry = result["tier1"][0]
+        assert "hybrid_score" in entry
+        assert isinstance(entry["hybrid_score"], float)
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_tier1b_sorted_by_hybrid_score(self, mock_rbb):
+        """Tier 1B entries are sorted by hybrid_score descending."""
+        def side_effect(lines):
+            event_name = lines[0].event
+            if "High" in event_name:
+                # Higher alpha + kelly → higher hybrid
+                return [_make_rec(
+                    quality_score=90, edge_pct=3.0,
+                    quality_tier="Elite", confidence="High",
+                    consensus_prob=0.60, edge_ev_shrunk=0.05,
+                )]
+            # Lower alpha + kelly → lower hybrid
+            return [_make_rec(
+                quality_score=70, edge_pct=3.0,
+                quality_tier="Strong", confidence="High",
+                consensus_prob=0.35, edge_ev_shrunk=0.03,
+            )]
+
+        mock_rbb.side_effect = side_effect
+        lines = {
+            "evt1": _event_lines("LowHybrid @ Team"),
+            "evt2": _event_lines("HighHybrid @ Team"),
+        }
+        result = build_daily_slate(lines)
+        tier1 = result["tier1"]
+        if len(tier1) == 2:
+            assert tier1[0]["hybrid_score"] >= tier1[1]["hybrid_score"]
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_classification_unchanged_by_hybrid(self, mock_rbb):
+        """Hybrid score changes only ranking, not tier classification."""
+        mock_rbb.return_value = [_make_rec(
+            quality_score=80, edge_pct=3.0,
+            quality_tier="Strong", confidence="High",
+        )]
+        result = build_daily_slate({"evt1": _event_lines()})
+        # Classification is still tier1b, not affected by hybrid
+        assert result["tier1"][0]["tier"] == "tier1b"
+        assert result["counts"]["tier1b"] == 1
