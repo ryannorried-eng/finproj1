@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -3432,7 +3433,10 @@ def _page_performance_body(store):
         "correlate with better closing line value."
     )
 
-    alpha_stats = store.get_alpha_clv_stats()
+    try:
+        alpha_stats = store.get_alpha_clv_stats()
+    except sqlite3.OperationalError:
+        alpha_stats = []
     alpha_report = alpha_clv_report(alpha_stats)
     alpha_summary = alpha_report["summary"]
     alpha_rows = alpha_report["rows"]
