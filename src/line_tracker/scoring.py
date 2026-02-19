@@ -10,6 +10,8 @@ No Streamlit imports, no DB, no global state.
 
 from __future__ import annotations
 
+import os
+
 from line_tracker.alpha import alpha_label, alpha_score
 
 # ── Hybrid score weights ──────────────────────────────────────────────
@@ -90,6 +92,10 @@ RANKING_MODES = ("hybrid", "hit", "value")
 # "Strong" (indicating the edge is robust despite the low probability).
 LONGSHOT_PROB_FLOOR = 0.20
 
+# Hit-mode top-pick probability floor: candidates below this threshold are
+# demoted (but not removed) so they don't appear as the #1 pick.
+PROB_FLOOR_HIT = 0.30
+
 
 def _hybrid_sort_key(e: dict) -> tuple:
     """Primary: hybrid_score (desc), then edge_ev_shrunk, quality_score."""
@@ -101,30 +107,37 @@ def _hybrid_sort_key(e: dict) -> tuple:
 
 
 def _hit_sort_key(e: dict) -> tuple:
-    """Prioritise most-likely-to-hit while keeping basic sanity.
+    """Truly probability-first ranking for hit mode.
 
     Order:
     1. Non-negative shrunk edge (hard demotion for negative edge).
     2. Longshot guard: demote if consensus_prob < LONGSHOT_PROB_FLOOR
        AND alpha_label != "Strong".  Strong-alpha longshots are not
        auto-demoted since a robust signal justifies the low probability.
-    3. Higher consensus_prob first.
-    4. Higher alpha_score (further penalises unrobust longshots).
-    5. Higher agreement_score (tighter book consensus).
-    6. Lower sigma (less market noise).
+    3. Prob-floor guard: demote candidates below PROB_FLOOR_HIT (0.30)
+       so they never appear as the #1 pick.
+    4. Higher consensus_prob first (PRIMARY sort key).
+    5. Higher alpha_score as secondary tiebreaker.
+    6. Higher agreement_score (tighter book consensus).
+    7. Lower sigma (less market noise).
+    8. Higher edge as LAST tiebreaker (never ahead of prob).
     """
     edge_ok = 1 if e.get("edge_ev_shrunk", 0.0) >= 0 else 0
-    # not_longshot = 0 means "is a demotable longshot", sorts last
     prob = e.get("consensus_prob", 0.0)
+    # not_longshot = 0 means "is a demotable longshot", sorts last
     is_longshot = prob < LONGSHOT_PROB_FLOOR and e.get("alpha_label") != "Strong"
     not_longshot = 0 if is_longshot else 1
+    # above_prob_floor: candidates >= PROB_FLOOR_HIT get priority
+    above_prob_floor = 1 if prob >= PROB_FLOOR_HIT else 0
     return (
         -edge_ok,                                    # 1. non-neg edge first
         -not_longshot,                               # 2. non-longshot first
-        -prob,                                       # 3. highest prob first
-        -e.get("alpha_score", 0),                    # 4. highest alpha first
-        -e.get("agreement_score", 0.0),              # 5. highest agreement first
-        e.get("market_volatility_sigma", 0.0),       # 6. lowest sigma first
+        -above_prob_floor,                           # 3. above prob floor first
+        -prob,                                       # 4. highest prob first (PRIMARY)
+        -e.get("alpha_score", 0),                    # 5. highest alpha
+        -e.get("agreement_score", 0.0),              # 6. highest agreement
+        e.get("market_volatility_sigma", 0.0),       # 7. lowest sigma
+        -e.get("edge_ev_shrunk", 0.0),               # 8. edge as LAST tiebreaker
     )
 
 
@@ -171,7 +184,59 @@ def rank_candidates(
             f"Unknown ranking mode {mode!r}; choose from {RANKING_MODES}"
         )
     candidates.sort(key=key_fn)
+    _debug_ranking(candidates, mode)
     return candidates
+
+
+# ── Mode-aware filtering ──────────────────────────────────────────────
+
+
+def filter_candidates(
+    ranked: list[dict],
+    mode: str,
+    min_edge: float,
+    min_quality: int,
+) -> list[dict]:
+    """Apply mode-aware eligibility filters to *ranked* candidates.
+
+    For ``"hit"`` mode the edge gate is skipped (edge is a tiebreaker
+    in the sort key, not a gate).  Only min_quality is enforced.
+
+    For ``"hybrid"`` and ``"value"`` modes both min_edge and min_quality
+    gates apply (existing behaviour).
+
+    Returns a new list; does not mutate the input.
+    """
+    if mode == "hit":
+        return [
+            e for e in ranked
+            if e.get("quality_score", 0) >= min_quality
+        ]
+    # hybrid / value — apply both gates
+    return [
+        e for e in ranked
+        if e.get("edge_shrunk_pct", e.get("edge_pct", 0.0)) >= min_edge
+        and e.get("quality_score", 0) >= min_quality
+    ]
+
+
+# ── Debug output ─────────────────────────────────────────────────────
+
+
+def _debug_ranking(candidates: list[dict], mode: str) -> None:
+    """Print top-5 candidates when DEBUG_RANKING=1."""
+    if not os.environ.get("DEBUG_RANKING"):
+        return
+    print(f"\n[DEBUG_RANKING] mode={mode}  top-5:")
+    for i, e in enumerate(candidates[:5]):
+        print(
+            f"  {i + 1}. {e.get('selection', '?')}/{e.get('market', '?')} "
+            f"prob={e.get('consensus_prob', 0):.3f} "
+            f"edge={e.get('edge_shrunk_pct', 0):.2f}% "
+            f"quality={e.get('quality_score', 0)} "
+            f"alpha={e.get('alpha_label', '?')} "
+            f"hybrid={e.get('hybrid_score', 0):.3f}"
+        )
 
 
 # ── Convenience: enrich a single entry with all scoring fields ────────

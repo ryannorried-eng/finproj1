@@ -4,10 +4,12 @@ import pytest
 
 from line_tracker.scoring import (
     LONGSHOT_PROB_FLOOR,
+    PROB_FLOOR_HIT,
     RANKING_MODES,
     compute_alpha_fields,
     compute_hybrid_fields,
     enrich_entry,
+    filter_candidates,
     rank_candidates,
 )
 
@@ -660,3 +662,154 @@ class TestBestBetRankedOrder:
         top_e = qualified[0]
         new_others = [e for e in ranked if e is not top_e][:2]
         assert len(new_others) == 2  # Always shows next alternatives
+
+
+# ── Regression: hit mode does not apply min_edge gate ─────────────────
+
+
+class TestHitModeDoesNotApplyMinEdgeGate:
+    """filter_candidates(mode='hit') must ignore the edge gate so that
+    a high-prob / low-edge candidate is not filtered out."""
+
+    def test_hit_mode_does_not_apply_min_edge_gate(self):
+        high_prob_low_edge = _entry(
+            consensus_prob=0.65,
+            edge_ev_shrunk=0.002,  # edge_shrunk_pct = 0.2%
+            quality_score=80,
+        )
+        low_prob_high_edge = _entry(
+            consensus_prob=0.30,
+            edge_ev_shrunk=0.03,  # edge_shrunk_pct = 3.0%
+            quality_score=80,
+        )
+        for e in [high_prob_low_edge, low_prob_high_edge]:
+            enrich_entry(e)
+            e["edge_shrunk_pct"] = round(e["edge_ev_shrunk"] * 100, 4)
+
+        ranked = rank_candidates(
+            [low_prob_high_edge, high_prob_low_edge], mode="hit"
+        )
+        # min_edge=0.5 would filter out high_prob_low_edge in hybrid/value
+        qualified = filter_candidates(ranked, mode="hit", min_edge=0.5, min_quality=60)
+
+        # high-prob candidate survives despite low edge
+        assert len(qualified) == 2
+        assert qualified[0] is high_prob_low_edge
+
+    def test_hybrid_mode_does_apply_min_edge_gate(self):
+        """Sanity: hybrid mode DOES filter on edge."""
+        low_edge = _entry(
+            consensus_prob=0.65,
+            edge_ev_shrunk=0.002,
+            quality_score=80,
+        )
+        enrich_entry(low_edge)
+        low_edge["edge_shrunk_pct"] = round(low_edge["edge_ev_shrunk"] * 100, 4)
+
+        ranked = rank_candidates([low_edge], mode="hybrid")
+        qualified = filter_candidates(
+            ranked, mode="hybrid", min_edge=0.5, min_quality=60,
+        )
+        assert len(qualified) == 0  # filtered out by edge gate
+
+
+# ── Regression: hit mode demotes longshots below prob floor ───────────
+
+
+class TestHitModeDemotesLongshotsBelowProbFloor:
+    """Candidates with consensus_prob < PROB_FLOOR_HIT (0.30) must be
+    ranked below candidates >= 0.30, regardless of edge."""
+
+    def test_prob_floor_hit_constant(self):
+        assert PROB_FLOOR_HIT == 0.30
+
+    def test_hit_mode_demotes_longshots_below_prob_floor(self):
+        longshot = _entry(
+            consensus_prob=0.16,
+            edge_ev_shrunk=0.05,  # excellent edge
+            agreement_score=90,
+            quality_score=80,
+        )
+        favorite = _entry(
+            consensus_prob=0.55,
+            edge_ev_shrunk=0.005,  # mediocre edge
+            agreement_score=70,
+            quality_score=75,
+        )
+        for e in [longshot, favorite]:
+            enrich_entry(e)
+
+        candidates = [longshot, favorite]
+        rank_candidates(candidates, mode="hit")
+        # favorite (0.55 > 0.30) must rank above longshot (0.16 < 0.30)
+        assert candidates[0] is favorite
+
+    def test_both_above_floor_sorts_by_prob(self):
+        """Two candidates both above PROB_FLOOR_HIT: higher prob wins."""
+        mid = _entry(consensus_prob=0.45, edge_ev_shrunk=0.02, quality_score=80)
+        high = _entry(consensus_prob=0.70, edge_ev_shrunk=0.01, quality_score=80)
+        for e in [mid, high]:
+            enrich_entry(e)
+
+        candidates = [mid, high]
+        rank_candidates(candidates, mode="hit")
+        assert candidates[0] is high
+
+
+# ── Regression: other candidates key dedup prevents duplicate top ─────
+
+
+class TestOtherCandidatesKeyDedupPreventsDuplicateTop:
+    """The 'Other candidates' list must never include the top pick,
+    even when dict copies exist (i.e. identity check would fail)."""
+
+    def test_other_candidates_key_dedup_prevents_duplicate_top(self):
+        """Simulate the dashboard dedup logic using stable keys."""
+        top = _entry(
+            consensus_prob=0.65,
+            edge_ev_shrunk=0.02,
+            quality_score=80,
+            market="moneyline",
+        )
+        top["selection"] = "TeamA"
+        top["line"] = None
+        top["best_sportsbook"] = "FanDuel"
+
+        alt = _entry(
+            consensus_prob=0.50,
+            edge_ev_shrunk=0.015,
+            quality_score=75,
+            market="spread",
+        )
+        alt["selection"] = "TeamA"
+        alt["line"] = -3.5
+        alt["best_sportsbook"] = "DraftKings"
+
+        for e in [top, alt]:
+            enrich_entry(e)
+
+        # Create a copy of top (different object, same data)
+        import copy
+        top_copy = copy.deepcopy(top)
+
+        ranked = [top_copy, alt]  # top_copy is not `top`
+
+        # Stable key function (mirrors dashboard)
+        def _entry_key(e):
+            return (
+                e.get("market"),
+                e.get("selection"),
+                e.get("line"),
+                e.get("best_sportsbook"),
+            )
+
+        top_key = _entry_key(top)
+
+        # Identity check FAILS (different objects)
+        others_identity = [e for e in ranked if e is not top]
+        assert len(others_identity) == 2  # bug: includes the copy
+
+        # Key check WORKS (same logical key)
+        others_key = [e for e in ranked if _entry_key(e) != top_key]
+        assert len(others_key) == 1  # correct: only alt
+        assert others_key[0] is alt
