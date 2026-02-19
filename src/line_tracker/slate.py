@@ -7,10 +7,15 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
 
-from line_tracker.alpha import ALPHA_GATE_ENABLED, alpha_label, alpha_score
+from line_tracker.alpha import ALPHA_GATE_ENABLED
 from line_tracker.best_bets import recommend_best_bets
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
 from line_tracker.models import BettingLine, BetType
+from line_tracker.scoring import (
+    compute_alpha_fields as _compute_alpha_fields,
+    compute_hybrid_fields as _compute_hybrid_fields,
+    rank_candidates,
+)
 from line_tracker.tiering import assign_tiers
 
 # ── tier thresholds (EV/$100 space) ───────────────────────────────
@@ -232,11 +237,11 @@ def _slate_score(quality_score: float, edge_pct: float) -> float:
 def compute_hybrid_score(entry: dict) -> float:
     """Compute a hybrid risk-adjusted ranking score for slate sorting.
 
-    Blends alpha robustness, Kelly sizing, and consensus probability
-    into a single 0-1 score that prioritises sustainable edge over
-    raw EV.
+    Delegates to ``scoring.compute_hybrid_fields`` (the single source of
+    truth) and stores the result in ``entry["hybrid_score"]`` for
+    backwards compatibility.
 
-    Formula:
+    Formula (unchanged):
         alpha_norm   = alpha_score / 100
         kelly_norm   = clamp(kelly_suggested / 0.05, 0, 1)
         prob_norm    = consensus_prob
@@ -245,21 +250,12 @@ def compute_hybrid_score(entry: dict) -> float:
                      + 0.40 * kelly_norm
                      + 0.20 * prob_norm
 
-    Safe defaults: missing alpha → 0, missing kelly → 0,
-    missing consensus_prob → 0.
-
     The score is stored as ``entry["hybrid_score"]`` and also returned.
     """
-    alpha = entry.get("alpha_score") or 0
-    kelly = entry.get("kelly_suggested") or 0
-    prob = entry.get("consensus_prob") or 0
-
-    alpha_norm = alpha / 100.0
-    kelly_norm = max(0.0, min(kelly / 0.05, 1.0))
-    prob_norm = prob
-
-    score = round(0.40 * alpha_norm + 0.40 * kelly_norm + 0.20 * prob_norm, 4)
+    fields = _compute_hybrid_fields(entry)
+    score = fields["hybrid_score"]
     entry["hybrid_score"] = score
+    entry["hybrid_components"] = fields["hybrid_components"]
     return score
 
 
@@ -832,18 +828,17 @@ def build_daily_slate(
                 entry, thresholds=th,
             )
 
-            # ── Alpha robustness overlay ────────────────────────────
-            a_score, a_components = alpha_score(entry)
-            a_label = alpha_label(a_score)
-            entry["alpha_score"] = a_score
-            entry["alpha_label"] = a_label
-            entry["alpha_components"] = a_components
+            # ── Alpha + hybrid scoring (shared module) ────────────────
+            alpha_fields = _compute_alpha_fields(entry)
+            entry["alpha_score"] = alpha_fields["alpha_score"]
+            entry["alpha_label"] = alpha_fields["alpha_label"]
+            entry["alpha_components"] = alpha_fields["alpha_components"]
 
             # Gating: downgrade tier1b → tier2 when alpha is Weak
             if (
                 ALPHA_GATE_ENABLED
                 and entry["tier"] == "tier1b"
-                and a_label == "Weak"
+                and alpha_fields["alpha_label"] == "Weak"
             ):
                 entry["tier"] = "tier2"
 
@@ -885,19 +880,11 @@ def build_daily_slate(
                 result["stay_away"].append(entry)
 
     # ── Hybrid-score sort within actionable tiers ────────────────────
-    # Primary: hybrid_score (desc), secondary: edge_ev_shrunk (desc),
-    # tertiary: quality_score (desc).
-    def _hybrid_sort_key(e: dict) -> tuple:
-        return (
-            -e.get("hybrid_score", 0.0),
-            -e.get("edge_ev_shrunk", 0.0),
-            -e.get("quality_score", 0),
-        )
-
-    result["tier1b"].sort(key=_hybrid_sort_key)
-    result["tier1"].sort(key=_hybrid_sort_key)
-    result["tier2"].sort(key=_hybrid_sort_key)
-    result["tier3"].sort(key=_hybrid_sort_key)
+    # Delegates to the shared scoring module (mode="hybrid").
+    rank_candidates(result["tier1b"], mode="hybrid")
+    rank_candidates(result["tier1"], mode="hybrid")
+    rank_candidates(result["tier2"], mode="hybrid")
+    rank_candidates(result["tier3"], mode="hybrid")
 
     # Rank Stay Away by "worst-ness" and cap at _STAY_AWAY_LIMIT
     result["stay_away"].sort(key=_stay_away_sort_key)

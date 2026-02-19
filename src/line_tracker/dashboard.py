@@ -61,6 +61,7 @@ from line_tracker.performance import (
     rolling_clv_series,
     summary_kpis,
 )
+from line_tracker.scoring import RANKING_MODES, enrich_entry, rank_candidates
 from line_tracker.scraper import OddsClient
 from line_tracker.services.bet_service import (
     settle_bet as settle_bet_persisted,
@@ -888,6 +889,46 @@ def _page_detail():
 
 # -- Detail: Best Bet (Consensus EV) ---------------------------------------
 
+def _rec_to_entry(rec) -> dict:
+    """Convert a BetRecommendation to a scoring-compatible entry dict."""
+    return {
+        "market": rec.market,
+        "selection": rec.selection,
+        "line": rec.line,
+        "best_odds": rec.best_odds,
+        "best_sportsbook": rec.best_sportsbook,
+        "consensus_prob": rec.consensus_prob,
+        "consensus_prob_weighted": rec.consensus_prob_weighted,
+        "breakeven_prob": rec.breakeven_prob,
+        "edge_pct": rec.ev_100,
+        "ev_100": rec.ev_100,
+        "ev_roi": rec.ev_roi,
+        "ev_per_100": rec.ev_per_100,
+        "edge_pp": rec.edge_pp,
+        "edge_ev": rec.edge_ev,
+        "edge_ev_shrunk": rec.edge_ev_shrunk,
+        "edge_ev_100": rec.edge_ev_100,
+        "ev_sigma": rec.ev_sigma,
+        "edge_z": rec.edge_z,
+        "confidence": rec.confidence,
+        "quality_score": rec.quality_score,
+        "quality_tier": rec.quality_tier,
+        "books_used": rec.books_used_count,
+        "market_hold_median": rec.market_hold_median,
+        "market_volatility_sigma": rec.market_volatility_sigma,
+        "robust_sigma": rec.robust_sigma,
+        "market_unstable": rec.market_unstable,
+        "agreement_score": rec.agreement_score,
+        "kelly_base": rec.kelly_base,
+        "kelly_suggested": rec.kelly_suggested,
+        "sizing_note": rec.sizing_note,
+        "n_eff": rec.n_eff,
+        "outlier_rate": rec.outlier_rate,
+        # Keep original rec reference for display helpers
+        "_rec": rec,
+    }
+
+
 def _detail_best_bet_section(game_lines):
     """Show the 'Best Bet (Consensus EV)' section above tabs."""
     recs = recommend_best_bets(game_lines, top_n=6)
@@ -901,8 +942,22 @@ def _detail_best_bet_section(game_lines):
         "Informational only, not financial advice"
     )
 
-    slider_cols = st.columns(2)
-    with slider_cols[0]:
+    # ── Controls row: ranking mode + filter sliders ──────────────
+    ctrl_cols = st.columns([1, 1, 1])
+    with ctrl_cols[0]:
+        mode_labels = {
+            "hybrid": "Hybrid",
+            "hit": "Most likely to hit",
+            "value": "Value (EV)",
+        }
+        ranking_mode = st.selectbox(
+            "Ranking",
+            options=list(RANKING_MODES),
+            format_func=lambda m: mode_labels.get(m, m),
+            index=0,
+            key=f"ranking_mode_{id(game_lines)}",
+        )
+    with ctrl_cols[1]:
         min_edge = st.slider(
             "Min edge (%)",
             min_value=0.0,
@@ -911,7 +966,7 @@ def _detail_best_bet_section(game_lines):
             step=0.1,
             key=f"min_edge_{id(game_lines)}",
         )
-    with slider_cols[1]:
+    with ctrl_cols[2]:
         min_quality = st.slider(
             "Min quality",
             min_value=0,
@@ -921,13 +976,18 @@ def _detail_best_bet_section(game_lines):
             key=f"min_quality_{id(game_lines)}",
         )
 
+    # ── Build enriched entries and rank ──────────────────────────
+    entries = [enrich_entry(_rec_to_entry(r)) for r in recs]
+    rank_candidates(entries, mode=ranking_mode)
+
     qualified = [
-        r for r in recs
-        if r.edge_pct >= min_edge and r.quality_score >= min_quality
+        e for e in entries
+        if e["edge_pct"] >= min_edge and e["quality_score"] >= min_quality
     ]
 
     if qualified:
-        top = qualified[0]
+        top_e = qualified[0]
+        top = top_e["_rec"]
         market_label = _best_bet_market_label(top)
 
         with st.container(border=True):
@@ -944,13 +1004,19 @@ def _detail_best_bet_section(game_lines):
                 f"**{top.consensus_prob_weighted * 100:.1f}%** | "
                 f"Breakeven: **{top.breakeven_prob * 100:.1f}%**"
             )
+            # Alpha + Hybrid badge
             st.markdown(
                 f"Market confidence: **{top.confidence}** | "
-                f"Quality: **{top.quality_score}/100 ({top.quality_tier})**",
+                f"Quality: **{top.quality_score}/100 ({top.quality_tier})** | "
+                f"Alpha: **{top_e.get('alpha_score', '—')} "
+                f"({top_e.get('alpha_label', '—')})** | "
+                f"Hybrid: **{top_e.get('hybrid_score', 0):.3f}**",
                 help=(
                     "Confidence measures sportsbook disagreement. "
                     "Quality is a composite score of edge, agreement, "
-                    "coverage, and data freshness."
+                    "coverage, and data freshness. "
+                    "Alpha is a 0–100 robustness score. "
+                    "Hybrid blends alpha, Kelly sizing, and probability."
                 ),
             )
 
@@ -963,7 +1029,8 @@ def _detail_best_bet_section(game_lines):
         others = qualified[1:3]
         if others:
             st.markdown("**Other +EV bets:**")
-            for r in others:
+            for oe in others:
+                r = oe["_rec"]
                 ml = _best_bet_market_label(r)
                 ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
                 st.markdown(
@@ -972,14 +1039,18 @@ def _detail_best_bet_section(game_lines):
                     f"on {r.best_sportsbook} — "
                     f"EV: {ev_str} per \\$100, "
                     f"Z: {r.edge_z:+.2f} — "
-                    f"Quality: {r.quality_score} ({r.quality_tier})"
+                    f"Quality: {r.quality_score} ({r.quality_tier}) — "
+                    f"Alpha: {oe.get('alpha_score', '—')} "
+                    f"({oe.get('alpha_label', '—')}), "
+                    f"Hybrid: {oe.get('hybrid_score', 0):.3f}"
                 )
     else:
         st.info(
             "No bets meet your edge + quality thresholds."
             " Showing closest candidates:"
         )
-        for r in recs[:3]:
+        for e in entries[:3]:
+            r = e["_rec"]
             ml = _best_bet_market_label(r)
             ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
             st.markdown(
