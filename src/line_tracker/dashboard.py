@@ -9,8 +9,9 @@ import logging
 import os
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -49,6 +50,7 @@ from line_tracker.calibration import (
     format_calibration_report,
     load_clv_training_df,
 )
+from line_tracker.config import data_mode, get_api_key, get_display_timezone
 from line_tracker.market_structure import analyze_market
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
@@ -75,12 +77,12 @@ from line_tracker.services.performance_service import load_clv_df
 from line_tracker.services.publish_service import publish_slate
 from line_tracker.services.slate_service import build_daily_slate_service
 from line_tracker.slate import passes_relaxed_tier2
+from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 from line_tracker.tiering import (
     assign_tiers,
     slate_distribution_stats,
     tier_frequency_report,
 )
-from line_tracker.storage import DEFAULT_DB_PATH, LineStore
 from line_tracker.ui.components.diagnostics import (
     get_db_counts,
     get_db_status,
@@ -118,10 +120,34 @@ BET_TYPE_SHORT = {
 _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
 
 # Sentinel used to sort games with missing commence_time to the bottom.
-_FAR_FUTURE = datetime.max.replace(tzinfo=None)
+_FAR_FUTURE = datetime(9999, 1, 1, tzinfo=timezone.utc)
 
 DB_PATH = str(DEFAULT_DB_PATH)
 _LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Display timezone helpers
+# ---------------------------------------------------------------------------
+
+def _display_tz() -> ZoneInfo:
+    """Return the ZoneInfo to use for rendering times.
+
+    Prefers a browser-detected timezone stored in session_state,
+    then falls back to the configured default (America/Chicago).
+    """
+    name = st.session_state.get("user_tz") or get_display_timezone()
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return ZoneInfo("America/Chicago")
+
+
+def _to_display(dt: datetime) -> datetime:
+    """Convert an aware datetime to the user's display timezone."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_display_tz())
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +204,9 @@ def _format_value(val: float, bet_type: BetType) -> str:
 
 def _relative_time(dt: datetime) -> str:
     """Format a datetime as relative time like '3m ago'."""
-    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     seconds = (now - dt).total_seconds()
     if seconds < 60:
         return "just now"
@@ -191,21 +219,25 @@ def _relative_time(dt: datetime) -> str:
 
 def _format_clock_time(dt: datetime) -> str:
     """Format datetime as a short clock time, e.g. '2:30 PM'."""
-    local = dt.astimezone() if dt.tzinfo else dt
+    local = _to_display(dt)
     return local.strftime("%I:%M %p").lstrip("0")
 
 
 def _format_start_time(dt: datetime) -> str:
-    """Format commence_time as 'Fri 12:15 PM'."""
-    local = dt.astimezone() if dt.tzinfo else dt
-    return local.strftime("%a %I:%M %p").replace(" 0", " ")
+    """Format commence_time as 'Fri 12:15 PM CT'."""
+    local = _to_display(dt)
+    abbr = local.strftime("%Z") or ""
+    return local.strftime("%a %I:%M %p").replace(" 0", " ") + (
+        f" {abbr}" if abbr else ""
+    )
 
 
 def _relative_date_label(dt: datetime) -> str:
     """Return 'Today', 'Tomorrow', or short date like 'Sat Feb 15'."""
-    local = dt.astimezone() if dt.tzinfo else dt
+    local = _to_display(dt)
     local_date = local.date()
-    today = date.today()
+    now_display = _to_display(datetime.now(timezone.utc))
+    today = now_display.date()
     if local_date == today:
         return "Today"
     if local_date == today + timedelta(days=1):
@@ -437,11 +469,14 @@ def _sidebar():
 
         # --- Bet History button ---
         try:
-            with LineStore() as _db:
-                active_count = len(_db.get_bets(status="active"))
-                settled_count = len(
-                    [b for b in _db.get_bets() if b["status"] != "active"],
-                )
+            if data_mode() == "db":
+                with LineStore() as _db:
+                    active_count = len(_db.get_bets(status="active"))
+                    settled_count = len(
+                        [b for b in _db.get_bets() if b["status"] != "active"],
+                    )
+            else:
+                raise RuntimeError("no db")
         except Exception:
             active_count = len(st.session_state.get("active_bets", []))
             settled_count = len(st.session_state.get("settled_bets", []))
@@ -476,14 +511,21 @@ def _sidebar():
             help="Enable extra diagnostics and verbose debug context in the UI.",
         )
 
+        # API key: prefer secrets/env via config, fall back to manual input
+        _default_key = ""
+        try:
+            _default_key = get_api_key()
+        except ValueError:
+            pass
         st.text_input(
             "API Key",
-            value=os.environ.get("ODDS_API_KEY", "09d11879822c9c7bd81c7eb210c82d92"),
+            value=_default_key,
             type="password",
             key="api_key",
             help=(
                 "Paste your key from https://the-odds-api.com.  \n"
-                "The free plan gives you 500 requests/month."
+                "The free plan gives you 500 requests/month.  \n"
+                "On Streamlit Cloud, add ODDS_API_KEY in Settings > Secrets."
             ),
         )
 
@@ -564,24 +606,31 @@ def _sidebar():
         )
 
         with st.expander("Diagnostics", expanded=False):
-            try:
-                with LineStore(DB_PATH) as _diag_store:
-                    status = get_db_status(_diag_store)
-                    counts = get_db_counts(_diag_store)
-                    latest = get_latest_timestamps(_diag_store)
-                st.caption(f"DB: {status['db_path']}")
-                st.json({
-                    "schema_version": status["schema_version"],
-                    "pragmas": status["pragmas"],
-                })
-                st.json({"row_counts": counts, "latest": latest})
-                if st.session_state.get("diag_debug_mode", False):
-                    st.caption(
-                        "Debug mode is enabled; verbose service logs are "
-                        "emitted to the app logger."
-                    )
-            except Exception as exc:
-                st.caption(f"Diagnostics unavailable: {exc}")
+            _mode = data_mode()
+            st.caption(f"Data mode: **{_mode}**")
+            if _mode == "db":
+                try:
+                    with LineStore(DB_PATH) as _diag_store:
+                        status = get_db_status(_diag_store)
+                        counts = get_db_counts(_diag_store)
+                        latest = get_latest_timestamps(_diag_store)
+                    st.caption(f"DB: {status['db_path']}")
+                    st.json({
+                        "schema_version": status["schema_version"],
+                        "pragmas": status["pragmas"],
+                    })
+                    st.json({"row_counts": counts, "latest": latest})
+                except Exception as exc:
+                    st.caption(f"DB diagnostics unavailable: {exc}")
+            else:
+                st.caption("No persistent database. Using live API fetch.")
+            tz_name = st.session_state.get("user_tz") or get_display_timezone()
+            st.caption(f"Display timezone: **{tz_name}**")
+            if st.session_state.get("diag_debug_mode", False):
+                st.caption(
+                    "Debug mode is enabled; verbose service logs are "
+                    "emitted to the app logger."
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -620,23 +669,37 @@ def _compute_arb_stakes(
 # Data fetching and indexing
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_live_fetch(api_key: str, sport_key: str) -> list:
+    """Fetch live odds with 60-second cache (used in live/cloud mode)."""
+    with OddsClient(api_key=api_key) as client:
+        return client.get_odds(sport=sport_key)
+
+
 def _fetch_odds():
-    """Fetch latest odds, save to DB, and auto-scan for arbs/movements."""
+    """Fetch latest odds, save to DB if available, and auto-scan for arbs."""
     sport = _sport_name()
     api_key = _require_key()
     if api_key is None:
         return
 
+    mode = data_mode()
+
     with st.spinner("Pulling odds from sportsbooks..."):
         try:
-            with LineStore(DB_PATH) as store:
-                ingest = fetch_and_persist_snapshot(
-                    store,
-                    api_key,
-                    sport=_sport_key(),
-                )
-            lines = ingest["lines"]
-            count = ingest["saved_count"]
+            if mode == "db":
+                with LineStore(DB_PATH) as store:
+                    ingest = fetch_and_persist_snapshot(
+                        store,
+                        api_key,
+                        sport=_sport_key(),
+                    )
+                lines = ingest["lines"]
+                count = ingest["saved_count"]
+            else:
+                # Live mode: fetch directly, no DB persistence
+                lines = _cached_live_fetch(api_key, _sport_key())
+                count = 0
         except Exception as exc:
             st.error(f"Could not reach the API: {exc}")
             return
@@ -645,7 +708,12 @@ def _fetch_odds():
         st.info(f"No {sport} games available right now.")
         return
 
-    st.success(f"Got {len(lines)} lines across {sport}. Saved {count} new rows.")
+    if mode == "db":
+        st.success(
+            f"Got {len(lines)} lines across {sport}. Saved {count} new rows."
+        )
+    else:
+        st.success(f"Got {len(lines)} lines across {sport} (live mode).")
     st.session_state["last_fetch"] = lines
 
     # Auto-scan for arbs
@@ -653,14 +721,18 @@ def _fetch_odds():
     spread_arbs = find_spread_arbs(lines)
     st.session_state["last_arbs"] = ml_arbs + spread_arbs
 
-    # Auto-detect movements from stored history
-    with LineStore(DB_PATH) as store:
-        all_lines = store.get_lines(limit=10000)
-    if len(all_lines) >= 2:
-        sorted_lines = sorted(all_lines, key=lambda ln: ln.timestamp)
-        mid = len(sorted_lines) // 2
-        moves = detect_moves(sorted_lines[:mid], sorted_lines[mid:])
-        st.session_state["last_moves"] = moves
+    # Auto-detect movements from stored history (only with persistent DB)
+    if mode == "db":
+        try:
+            with LineStore(DB_PATH) as store:
+                all_lines = store.get_lines(limit=10000)
+            if len(all_lines) >= 2:
+                sorted_lines = sorted(all_lines, key=lambda ln: ln.timestamp)
+                mid = len(sorted_lines) // 2
+                moves = detect_moves(sorted_lines[:mid], sorted_lines[mid:])
+                st.session_state["last_moves"] = moves
+        except Exception:
+            pass
 
 
 def _build_game_index(lines) -> dict[str, dict]:
@@ -2088,15 +2160,16 @@ def _page_best_lines():
         if ct is not None and ln.event not in commence_map:
             commence_map[ln.event] = ct
 
-    # Group standouts by local date
-    today = date.today()
+    # Group standouts by display-timezone date
+    now_display = _to_display(datetime.now(timezone.utc))
+    today = now_display.date()
     tomorrow = today + timedelta(days=1)
 
     groups: dict[date | None, list[tuple[int, dict]]] = defaultdict(list)
     for rank, s in enumerate(standouts, 1):
         ct = commence_map.get(s["event"])
         if ct is not None:
-            local_date = ct.astimezone().date()
+            local_date = _to_display(ct).date()
         else:
             local_date = None
         groups[local_date].append((rank, s))
@@ -3568,6 +3641,31 @@ def main():
         st.toast("Bet submitted!", icon="\u2705")
 
     _sidebar()
+
+    # --- Browser timezone detection (best-effort) ---
+    if "user_tz" not in st.session_state:
+        _tz_js = (
+            "<script>"
+            "const tz=Intl.DateTimeFormat()"
+            ".resolvedOptions().timeZone;"
+            'window.parent.postMessage({type:'
+            '"streamlit:setComponentValue",'
+            'value:tz},"*");'
+            "</script>"
+        )
+        _tz_component = st.components.v1.html(
+            _tz_js, height=0,
+        )
+        if _tz_component:
+            st.session_state["user_tz"] = _tz_component
+
+    # --- Data-mode banner ---
+    mode = data_mode()
+    if mode == "live":
+        st.caption(
+            "Running in **live mode** — odds are fetched directly from the "
+            "API (cached 60 s). No historical DB available."
+        )
 
     # Open bet slip dialog (from button or reopen after state change)
     if st.session_state.pop("_open_slip", False):
