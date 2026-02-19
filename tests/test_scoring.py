@@ -204,15 +204,17 @@ class TestRankHitMode:
         rank_candidates(candidates, mode="hit")
         assert candidates[0] is favorite
 
-    def test_demotes_negative_edge(self):
-        """Negative edge_ev_shrunk should sort to the bottom."""
-        good = _entry(consensus_prob=0.55, edge_ev_shrunk=0.01)
-        bad = _entry(consensus_prob=0.80, edge_ev_shrunk=-0.01)
-        for e in [good, bad]:
+    def test_negative_edge_does_not_override_prob(self):
+        """Negative edge must NOT override probability.  A high-prob
+        candidate with negative edge still ranks above a lower-prob
+        candidate with positive edge — probability is dominant."""
+        high_prob = _entry(consensus_prob=0.80, edge_ev_shrunk=-0.01)
+        low_prob = _entry(consensus_prob=0.55, edge_ev_shrunk=0.01)
+        for e in [high_prob, low_prob]:
             enrich_entry(e)
-        candidates = [bad, good]
+        candidates = [low_prob, high_prob]
         rank_candidates(candidates, mode="hit")
-        assert candidates[0] is good
+        assert candidates[0] is high_prob
 
     def test_higher_agreement_preferred(self):
         """Among similar prob entries, higher agreement should rank first."""
@@ -492,16 +494,16 @@ class TestHitModeLongshotGuard:
         # Just assert dog is adjacent to fav (within index 0-1), not buried.
         assert candidates.index(dog) <= 1
 
-    def test_negative_edge_still_bottom_even_if_strong_alpha(self):
-        """edge_ev_shrunk < 0 is always ranked below non-negative edge
-        regardless of alpha or longshot status."""
-        neg = _entry(edge_ev_shrunk=-0.01, consensus_prob=0.80)
-        neg["alpha_label"] = "Strong"
-        pos = _entry(edge_ev_shrunk=0.005, consensus_prob=0.30)
-        enrich_entry(pos)
-        candidates = [neg, pos]
+    def test_high_prob_beats_low_prob_even_with_negative_edge(self):
+        """A high-prob candidate with negative edge still outranks a
+        low-prob candidate with positive edge — probability dominates."""
+        high_prob = _entry(edge_ev_shrunk=-0.01, consensus_prob=0.80)
+        high_prob["alpha_label"] = "Strong"
+        low_prob = _entry(edge_ev_shrunk=0.005, consensus_prob=0.30)
+        enrich_entry(low_prob)
+        candidates = [low_prob, high_prob]
         rank_candidates(candidates, mode="hit")
-        assert candidates[0] is pos
+        assert candidates[0] is high_prob
 
     def test_consensus_prob_below_floor_triggers_demotion(self):
         """An entry with consensus_prob exactly at the boundary."""
@@ -743,6 +745,37 @@ class TestHitModeDemotesLongshotsBelowProbFloor:
         rank_candidates(candidates, mode="hit")
         # favorite (0.55 > 0.30) must rank above longshot (0.16 < 0.30)
         assert candidates[0] is favorite
+
+    def test_84pct_favorite_ranks_above_16pct_longshot(self):
+        """Regression: an 84% favorite must rank #1 over a 16% longshot
+        in hit mode, regardless of edge.  Reproduces the Liberty Flames
+        vs Florida Int'l bug where edge_ok override caused the 16%
+        longshot to outrank the 84% favorite."""
+        favorite = _entry(
+            consensus_prob=0.84,
+            edge_ev_shrunk=-0.022,  # negative edge
+            quality_score=52,
+            alpha_score=30,
+            agreement_score=70,
+            market_volatility_sigma=0.005,
+        )
+        longshot = _entry(
+            consensus_prob=0.16,
+            edge_ev_shrunk=0.054,  # strong positive edge
+            quality_score=97,
+            alpha_score=40,
+            agreement_score=90,
+            market_volatility_sigma=0.003,
+        )
+        for e in [favorite, longshot]:
+            enrich_entry(e)
+            e["alpha_label"] = "Weak"
+
+        candidates = [longshot, favorite]
+        rank_candidates(candidates, mode="hit")
+        assert candidates[0] is favorite, (
+            "Hit mode must rank the 84% favorite above the 16% longshot"
+        )
 
     def test_both_above_floor_sorts_by_prob(self):
         """Two candidates both above PROB_FLOOR_HIT: higher prob wins."""

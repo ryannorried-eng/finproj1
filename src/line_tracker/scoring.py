@@ -107,37 +107,32 @@ def _hybrid_sort_key(e: dict) -> tuple:
 
 
 def _hit_sort_key(e: dict) -> tuple:
-    """Truly probability-first ranking for hit mode.
+    """Probability-first ranking for hit mode.
+
+    consensus_prob is the dominant ordering.  The only hard partition is
+    the PROB_FLOOR_HIT gate — candidates at or above 0.30 always rank
+    above those below, regardless of edge or alpha.
 
     Order:
-    1. Non-negative shrunk edge (hard demotion for negative edge).
-    2. Longshot guard: demote if consensus_prob < LONGSHOT_PROB_FLOOR
-       AND alpha_label != "Strong".  Strong-alpha longshots are not
-       auto-demoted since a robust signal justifies the low probability.
-    3. Prob-floor guard: demote candidates below PROB_FLOOR_HIT (0.30)
-       so they never appear as the #1 pick.
-    4. Higher consensus_prob first (PRIMARY sort key).
-    5. Higher alpha_score as secondary tiebreaker.
-    6. Higher agreement_score (tighter book consensus).
-    7. Lower sigma (less market noise).
-    8. Higher edge as LAST tiebreaker (never ahead of prob).
+    1. Above PROB_FLOOR_HIT (0.30) first — hard partition so longshots
+       never leapfrog solid favorites.
+    2. Higher consensus_prob first (dominant sort key).
+    3. Higher alpha_score as tiebreaker.
+    4. Higher quality_score as tiebreaker.
+    5. Higher agreement_score (tighter book consensus).
+    6. Lower sigma (less market noise).
+    7. Higher edge as LAST tiebreaker (never ahead of prob).
     """
-    edge_ok = 1 if e.get("edge_ev_shrunk", 0.0) >= 0 else 0
     prob = e.get("consensus_prob", 0.0)
-    # not_longshot = 0 means "is a demotable longshot", sorts last
-    is_longshot = prob < LONGSHOT_PROB_FLOOR and e.get("alpha_label") != "Strong"
-    not_longshot = 0 if is_longshot else 1
-    # above_prob_floor: candidates >= PROB_FLOOR_HIT get priority
-    above_prob_floor = 1 if prob >= PROB_FLOOR_HIT else 0
+    above_floor = 1 if prob >= PROB_FLOOR_HIT else 0
     return (
-        -edge_ok,                                    # 1. non-neg edge first
-        -not_longshot,                               # 2. non-longshot first
-        -above_prob_floor,                           # 3. above prob floor first
-        -prob,                                       # 4. highest prob first (PRIMARY)
-        -e.get("alpha_score", 0),                    # 5. highest alpha
-        -e.get("agreement_score", 0.0),              # 6. highest agreement
-        e.get("market_volatility_sigma", 0.0),       # 7. lowest sigma
-        -e.get("edge_ev_shrunk", 0.0),               # 8. edge as LAST tiebreaker
+        -above_floor,                                # 1. above prob floor first
+        -prob,                                       # 2. highest prob first (dominant)
+        -e.get("alpha_score", 0),                    # 3. highest alpha
+        -e.get("quality_score", 0),                  # 4. highest quality
+        -e.get("agreement_score", 0.0),              # 5. highest agreement
+        e.get("market_volatility_sigma", 0.0),       # 6. lowest sigma
+        -e.get("edge_ev_shrunk", 0.0),               # 7. edge LAST
     )
 
 
