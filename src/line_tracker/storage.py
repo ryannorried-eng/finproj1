@@ -15,6 +15,7 @@ from line_tracker.db.repos import (
     ClvRepo,
     EventsRepo,
     LinesRepo,
+    RecSnapshotsRepo,
     SlatePicksRepo,
     SlatesRepo,
 )
@@ -67,6 +68,7 @@ class LineStore:
         self.events_repo = EventsRepo(self._conn)
         self.slates_repo = SlatesRepo(self._conn)
         self.slate_picks_repo = SlatePicksRepo(self._conn)
+        self.rec_snapshots_repo = RecSnapshotsRepo(self._conn)
 
     def _maybe_commit(self) -> None:
         if not self._in_explicit_txn:
@@ -332,6 +334,54 @@ class LineStore:
         """Delete a bet and its legs from the database."""
         self.bets_repo.delete_bet(bet_id)
         self._maybe_commit()
+
+    # ── Recommendation snapshots (CLV logging) ──────────────────────
+
+    def log_rec_snapshots(self, snapshots: list[dict]) -> int:
+        """Persist recommendation snapshots (idempotent per run).
+
+        Returns count of newly inserted rows.
+        """
+        count = self.rec_snapshots_repo.insert_many(snapshots)
+        self._maybe_commit()
+        return count
+
+    def get_unclosed_snapshots(
+        self, before_iso: str | None = None,
+    ) -> list[dict]:
+        """Return rec_snapshots that haven't been closed yet."""
+        return self.rec_snapshots_repo.get_unclosed(before_iso)
+
+    def close_snapshot(
+        self,
+        snapshot_id: int,
+        *,
+        close_odds_american: float,
+        close_odds_decimal: float,
+        close_implied_prob: float,
+        open_implied_prob: float,
+        clv_delta_american: float,
+        clv_delta_implied: float,
+    ) -> None:
+        """Write closing-line data for one rec_snapshot row."""
+        self.rec_snapshots_repo.update_close(
+            snapshot_id,
+            close_odds_american=close_odds_american,
+            close_odds_decimal=close_odds_decimal,
+            close_implied_prob=close_implied_prob,
+            open_implied_prob=open_implied_prob,
+            clv_delta_american=clv_delta_american,
+            clv_delta_implied=clv_delta_implied,
+        )
+        self._maybe_commit()
+
+    def get_clv_summary_by_tier(self) -> list[dict]:
+        """Return aggregated CLV metrics grouped by tier."""
+        return self.rec_snapshots_repo.get_clv_summary_by_tier()
+
+    def get_closed_snapshots(self, tier: str | None = None) -> list[dict]:
+        """Return closed rec_snapshots, optionally filtered by tier."""
+        return self.rec_snapshots_repo.get_closed(tier)
 
     def save_calibration(self, key: str, json_str: str) -> None:
         """Persist a calibration result keyed by scope (e.g. 'global')."""

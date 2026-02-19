@@ -42,6 +42,10 @@ _AVOID_NOISE_SIGMA_MIN = 0.05  # volatility sigma for "noisy" flag
 _AVOID_NOISE_EDGE_MAX = 2.0  # EV/$100 below which noise matters
 _AVOID_DIVERGENCE_MIN = 0.04  # sharp-retail divergence threshold
 
+# ── Tier 3 tightened thresholds ──────────────────────────────────────
+TIER3_MIN_EDGE_Z = 1.15   # was 1.0 — raises floor to reduce noise
+TIER3_MIN_EV_100 = 0.50   # optional EV/$100 floor for Tier 3 only
+
 # ── relaxed Tier 2 display thresholds (used when strict mode OFF) ─────
 _RELAXED_TIER2_EDGE = 0.3  # EV/$100
 _RELAXED_TIER2_EDGE_Z_MIN = 0.75
@@ -304,7 +308,8 @@ def classify_rec(
            edge_z >= 1.75, quality_score >= 65, consensus_prob < 0.30,
            books >= 4, hold <= 7.5%  (no dynamic floor)
         5. Tier 3 — Moderate Edge: edge_ev_shrunk > 0,
-           1.0 <= edge_z < 1.75, quality_score >= 60, books >= 4
+           edge_z >= 1.15 and < 1.75, quality_score >= 60, books >= 4,
+           ev_100 >= 0.50
         6. Tier 3 catch-all: positive-edge plays that don't meet above
 
     Parameters
@@ -412,11 +417,13 @@ def classify_rec(
         return {"tier": "tier2", "reasons": [], "dynamic_edge_floor": floor_1a}
 
     # ── Tier 3 — Moderate Edge ────────────────────────────────────
+    ev_100 = entry.get("ev_100", edge)
     if (
         edge_ev_shrunk > 0
-        and 1.0 <= edge_z < 1.75
+        and TIER3_MIN_EDGE_Z <= edge_z < 1.75
         and quality_score >= 60
         and books_used >= 4
+        and ev_100 >= TIER3_MIN_EV_100
     ):
         return {"tier": "tier3", "reasons": [], "dynamic_edge_floor": floor_1a}
 
@@ -642,9 +649,17 @@ def compute_slate_debug_stats(entries: list[dict]) -> dict:
 
 
 def _passes_filters(entry: dict, filters: dict) -> bool:
-    """Return True if the entry survives all user-supplied display filters."""
-    if filters.get("min_edge") and entry["edge_pct"] < filters["min_edge"]:
-        return False
+    """Return True if the entry survives all user-supplied display filters.
+
+    The ``min_edge`` filter compares against ``edge_shrunk_pct``
+    (= ``edge_ev_shrunk * 100``), which is the same edge basis used by
+    tiering / ``classify_rec``.  Falls back to ``edge_pct`` if
+    ``edge_shrunk_pct`` is not present (e.g. in tests with minimal dicts).
+    """
+    if filters.get("min_edge"):
+        shrunk = entry.get("edge_shrunk_pct", entry["edge_pct"])
+        if shrunk < filters["min_edge"]:
+            return False
     if filters.get("min_quality") and entry["quality_score"] < filters["min_quality"]:
         return False
     if filters.get("markets") and entry["market"] not in filters["markets"]:
@@ -738,6 +753,9 @@ def build_daily_slate(
                 "edge_pct_pp": rec.edge_pct,  # prob-point %
                 "edge_ev": rec.edge_ev,
                 "edge_ev_shrunk": rec.edge_ev_shrunk,
+                "edge_shrunk_pct": round(rec.edge_ev_shrunk * 100, 4)
+                if rec.edge_ev_shrunk is not None
+                else 0.0,
                 "edge_ev_100": rec.edge_ev_100,
                 "n_eff": rec.n_eff,
                 "outlier_rate": rec.outlier_rate,

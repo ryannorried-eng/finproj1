@@ -325,6 +325,36 @@ def _tier_proxy(row: pd.Series) -> str:
     return "Stay Away"
 
 
+# ------------------------------------------------------------------
+# Rec-snapshot CLV summary (by tier, read-only)
+# ------------------------------------------------------------------
+
+
+def rec_snapshot_clv_summary(rows: list[dict]) -> dict[str, dict]:
+    """Summarise CLV from rec_snapshot rows grouped by tier.
+
+    Parameters
+    ----------
+    rows:
+        Output of ``store.get_clv_summary_by_tier()`` — each dict has
+        ``tier``, ``cnt``, ``avg_clv_implied``, ``pct_positive``.
+
+    Returns
+    -------
+    ``{tier: {"count": int, "avg_clv_implied": float,
+              "pct_positive": float}}``.
+    """
+    out: dict[str, dict] = {}
+    for r in rows:
+        tier = r.get("tier") or "unknown"
+        out[tier] = {
+            "count": r.get("cnt", 0),
+            "avg_clv_implied": round(float(r.get("avg_clv_implied") or 0), 6),
+            "pct_positive": round(float(r.get("pct_positive") or 0), 1),
+        }
+    return out
+
+
 def calibration_stats(df: pd.DataFrame) -> dict[str, dict]:
     """Compare CLV performance across proxy tier groups.
 
