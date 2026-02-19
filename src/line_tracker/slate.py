@@ -7,6 +7,7 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
 
+from line_tracker.alpha import ALPHA_GATE_ENABLED, alpha_label, alpha_score
 from line_tracker.best_bets import recommend_best_bets
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
 from line_tracker.models import BettingLine, BetType
@@ -761,6 +762,7 @@ def build_daily_slate(
                 "sizing_note": rec.sizing_note,
                 "best_bet_result": getattr(rec, "best_bet_result", None),
                 "bet_tier": rec.bet_tier,
+                "agreement_score": rec.agreement_score,
             }
 
             # Classify — runs for EVERY rec, no pre-filtering
@@ -774,6 +776,21 @@ def build_daily_slate(
             entry["distance_to_1b"] = compute_distance_to_1b(
                 entry, thresholds=th,
             )
+
+            # ── Alpha robustness overlay ────────────────────────────
+            a_score, a_components = alpha_score(entry)
+            a_label = alpha_label(a_score)
+            entry["alpha_score"] = a_score
+            entry["alpha_label"] = a_label
+            entry["alpha_components"] = a_components
+
+            # Gating: downgrade tier1b → tier2 when alpha is Weak
+            if (
+                ALPHA_GATE_ENABLED
+                and entry["tier"] == "tier1b"
+                and a_label == "Weak"
+            ):
+                entry["tier"] = "tier2"
 
             all_entries.append(entry)
 

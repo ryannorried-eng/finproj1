@@ -2579,7 +2579,21 @@ def _render_why_tooltip(entry: dict) -> None:
         reasons = entry.get("avoid_reasons", [])
         if reasons:
             lines.append("- **Reasons:** " + "; ".join(reasons))
+        # Alpha robustness overlay
+        _a_label = entry.get("alpha_label")
+        _a_score = entry.get("alpha_score")
+        if _a_label is not None and _a_score is not None:
+            lines.append(
+                f"- **Alpha:** {_a_label} ({_a_score})"
+            )
         st.markdown("\n".join(lines))
+        # Debug mode: show alpha components
+        _debug = st.session_state.get("diag_debug_mode", False)
+        _a_comp = entry.get("alpha_components")
+        if _debug and _a_comp:
+            import json as _json
+
+            st.code(_json.dumps(_a_comp, indent=2), language="json")
 
 
 def _slate_market_label(entry: dict) -> str:
@@ -2732,7 +2746,17 @@ def _render_slate_card(entry: dict, rank: int | None = None) -> None:
             ez = entry.get('edge_z', 0.0)
             _card_bt = entry.get("bet_tier", "")
             _bt_suffix = f" | {_card_bt}" if _card_bt else ""
-            st.caption(f"Z: {ez:+.2f} | Q: {entry['quality_score']}{_bt_suffix}")
+            _a_label = entry.get("alpha_label", "")
+            _a_score = entry.get("alpha_score")
+            _alpha_str = (
+                f" | Alpha: {_a_label} ({_a_score})"
+                if _a_label else ""
+            )
+            st.caption(
+                f"Z: {ez:+.2f} | Q: "
+                f"{entry['quality_score']}"
+                f"{_bt_suffix}{_alpha_str}"
+            )
         with cols[2]:
             st.metric("Slate Score", f"{entry['slate_score']:.0f}")
             st.caption(f"Confidence: {entry['confidence']}")
@@ -2812,6 +2836,9 @@ def _render_slate_table(entries: list[dict]) -> None:
             sizing_str = f"{k_sugg * 100:.1f}%"
         else:
             sizing_str = ""
+        _a_lbl = entry.get("alpha_label", "")
+        _a_sc = entry.get("alpha_score")
+        _alpha_col = f"{_a_lbl} ({_a_sc})" if _a_lbl and _a_sc is not None else ""
         rows.append({
             "Event": entry["event"],
             "Start": time_str,
@@ -2821,6 +2848,7 @@ def _render_slate_table(entries: list[dict]) -> None:
             "EV/$100": f"${entry['edge_pct']:+.2f}",
             "Edge Z": f"{entry.get('edge_z', 0.0):+.2f}",
             "Quality": entry["quality_score"],
+            "Alpha": _alpha_col,
             "Tier": entry.get("bet_tier", ""),
             "Confidence": entry["confidence"],
             "Sizing": sizing_str,
