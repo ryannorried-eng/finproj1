@@ -621,3 +621,42 @@ class TestBestBetRankedOrder:
         assert len(qualified) == 0
         # Fallback should be ranked (a first, not b first)
         assert ranked[0] is a
+
+    def test_others_from_ranked_when_only_one_qualifies(self):
+        """Regression: when only 1 candidate passes edge+quality filters,
+        'other candidates' must come from ranked (not qualified[1:3]).
+
+        This was the root cause of Florida Int'l showing only 1 option:
+        - Small market → only ML candidates (spread/total had 1 book)
+        - 1 of 2 ML candidates failed quality threshold
+        - qualified[1:3] was empty → no 'Other +EV bets' shown
+        - Fix: others = [e for e in ranked if e is not top_e][:2]
+        """
+        top = _entry(alpha_score=90, consensus_prob=0.65, ev_100=2.0,
+                     edge_ev_shrunk=0.02, quality_score=80)
+        mid = _entry(alpha_score=60, consensus_prob=0.50, ev_100=2.0,
+                     edge_ev_shrunk=0.02, quality_score=40)   # fails quality
+        low = _entry(alpha_score=30, consensus_prob=0.35, ev_100=2.0,
+                     edge_ev_shrunk=0.001, quality_score=40)  # fails both
+        for e in [top, mid, low]:
+            enrich_entry(e)
+            e["edge_shrunk_pct"] = round(e["edge_ev_shrunk"] * 100, 4)
+
+        candidates = [low, mid, top]
+        ranked = rank_candidates(candidates, mode="hybrid")
+        qualified = [
+            e for e in ranked
+            if e.get("edge_shrunk_pct", e.get("edge_pct", 0.0)) >= 0.5
+            and e["quality_score"] >= 60
+        ]
+
+        assert len(qualified) == 1
+
+        # OLD (buggy) pattern: qualified[1:3] is empty when only 1 qualifies
+        old_others = qualified[1:3]
+        assert len(old_others) == 0  # This caused the "only 1 shown" bug
+
+        # NEW (fixed) pattern: pull from ranked, skip the already-shown top_e
+        top_e = qualified[0]
+        new_others = [e for e in ranked if e is not top_e][:2]
+        assert len(new_others) == 2  # Always shows next alternatives
