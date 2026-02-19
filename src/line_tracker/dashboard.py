@@ -53,6 +53,7 @@ from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
 from line_tracker.performance import (
     all_breakdowns,
+    alpha_clv_report,
     apply_filters,
     calibration_stats,
     clv_color,
@@ -3288,6 +3289,85 @@ def _page_performance_body(store):
             "Not enough pick-time metadata for calibration "
             "(needs confidence, quality tier, and edge at pick)."
         )
+
+    # ---- Alpha CLV Report ------------------------------------------------
+    st.divider()
+    st.subheader("Alpha CLV Report")
+    st.caption(
+        "Evaluates whether alpha labels (Strong / Neutral / Weak) "
+        "correlate with better closing line value."
+    )
+
+    alpha_stats = store.get_alpha_clv_stats()
+    alpha_report = alpha_clv_report(alpha_stats)
+    alpha_summary = alpha_report["summary"]
+    alpha_rows = alpha_report["rows"]
+
+    if alpha_rows:
+        ac1, ac2, ac3, ac4 = st.columns(4)
+        with ac1:
+            st.metric("Total Closed Legs", alpha_summary["total_closed"])
+        with ac2:
+            spread = alpha_summary["alpha_clv_spread"]
+            st.metric(
+                "Alpha CLV Spread",
+                f"{spread:+.4f}" if spread is not None else "N/A",
+            )
+        with ac3:
+            s_clv = alpha_summary["strong_avg_clv"]
+            st.metric(
+                "Strong Avg CLV",
+                f"{s_clv:+.4f}" if s_clv is not None else "N/A",
+            )
+        with ac4:
+            w_clv = alpha_summary["weak_avg_clv"]
+            st.metric(
+                "Weak Avg CLV",
+                f"{w_clv:+.4f}" if w_clv is not None else "N/A",
+            )
+
+        # Build styled table
+        table_data = []
+        for row in alpha_rows:
+            table_data.append({
+                "Alpha Label": row["alpha_label"],
+                "Count": row["count"],
+                "Beat Close %": f"{row['beat_close_pct']:.1f}%",
+                "Avg CLV (Prob)": f"{row['avg_clv_prob']:+.4f}",
+                "Avg CLV (American)": f"{row['avg_clv_american']:+.1f}",
+                "Avg Edge Z": (
+                    f"{row['avg_edge_z']:.2f}"
+                    if row["avg_edge_z"] is not None else "—"
+                ),
+                "Avg Shrunk Edge %": (
+                    f"{row['avg_edge_ev_shrunk']:.4f}"
+                    if row["avg_edge_ev_shrunk"] is not None else "—"
+                ),
+            })
+
+        alpha_df = pd.DataFrame(table_data)
+
+        def _alpha_clv_color(val):
+            """Color CLV values: green positive, red negative."""
+            if not isinstance(val, str):
+                return ""
+            try:
+                num = float(val.replace("%", "").replace("—", "nan"))
+            except (ValueError, TypeError):
+                return ""
+            if num > 0:
+                return "color: green"
+            if num < 0:
+                return "color: red"
+            return ""
+
+        styled = alpha_df.style.map(
+            _alpha_clv_color,
+            subset=["Avg CLV (Prob)", "Avg CLV (American)"],
+        )
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    else:
+        st.info("Not enough closed legs yet to evaluate alpha.")
 
     # ---- Auto-Calibrate Button -------------------------------------------
     st.divider()
