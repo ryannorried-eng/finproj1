@@ -379,6 +379,10 @@ class LineStore:
         """Return aggregated CLV metrics grouped by tier."""
         return self.rec_snapshots_repo.get_clv_summary_by_tier()
 
+    def get_alpha_clv_stats(self) -> list[dict]:
+        """Return aggregated CLV metrics grouped by alpha_label."""
+        return self.rec_snapshots_repo.get_alpha_clv_stats()
+
     def get_closed_snapshots(self, tier: str | None = None) -> list[dict]:
         """Return closed rec_snapshots, optionally filtered by tier."""
         return self.rec_snapshots_repo.get_closed(tier)

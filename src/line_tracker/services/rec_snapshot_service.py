@@ -95,6 +95,8 @@ def _add_entry(
         "confidence_label": entry.get("confidence"),
         "tier": entry.get("tier"),
         "meta": None,
+        "alpha_score": entry.get("alpha_score"),
+        "alpha_label": entry.get("alpha_label"),
     })
 
 

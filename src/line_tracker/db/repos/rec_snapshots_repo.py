@@ -25,8 +25,10 @@ class RecSnapshotsRepo:
                 book, odds_american, odds_decimal,
                 consensus_prob, breakeven_prob,
                 edge_pct, edge_ev, edge_ev_shrunk, ev_100,
-                edge_z, quality_score, confidence_label, tier, meta)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                edge_z, quality_score, confidence_label, tier, meta,
+                alpha_score, alpha_label)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 snap["created_at"],
                 snap["event_id"],
@@ -50,6 +52,8 @@ class RecSnapshotsRepo:
                 json.dumps(snap["meta"], separators=(",", ":"))
                 if snap.get("meta")
                 else None,
+                snap.get("alpha_score"),
+                snap.get("alpha_label"),
             ),
         )
         return cursor.lastrowid if cursor.rowcount > 0 else None
@@ -137,5 +141,30 @@ class RecSnapshotsRepo:
                WHERE closed_at IS NOT NULL
                GROUP BY tier
                ORDER BY tier"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_alpha_clv_stats(self) -> list[dict]:
+        """Aggregate CLV metrics grouped by alpha_label.
+
+        Returns rows with: alpha_label, cnt, avg_clv_implied,
+        avg_clv_american, avg_edge_z, avg_edge_ev_shrunk, beat_close_cnt.
+        Only includes closed rows that have a non-NULL alpha_label.
+        """
+        rows = self._conn.execute(
+            """SELECT
+                   alpha_label,
+                   COUNT(*)                  AS cnt,
+                   AVG(clv_delta_implied)    AS avg_clv_implied,
+                   AVG(clv_delta_american)   AS avg_clv_american,
+                   AVG(edge_z)               AS avg_edge_z,
+                   AVG(edge_ev_shrunk)       AS avg_edge_ev_shrunk,
+                   SUM(CASE WHEN clv_delta_implied > 0
+                            THEN 1 ELSE 0 END) AS beat_close_cnt
+               FROM rec_snapshots
+               WHERE closed_at IS NOT NULL
+                 AND alpha_label IS NOT NULL
+               GROUP BY alpha_label
+               ORDER BY alpha_label"""
         ).fetchall()
         return [dict(r) for r in rows]
