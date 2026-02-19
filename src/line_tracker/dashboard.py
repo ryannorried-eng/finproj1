@@ -1040,9 +1040,12 @@ def _detail_best_bet_section(game_lines):
 
             _render_best_bet_why(top)
 
-        others = qualified[1:3]
+        # Show next candidates from the full ranked list so that even
+        # when only one entry passes the edge+quality threshold, the
+        # closest alternatives are still visible.
+        others = [e for e in ranked if e is not top_e][:2]
         if others:
-            st.markdown("**Other +EV bets:**")
+            st.markdown("**Other candidates:**")
             for oe in others:
                 r = oe["_rec"]
                 ml = _best_bet_market_label(r)
