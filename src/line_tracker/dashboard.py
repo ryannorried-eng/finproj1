@@ -61,7 +61,7 @@ from line_tracker.performance import (
     rolling_clv_series,
     summary_kpis,
 )
-from line_tracker.scoring import RANKING_MODES, enrich_entry, rank_candidates
+from line_tracker.scoring import enrich_entry, rank_candidates
 from line_tracker.scraper import OddsClient
 from line_tracker.services.bet_service import (
     settle_bet as settle_bet_persisted,
@@ -946,20 +946,26 @@ def _detail_best_bet_section(game_lines):
     )
 
     # ── Controls row: ranking mode + filter sliders ──────────────
+    ranking_labels = ["Hybrid", "Most likely to hit", "Value (EV)"]
+    label_to_mode = {
+        "Hybrid": "hybrid",
+        "Most likely to hit": "hit",
+        "Value (EV)": "value",
+    }
+
+    # Stable session-state key; default to "Hybrid" only on first run.
+    rank_key = "best_bet_ranking_label"
+    if rank_key not in st.session_state:
+        st.session_state[rank_key] = "Hybrid"
+
     ctrl_cols = st.columns([1, 1, 1])
     with ctrl_cols[0]:
-        mode_labels = {
-            "hybrid": "Hybrid",
-            "hit": "Most likely to hit",
-            "value": "Value (EV)",
-        }
-        ranking_mode = st.selectbox(
+        chosen_label = st.selectbox(
             "Ranking",
-            options=list(RANKING_MODES),
-            format_func=lambda m: mode_labels.get(m, m),
-            index=0,
-            key=f"ranking_mode_{id(game_lines)}",
+            options=ranking_labels,
+            key=rank_key,
         )
+        ranking_mode = label_to_mode[chosen_label]
     with ctrl_cols[1]:
         min_edge = st.slider(
             "Min edge (%, shrunk)",
@@ -967,7 +973,7 @@ def _detail_best_bet_section(game_lines):
             max_value=5.0,
             value=0.5,
             step=0.1,
-            key=f"min_edge_{id(game_lines)}",
+            key="best_bet_min_edge",
             help="Filters on shrunk edge (same basis as Daily Slate)",
         )
     with ctrl_cols[2]:
@@ -977,7 +983,7 @@ def _detail_best_bet_section(game_lines):
             max_value=100,
             value=60,
             step=5,
-            key=f"min_quality_{id(game_lines)}",
+            key="best_bet_min_quality",
         )
 
     # ── Build enriched entries and rank ──────────────────────────

@@ -310,6 +310,42 @@ class TestRankingModes:
         assert "value" in RANKING_MODES
 
 
+# ── Dashboard label-to-mode mapping ──────────────────────────────────
+
+
+class TestBestBetLabelToModeMapping:
+    """Verify that the display labels used in the Best Bet dropdown
+    map correctly to the internal ranking mode strings."""
+
+    # Mirror the mapping defined in _detail_best_bet_section
+    LABEL_TO_MODE = {
+        "Hybrid": "hybrid",
+        "Most likely to hit": "hit",
+        "Value (EV)": "value",
+    }
+
+    def test_all_modes_covered(self):
+        """Every RANKING_MODES entry has a label mapping."""
+        assert set(self.LABEL_TO_MODE.values()) == set(RANKING_MODES)
+
+    @pytest.mark.parametrize(
+        "label,expected_mode",
+        [
+            ("Hybrid", "hybrid"),
+            ("Most likely to hit", "hit"),
+            ("Value (EV)", "value"),
+        ],
+    )
+    def test_label_maps_to_correct_mode(self, label, expected_mode):
+        assert self.LABEL_TO_MODE[label] == expected_mode
+
+    def test_default_label_is_hybrid(self):
+        """The default label (first option / session_state init) must be Hybrid."""
+        labels = list(self.LABEL_TO_MODE.keys())
+        assert labels[0] == "Hybrid"
+        assert self.LABEL_TO_MODE[labels[0]] == "hybrid"
+
+
 # ── Integration: hybrid score matches slate.compute_hybrid_score ──────
 
 
