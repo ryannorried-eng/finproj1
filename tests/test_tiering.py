@@ -5,8 +5,9 @@ Covers:
   - Deterministic output
   - No NaNs in any method
   - Stable behavior with small slate sizes (1, 2, 3 recs)
-  - All four tiering methods
+  - All five tiering methods (absolute, percentile, hybrid, composite, quantile)
   - Composite score normalization
+  - Quantile tier scoring, bucketing, and small-slate fallback
   - assign_tiers API and error handling
   - Edge cases (all-identical recs, negative edges, empty slates)
 """
@@ -26,9 +27,11 @@ from line_tracker.tiering import (
     _min_max_normalize,
     _percentile,
     assign_tiers,
+    assign_tiers_quantile,
     compute_composite_score,
     slate_distribution_stats,
     tier_frequency_report,
+    tier_score,
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -362,7 +365,7 @@ class TestAssignTiersAPI:
             {"edge_pct": -0.5, "edge_z": -0.2, "quality_score": 30,
              "quality_tier": "Thin", "confidence": "Low"},
         ])
-        for method in ("absolute", "percentile", "hybrid", "composite"):
+        for method in ("absolute", "percentile", "hybrid", "composite", "quantile"):
             for rec in slate:
                 rec.bet_tier = ""
             assign_tiers(slate, method=method)
@@ -453,7 +456,7 @@ class TestNoNaNs:
 # =====================================================================
 
 
-_ALL_METHODS = ["absolute", "percentile", "hybrid", "composite"]
+_ALL_METHODS = ["absolute", "percentile", "hybrid", "composite", "quantile"]
 
 
 class TestSmallSlateStability:
@@ -529,3 +532,266 @@ class TestTierFrequencyReport:
             report[f"{t}_count"] for t in [TIER_1, TIER_2, TIER_3, STAY_AWAY]
         )
         assert total_counted == 3
+
+
+# =====================================================================
+# Quantile tiering (Method D)
+# =====================================================================
+
+
+def _make_quantile_rec(
+    edge_pct: float = 2.0,
+    edge_z: float = 1.8,
+    quality_score: int = 70,
+    edge_ev_shrunk: float = 0.02,
+    agreement_score: float = 75.0,
+    books_used_count: int = 6,
+    market_hold_median: float = 5.0,
+    consensus_prob: float = 0.55,
+    **kwargs,
+) -> BetRecommendation:
+    """Create a BetRecommendation with extra fields for quantile scoring."""
+    defaults = dict(
+        market="moneyline",
+        selection="Team_A",
+        side="home",
+        line=None,
+        best_sportsbook="DraftKings",
+        best_odds=-110,
+        breakeven_prob=0.524,
+        ev=0.05,
+        ev_per_100=2.2,
+        quality_tier="Moderate",
+        confidence="Medium",
+    )
+    defaults.update(kwargs)
+    return BetRecommendation(
+        edge_pct=edge_pct,
+        edge_z=edge_z,
+        quality_score=quality_score,
+        consensus_prob=consensus_prob,
+        edge_ev_shrunk=edge_ev_shrunk,
+        agreement_score=agreement_score,
+        books_used_count=books_used_count,
+        market_hold_median=market_hold_median,
+        **defaults,
+    )
+
+
+class TestTierScore:
+    """Tests for the tier_score() function."""
+
+    def test_higher_edge_z_gives_higher_score(self):
+        s_low = tier_score(1.0, 2.0, 75.0, 6, 70.0, 0.05)
+        s_high = tier_score(3.0, 2.0, 75.0, 6, 70.0, 0.05)
+        assert s_high > s_low
+
+    def test_higher_hold_gives_lower_score(self):
+        s_low_hold = tier_score(2.0, 2.0, 75.0, 6, 70.0, 0.02)
+        s_high_hold = tier_score(2.0, 2.0, 75.0, 6, 70.0, 0.09)
+        assert s_low_hold > s_high_hold
+
+    def test_longshot_penalty_applied(self):
+        s_normal = tier_score(2.0, 2.0, 75.0, 6, 70.0, 0.05, consensus_prob=0.50)
+        s_longshot = tier_score(2.0, 2.0, 75.0, 6, 70.0, 0.05, consensus_prob=0.15)
+        assert s_normal > s_longshot
+
+    def test_longshot_penalty_skipped_for_strong_alpha(self):
+        s_no_alpha = tier_score(
+            2.0, 2.0, 75.0, 6, 70.0, 0.05,
+            consensus_prob=0.15, alpha_label="Neutral",
+        )
+        s_strong = tier_score(
+            2.0, 2.0, 75.0, 6, 70.0, 0.05,
+            consensus_prob=0.15, alpha_label="Strong",
+        )
+        assert s_strong > s_no_alpha
+
+    def test_score_range(self):
+        # All max values
+        s_max = tier_score(3.0, 5.0, 100.0, 8, 100.0, 0.0)
+        assert s_max <= 1.1  # allow small rounding
+        assert s_max > 0.5
+
+        # All zeros
+        s_zero = tier_score(0.0, 0.0, 0.0, 0, 0.0, 0.0)
+        assert s_zero == 0.0
+
+    def test_deterministic(self):
+        args = (2.0, 3.0, 80.0, 6, 75.0, 0.04)
+        assert tier_score(*args) == tier_score(*args)
+
+    def test_all_components_contribute(self):
+        """Each positive component, when increased, raises the score."""
+        base = tier_score(1.0, 1.0, 50.0, 4, 50.0, 0.05)
+        assert tier_score(2.0, 1.0, 50.0, 4, 50.0, 0.05) > base  # edge_z
+        assert tier_score(1.0, 3.0, 50.0, 4, 50.0, 0.05) > base  # shrunk pct
+        assert tier_score(1.0, 1.0, 90.0, 4, 50.0, 0.05) > base  # agreement
+        assert tier_score(1.0, 1.0, 50.0, 8, 50.0, 0.05) > base  # books
+        assert tier_score(1.0, 1.0, 50.0, 4, 90.0, 0.05) > base  # quality
+
+
+class TestQuantileTiering:
+    """Tests for assign_tiers_quantile and the quantile method via assign_tiers."""
+
+    def _make_mixed_slate(self, n: int = 20) -> list[BetRecommendation]:
+        """Create a mixed-quality slate of n recs with varying signals."""
+        recs = []
+        for i in range(n):
+            # Vary edge_z from 0.5 to 4.0
+            ez = 0.5 + (i / max(n - 1, 1)) * 3.5
+            ep = ez * 0.8  # rough correlation
+            shrunk = max(0.0, ez * 0.008)
+            qs = 40 + int(i * 50 / max(n - 1, 1))
+            recs.append(_make_quantile_rec(
+                edge_pct=round(ep, 2),
+                edge_z=round(ez, 2),
+                quality_score=min(qs, 100),
+                edge_ev_shrunk=round(shrunk, 4),
+                agreement_score=50.0 + i * 2,
+                books_used_count=4 + (i % 5),
+                market_hold_median=4.0 + (i % 4),
+            ))
+        return recs
+
+    def test_deterministic_tiers(self):
+        """Same inputs always produce the same tier assignments."""
+        for _ in range(3):
+            slate1 = self._make_mixed_slate(15)
+            slate2 = self._make_mixed_slate(15)
+            assign_tiers(slate1, method="quantile")
+            assign_tiers(slate2, method="quantile")
+            for r1, r2 in zip(slate1, slate2):
+                assert r1.bet_tier == r2.bet_tier
+
+    def test_tier1_tier2_populated(self):
+        """On a mixed slate of 20 recs, both Tier 1 and Tier 2 are non-empty."""
+        slate = self._make_mixed_slate(20)
+        assign_tiers(slate, method="quantile")
+        t1 = sum(1 for r in slate if r.bet_tier == TIER_1)
+        t2 = sum(1 for r in slate if r.bet_tier == TIER_2)
+        assert t1 > 0, "Tier 1 should have at least 1 member"
+        assert t2 > 0, "Tier 2 should have at least 1 member"
+
+    def test_tier1_is_best_candidates(self):
+        """Tier 1 candidates should have higher tier scores than Tier 2."""
+        slate = self._make_mixed_slate(20)
+        info = assign_tiers_quantile(slate)
+        scores_by_idx = dict(info["scores"])
+        t1_scores = [
+            scores_by_idx[i]
+            for i, r in enumerate(slate) if r.bet_tier == TIER_1
+        ]
+        t2_scores = [
+            scores_by_idx[i]
+            for i, r in enumerate(slate) if r.bet_tier == TIER_2
+        ]
+        if t1_scores and t2_scores:
+            assert min(t1_scores) >= max(t2_scores)
+
+    def test_small_slate_fallback_guarantees_tier1(self):
+        """With < min_candidates, at least 1 Tier 1 if there's a positive-edge rec."""
+        slate = [
+            _make_quantile_rec(edge_pct=3.0, edge_z=2.5, quality_score=75,
+                               edge_ev_shrunk=0.03),
+            _make_quantile_rec(edge_pct=1.0, edge_z=1.0, quality_score=60,
+                               edge_ev_shrunk=0.01),
+            _make_quantile_rec(edge_pct=0.5, edge_z=0.5, quality_score=50,
+                               edge_ev_shrunk=0.005),
+        ]
+        info = assign_tiers_quantile(slate, min_candidates=10)
+        assert info["fallback"] is True
+        t1_count = sum(1 for r in slate if r.bet_tier == TIER_1)
+        assert t1_count >= 1
+
+    def test_small_slate_fallback_info(self):
+        """Return dict includes fallback=True for small slates."""
+        slate = [
+            _make_quantile_rec(edge_pct=2.0, edge_z=2.0, edge_ev_shrunk=0.02),
+        ]
+        info = assign_tiers_quantile(slate, min_candidates=10)
+        assert info["fallback"] is True
+        assert info["n_eligible"] <= 10
+
+    def test_empty_slate(self):
+        info = assign_tiers_quantile([])
+        assert info["n_total"] == 0
+        assert info["n_eligible"] == 0
+        assert info["fallback"] is False
+
+    def test_all_negative_edge_stays_away(self):
+        """All recs with negative edge_ev_shrunk should be Stay Away."""
+        slate = [
+            _make_quantile_rec(edge_pct=-1.0, edge_z=-0.5, edge_ev_shrunk=-0.01,
+                               quality_score=80),
+            _make_quantile_rec(edge_pct=-0.5, edge_z=-0.2, edge_ev_shrunk=-0.005,
+                               quality_score=70),
+        ]
+        assign_tiers(slate, method="quantile")
+        for r in slate:
+            assert r.bet_tier == STAY_AWAY
+
+    def test_quality_floor_enforced(self):
+        """Rec below min_quality gets Stay Away even with good edge."""
+        slate = [
+            _make_quantile_rec(edge_pct=5.0, edge_z=4.0, edge_ev_shrunk=0.05,
+                               quality_score=30),
+        ]
+        assign_tiers(slate, method="quantile")
+        assert slate[0].bet_tier == STAY_AWAY
+
+    def test_configurable_quantiles(self):
+        """Wider Tier 1 quantile produces more Tier 1 picks."""
+        slate_narrow = self._make_mixed_slate(20)
+        slate_wide = self._make_mixed_slate(20)
+        assign_tiers(slate_narrow, method="quantile", tier1_q=0.05)
+        assign_tiers(slate_wide, method="quantile", tier1_q=0.30)
+        t1_narrow = sum(1 for r in slate_narrow if r.bet_tier == TIER_1)
+        t1_wide = sum(1 for r in slate_wide if r.bet_tier == TIER_1)
+        assert t1_wide >= t1_narrow
+
+    def test_longshot_guardrail_effect(self):
+        """Low consensus_prob recs get penalized vs. similar high-prob recs."""
+        # Two recs identical except for consensus_prob
+        rec_normal = _make_quantile_rec(
+            edge_pct=2.0, edge_z=2.0, edge_ev_shrunk=0.02,
+            quality_score=70, consensus_prob=0.55,
+        )
+        rec_longshot = _make_quantile_rec(
+            edge_pct=2.0, edge_z=2.0, edge_ev_shrunk=0.02,
+            quality_score=70, consensus_prob=0.15,
+        )
+        # Build a slate with padding to get normal quantile behavior
+        padding = [_make_quantile_rec(
+            edge_pct=1.0 + i * 0.3, edge_z=1.0 + i * 0.2,
+            edge_ev_shrunk=0.01 + i * 0.002, quality_score=60 + i * 2,
+        ) for i in range(15)]
+        slate = [rec_normal, rec_longshot] + padding
+        info = assign_tiers_quantile(slate)
+        scores = dict(info["scores"])
+        # Normal prob rec should score higher than longshot
+        assert scores[0] > scores[1]
+
+    def test_propagates_to_best_bet_result(self):
+        """Quantile method propagates bet_tier to BestBetResult."""
+        from line_tracker.models import BestBetResult
+
+        rec = _make_quantile_rec(edge_pct=4.0, edge_z=3.0, quality_score=85,
+                                 edge_ev_shrunk=0.04)
+        bbr = BestBetResult(
+            edge_pct=4.0, consensus_prob=0.55,
+            best_odds_american=-110, best_odds_decimal=1.909,
+            books_used=["DK"], volatility_sigma=0.02,
+            recency_weight=0.9, outliers_removed=0,
+        )
+        rec.best_bet_result = bbr
+        assign_tiers([rec], method="quantile")
+        assert bbr.bet_tier == rec.bet_tier
+
+    def test_via_assign_tiers_api(self):
+        """The quantile method is reachable via the assign_tiers API."""
+        slate = self._make_mixed_slate(12)
+        result = assign_tiers(slate, method="quantile")
+        assert result is slate
+        for r in slate:
+            assert r.bet_tier in VALID_TIERS

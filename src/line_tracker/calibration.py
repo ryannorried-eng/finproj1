@@ -423,7 +423,21 @@ def calibrate_thresholds(
 
 
 def format_calibration_report(result: dict) -> str:
-    """Human-readable calibration summary."""
+    """Human-readable calibration summary.
+
+    Supports both grid-search calibration results and quantile-tier
+    calibration results (detected via the ``"tier_method"`` key).
+    """
+    tier_method = result.get("tier_method", "grid")
+
+    if tier_method == "quantile":
+        return _format_quantile_report(result)
+
+    return _format_grid_report(result)
+
+
+def _format_grid_report(result: dict) -> str:
+    """Format the legacy grid-search calibration report."""
     lines = ["Tier Calibration Report", "=" * 40]
 
     lines.append(f"Training rows: {result.get('training_rows', 0)}")
@@ -463,6 +477,215 @@ def format_calibration_report(result: dict) -> str:
             lines.append("  (fallback defaults)")
 
     return "\n".join(lines)
+
+
+def _format_quantile_report(result: dict) -> str:
+    """Format the quantile-tier calibration report."""
+    lines = ["Tier Calibration Report (Quantile)", "=" * 44]
+
+    lines.append("Tier method:    quantile")
+    lines.append(f"Training rows:  {result.get('training_rows', 0)}")
+    if result.get("date_range"):
+        lines.append(f"Date range:     {result['date_range']}")
+
+    # Quantile config
+    qcfg = result.get("quantile_config", {})
+    lines.append(f"Tier1 quantile: {qcfg.get('tier1_q', '?')}")
+    lines.append(f"Tier2 quantile: {qcfg.get('tier2_q', '?')} (cumulative)")
+
+    # Resulting cut points
+    cuts = result.get("cut_points", {})
+    lines.append(f"Tier1 score cut: {cuts.get('tier1_cut', '?')}")
+    lines.append(f"Tier2 score cut: {cuts.get('tier2_cut', '?')}")
+
+    n_total = result.get("training_rows", 0)
+    if n_total < 50:
+        lines.append(
+            f"NOTE: Sample size ({n_total}) is small; "
+            "CLV estimates may be unstable."
+        )
+
+    # Tier counts and CLV performance
+    tier_stats = result.get("tier_stats", {})
+    for tier_name in ("Tier 1", "Tier 2", "Stay Away"):
+        ts = tier_stats.get(tier_name, {})
+        lines.append("")
+        lines.append(f"--- {tier_name.upper()} ---")
+        lines.append(f"  count:       {ts.get('count', 0)}")
+        lines.append(f"  beat_close:  {ts.get('beat_close_pct', 0):.1f}%")
+        lines.append(f"  avg_clv_dec: {ts.get('avg_clv_dec', 0):.6f}")
+        lines.append(f"  avg_clv_prob:{ts.get('avg_clv_prob', 0):.6f}")
+
+    # Distribution summary
+    dist = result.get("distribution", {})
+    if dist:
+        lines.append("")
+        lines.append("--- DISTRIBUTION SUMMARY ---")
+        for field_name in ("tier_score", "edge_z", "edge_ev_shrunk_pct",
+                           "agreement_score", "books_used", "quality_score"):
+            fd = dist.get(field_name, {})
+            if fd:
+                p50 = fd.get("p50", "?")
+                p75 = fd.get("p75", "?")
+                p90 = fd.get("p90", "?")
+                p95 = fd.get("p95", "?")
+                lines.append(
+                    f"  {field_name:24s}  "
+                    f"p50={p50}  p75={p75}  p90={p90}  p95={p95}"
+                )
+
+    return "\n".join(lines)
+
+
+def build_quantile_calibration_report(
+    df: pd.DataFrame,
+    *,
+    tier1_q: float = 0.10,
+    tier2_q: float = 0.35,
+    min_candidates: int = 10,
+) -> dict:
+    """Build a calibration report for quantile-tier performance.
+
+    Expects a DataFrame with columns from ``load_clv_training_df`` plus
+    optionally ``agreement_score``, ``quality_score``, ``books_used``,
+    ``market_hold_median``, ``consensus_prob``, ``alpha_label``,
+    ``edge_ev_shrunk``.
+
+    Returns a dict suitable for ``format_calibration_report``.
+    """
+    from line_tracker.tiering import _Q_MIN_QUALITY
+    from line_tracker.tiering import tier_score as _tier_score
+
+    result: dict = {
+        "tier_method": "quantile",
+        "training_rows": len(df),
+        "date_range": None,
+        "quantile_config": {
+            "tier1_q": tier1_q,
+            "tier2_q": tier2_q,
+            "min_candidates": min_candidates,
+        },
+    }
+
+    if df.empty:
+        result["cut_points"] = {"tier1_cut": None, "tier2_cut": None}
+        result["tier_stats"] = {}
+        result["distribution"] = {}
+        return result
+
+    if "date" in df.columns:
+        dates = df["date"].dropna()
+        if len(dates) > 0:
+            result["date_range"] = f"{dates.min()} to {dates.max()}"
+
+    # Compute tier scores for each row
+    scores = []
+    for _, row in df.iterrows():
+        edge_ev_shrunk = float(row.get("edge_ev_shrunk", 0.0))
+        s = _tier_score(
+            edge_z=float(row.get("edge_z", 0.0)),
+            edge_ev_shrunk_pct=edge_ev_shrunk * 100.0,
+            agreement_score=float(row.get("agreement_score", 50.0)),
+            books_used=int(row.get("books_used", 4)),
+            quality_score=float(row.get("quality_score", 50.0)),
+            hold_max=float(row.get("market_hold_median", 5.0)) / 100.0,
+            consensus_prob=float(row.get("consensus_prob", 0.5)),
+            alpha_label=str(row.get("alpha_label", "")),
+        )
+        scores.append(s)
+
+    df = df.copy()
+    df["tier_score"] = scores
+
+    # Eligible pool
+    eligible = df[
+        (df.get("edge_ev_shrunk", pd.Series(dtype=float)).fillna(0.0) > 0)
+        & (df.get("quality_score", pd.Series(dtype=float)).fillna(0) >= _Q_MIN_QUALITY)
+    ] if "edge_ev_shrunk" in df.columns else df[df["edge_ev_100"] > 0]
+
+    n_eligible = len(eligible)
+    eligible_sorted = eligible.sort_values("tier_score", ascending=False)
+
+    if n_eligible == 0:
+        tier1_cut = None
+        tier2_cut = None
+    elif n_eligible < min_candidates:
+        tier1_cut = float(eligible_sorted.iloc[0]["tier_score"])
+        t2_idx = min(max(1, int(n_eligible * tier2_q)), n_eligible - 1)
+        tier2_cut = float(eligible_sorted.iloc[t2_idx]["tier_score"])
+    else:
+        t1_idx = max(0, int(n_eligible * tier1_q) - 1)
+        t2_idx = max(t1_idx + 1, int(n_eligible * tier2_q) - 1)
+        t2_idx = min(t2_idx, n_eligible - 1)
+        tier1_cut = float(eligible_sorted.iloc[t1_idx]["tier_score"])
+        tier2_cut = float(eligible_sorted.iloc[t2_idx]["tier_score"])
+
+    result["cut_points"] = {
+        "tier1_cut": round(tier1_cut, 6) if tier1_cut is not None else None,
+        "tier2_cut": round(tier2_cut, 6) if tier2_cut is not None else None,
+    }
+
+    # Assign tiers to training rows
+    def _assign(row_score):
+        if tier1_cut is not None and row_score >= tier1_cut:
+            return "Tier 1"
+        if tier2_cut is not None and row_score >= tier2_cut:
+            return "Tier 2"
+        return "Stay Away"
+
+    df["assigned_tier"] = df["tier_score"].apply(_assign)
+
+    # Compute per-tier stats
+    tier_stats = {}
+    for tier_name in ("Tier 1", "Tier 2", "Stay Away"):
+        subset = df[df["assigned_tier"] == tier_name]
+        n = len(subset)
+        if n == 0:
+            tier_stats[tier_name] = {
+                "count": 0,
+                "beat_close_pct": 0.0,
+                "avg_clv_dec": 0.0,
+                "avg_clv_prob": 0.0,
+            }
+            continue
+
+        beat_col = "beat" if "beat" in subset.columns else None
+        clv_col = "clv" if "clv" in subset.columns else None
+
+        beat_pct = float(subset[beat_col].mean() * 100) if beat_col else 0.0
+        avg_clv = float(subset[clv_col].mean()) if clv_col else 0.0
+
+        tier_stats[tier_name] = {
+            "count": n,
+            "beat_close_pct": round(beat_pct, 1),
+            "avg_clv_dec": round(avg_clv, 6),
+            "avg_clv_prob": round(avg_clv, 6),
+        }
+
+    result["tier_stats"] = tier_stats
+
+    # Distribution summary (p50/p75/p90/p95)
+    pct_levels = [50, 75, 90, 95]
+    dist: dict = {}
+    for col_name in ("tier_score", "edge_z", "edge_ev_100",
+                      "agreement_score", "books_used", "quality_score"):
+        actual_col = col_name
+        if col_name == "edge_ev_100" and "edge_ev_100" not in df.columns:
+            continue
+        if actual_col not in df.columns:
+            continue
+        vals = df[actual_col].dropna().tolist()
+        if not vals:
+            continue
+        display_name = "edge_ev_shrunk_pct" if col_name == "edge_ev_100" else col_name
+        dist[display_name] = {
+            f"p{p}": round(float(pd.Series(vals).quantile(p / 100.0)), 4)
+            for p in pct_levels
+        }
+
+    result["distribution"] = dist
+
+    return result
 
 
 # ── JSON serialisation helpers ──────────────────────────────────────
