@@ -460,7 +460,7 @@ def _sidebar():
 
         if st.button(
             label, key="btn_open_slip", type="primary",
-            use_container_width=True,
+            width='stretch',
         ):
             st.session_state["_open_slip"] = True
 
@@ -486,7 +486,7 @@ def _sidebar():
         )
         if st.button(
             hist_label, key="btn_open_history",
-            use_container_width=True,
+            width='stretch',
         ):
             st.session_state["_open_history"] = True
 
@@ -909,7 +909,7 @@ def _sports_list():
             "API Key": s.get("key", ""),
             "Group": s.get("group", ""),
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1454,7 +1454,7 @@ def _detail_odds(event_name: str, game_lines):
 
     if not display_df.empty:
         styled = _highlight_best(display_df, raw_df)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width='stretch', hide_index=True)
 
     # Best-value callouts for selected market
     if selected_bt == BetType.MONEYLINE and len(bt_lines) >= 2:
@@ -1589,7 +1589,7 @@ def _detail_arbs(event_name: str):
                 })
             st.dataframe(
                 pd.DataFrame(rows),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -1731,7 +1731,7 @@ def _detail_movements(event_name: str):
         })
 
     st.dataframe(
-        pd.DataFrame(rows), use_container_width=True, hide_index=True,
+        pd.DataFrame(rows), width='stretch', hide_index=True,
     )
 
 
@@ -1766,7 +1766,7 @@ def _detail_history(event_name: str, *, api_event_id: str | None = None):
     if "Game" in df.columns:
         df = df.drop(columns=["Game"])
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width='stretch', hide_index=True)
     st.caption(f"Showing {len(lines)} rows")
 
 
@@ -2040,7 +2040,7 @@ def _slip_dialog():
     with bcols[0]:
         if st.button(
             "Mock Submit", key="dlg_submit", type="primary",
-            use_container_width=True,
+            width='stretch',
         ):
             try:
                 rec_meta = st.session_state.pop("_slip_rec_meta", None)
@@ -2063,7 +2063,7 @@ def _slip_dialog():
                 st.error(str(exc))
             st.rerun()
     with bcols[1]:
-        if st.button("Close", key="dlg_close", use_container_width=True):
+        if st.button("Close", key="dlg_close", width='stretch'):
             st.rerun()
 
 
@@ -3066,7 +3066,7 @@ def _render_slate_table(entries: list[dict]) -> None:
         })
     st.dataframe(
         pd.DataFrame(rows),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )
     # Per-row Why? expanders below the table
@@ -3156,19 +3156,19 @@ def _bet_history_dialog():
                 with scols[0]:
                     if st.button(
                         "Won", key=f"hist_won_{bet.id}",
-                        type="primary", use_container_width=True,
+                        type="primary", width='stretch',
                     ):
                         _settle(bet.id, "won")
                 with scols[1]:
                     if st.button(
                         "Lost", key=f"hist_lost_{bet.id}",
-                        use_container_width=True,
+                        width='stretch',
                     ):
                         _settle(bet.id, "lost")
                 with scols[2]:
                     if st.button(
                         "Push", key=f"hist_push_{bet.id}",
-                        use_container_width=True,
+                        width='stretch',
                     ):
                         _settle(bet.id, "push")
 
@@ -3262,7 +3262,7 @@ def _bet_history_dialog():
                             st.caption(" | ".join(parts))
 
     st.divider()
-    if st.button("Close", key="hist_close", use_container_width=True):
+    if st.button("Close", key="hist_close", width='stretch'):
         st.rerun()
 
 
@@ -3398,7 +3398,7 @@ def _page_performance_body(store):
                 })
                 st.dataframe(
                     display_tbl,
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True,
                 )
     else:
@@ -3580,7 +3580,7 @@ def _page_performance_body(store):
             _alpha_clv_color,
             subset=["Avg CLV (Prob)", "Avg CLV (American)"],
         )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width='stretch', hide_index=True)
     else:
         st.info("Not enough closed legs yet to evaluate alpha.")
 
