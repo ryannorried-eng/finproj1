@@ -168,3 +168,58 @@ def test_date_grouping_respects_timezone():
     # 01:30 UTC Jan 16 → 7:30 PM CST Jan 15
     dt2 = datetime(2024, 1, 16, 1, 30, tzinfo=timezone.utc)
     assert dt2.astimezone(central).date().day == 15
+
+
+# ── test_get_db_path / has_persistent_db ──────────────────────────────────
+
+
+def test_get_db_path_reads_env(monkeypatch, tmp_path):
+    """get_db_path returns the DB_PATH environment variable when set."""
+    db = str(tmp_path / "custom.db")
+    monkeypatch.setenv("DB_PATH", db)
+
+    mock_st = MagicMock()
+    mock_st.secrets.get.return_value = None
+
+    with patch.dict("sys.modules", {"streamlit": mock_st}):
+        cfg = _reload_config()
+        assert cfg.get_db_path() == db
+
+
+def test_get_db_path_none_when_unset(monkeypatch):
+    """get_db_path returns None when DB_PATH is not set anywhere."""
+    monkeypatch.delenv("DB_PATH", raising=False)
+
+    mock_st = MagicMock()
+    mock_st.secrets.get.return_value = None
+
+    with patch.dict("sys.modules", {"streamlit": mock_st}):
+        cfg = _reload_config()
+        assert cfg.get_db_path() is None
+
+
+def test_has_persistent_db_true_when_db_path_file_exists(monkeypatch, tmp_path):
+    """has_persistent_db returns True when DB_PATH points to an existing file."""
+    db = tmp_path / "custom.db"
+    db.touch()
+    monkeypatch.setenv("DB_PATH", str(db))
+
+    mock_st = MagicMock()
+    mock_st.secrets.get.return_value = None
+
+    with patch.dict("sys.modules", {"streamlit": mock_st}):
+        cfg = _reload_config()
+        assert cfg.has_persistent_db() is True
+
+
+def test_has_persistent_db_false_when_db_path_file_missing(monkeypatch, tmp_path):
+    """has_persistent_db returns False when DB_PATH is set but file doesn't exist yet."""
+    db = str(tmp_path / "nonexistent.db")
+    monkeypatch.setenv("DB_PATH", db)
+
+    mock_st = MagicMock()
+    mock_st.secrets.get.return_value = None
+
+    with patch.dict("sys.modules", {"streamlit": mock_st}):
+        cfg = _reload_config()
+        assert cfg.has_persistent_db() is False

@@ -43,16 +43,28 @@ def get_database_url() -> str | None:
     return _read_secret("DATABASE_URL")
 
 
+def get_db_path() -> str | None:
+    """Return DB_PATH if a custom SQLite path is configured, else None.
+
+    Set ``DB_PATH`` in Streamlit secrets or as an environment variable to
+    point the app at a persistent volume path (e.g. Railway, Render, Fly.io).
+    When unset, LineStore defaults to ~/.line_tracker/lines.db.
+    """
+    return _read_secret("DB_PATH")
+
+
 def get_display_timezone() -> str:
     """Return the IANA timezone to use for display (default Central)."""
     return _read_secret("DISPLAY_TZ", "America/Chicago") or "America/Chicago"
 
 
 def has_persistent_db() -> bool:
-    """True when a DATABASE_URL or local SQLite file is accessible."""
-    if get_database_url():
-        return True
-    # Check for the default SQLite path
+    """True when a persistent SQLite file is accessible."""
+    configured = get_db_path()
+    if configured:
+        from pathlib import Path
+
+        return Path(configured).exists()
     from line_tracker.storage import DEFAULT_DB_PATH
 
     return DEFAULT_DB_PATH.exists()

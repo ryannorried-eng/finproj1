@@ -50,7 +50,7 @@ from line_tracker.calibration import (
     format_calibration_report,
     load_clv_training_df,
 )
-from line_tracker.config import data_mode, get_api_key, get_display_timezone
+from line_tracker.config import data_mode, get_api_key, get_db_path, get_display_timezone
 from line_tracker.market_structure import analyze_market
 from line_tracker.models import BetType
 from line_tracker.movements import detect_moves
@@ -122,7 +122,7 @@ _LABEL_TO_BT = {v: k for k, v in BET_TYPE_LABELS.items()}
 # Sentinel used to sort games with missing commence_time to the bottom.
 _FAR_FUTURE = datetime(9999, 1, 1, tzinfo=timezone.utc)
 
-DB_PATH = str(DEFAULT_DB_PATH)
+DB_PATH: str = get_db_path() or str(DEFAULT_DB_PATH)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -470,7 +470,7 @@ def _sidebar():
         # --- Bet History button ---
         try:
             if data_mode() == "db":
-                with LineStore() as _db:
+                with LineStore(DB_PATH) as _db:
                     active_count = len(_db.get_bets(status="active"))
                     settled_count = len(
                         [b for b in _db.get_bets() if b["status"] != "active"],
@@ -2047,7 +2047,7 @@ def _slip_dialog():
                 bet = submit_bet_state(st.session_state, stake)
                 st.session_state["_slip_submitted"] = True
                 try:
-                    with LineStore() as _s:
+                    with LineStore(DB_PATH) as _s:
                         if rec_meta:
                             submit_bet_persisted(
                                 bet, _s,
@@ -3085,7 +3085,7 @@ def _bet_history_dialog():
     """Modal showing Active and Settled bets (loaded from SQLite)."""
     init_bet_state(st.session_state)
     try:
-        with LineStore() as _db:
+        with LineStore(DB_PATH) as _db:
             active = load_bets_from_db(_db, status="active")
             settled = load_bets_from_db(_db, status=None)
         settled = [b for b in settled if b.status in ("won", "lost", "push")]
@@ -3145,7 +3145,7 @@ def _bet_history_dialog():
 
                 def _settle(bid, outcome, _key=""):
                     try:
-                        with LineStore() as _s:
+                        with LineStore(DB_PATH) as _s:
                             settle_bet_persisted(bid, outcome, _s)
                     except Exception:
                         pass  # CLV close + DB settle is best-effort
@@ -3239,7 +3239,7 @@ def _bet_history_dialog():
 
                     # -- CLV metrics (best-effort) --
                     try:
-                        with LineStore() as _s:
+                        with LineStore(DB_PATH) as _s:
                             clv_rows = _s.get_clv(bet.id)
                     except Exception:
                         clv_rows = []
