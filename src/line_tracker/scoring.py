@@ -3,6 +3,8 @@
 Provides a single, deterministic source of truth for:
 - Alpha field computation (delegates to ``alpha.py``)
 - Hybrid risk-adjusted score computation
+- Market weighting layer (reliability bias for tiering + hybrid ranking)
+- Effective Kelly sizing (confidence-scaled bankroll fraction)
 - Candidate ranking with pluggable modes
 
 No Streamlit imports, no DB, no global state.
@@ -13,12 +15,29 @@ from __future__ import annotations
 import os
 
 from line_tracker.alpha import alpha_label, alpha_score
+from line_tracker.config import (
+    get_kelly_mult_high,
+    get_kelly_mult_low,
+    get_kelly_mult_med,
+    get_market_weight_longshot,
+    get_market_weight_ml_dog,
+    get_market_weight_ml_fav,
+    get_market_weight_spread,
+    get_market_weight_total,
+)
 
 # ── Hybrid score weights ──────────────────────────────────────────────
 _W_ALPHA = 0.40
 _W_KELLY = 0.40
 _W_PROB = 0.20
 _KELLY_CAP = 0.05  # normalise kelly_suggested to this cap
+
+# ── Market weight defaults (overridable via env/secrets) ─────────────
+_MW_LONGSHOT_PROB_THRESHOLD = 0.20
+_MW_FAVORITE_PROB_THRESHOLD = 0.55
+
+# ── Kelly effective cap (same as kelly_base cap in core/math.py) ─────
+_KELLY_EFFECTIVE_CAP = 0.25
 
 
 def compute_alpha_fields(entry: dict) -> dict:
@@ -39,20 +58,109 @@ def compute_alpha_fields(entry: dict) -> dict:
     }
 
 
+# ── Market weighting layer ────────────────────────────────────────────
+
+
+def _getval(obj: object, key: str, default: object = None) -> object:
+    """Read *key* from a dict or an object attribute."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def classify_market(entry: object) -> str:
+    """Classify *entry* into a market-weight category.
+
+    Returns one of ``"spreads"``, ``"totals"``, ``"ml_favorite"``,
+    ``"ml_underdog"``, or ``"unknown"``.
+
+    Works with both dict entries and ``BetRecommendation`` objects.
+    """
+    market = str(_getval(entry, "market", "") or "").lower()
+
+    if market in ("spread", "spreads"):
+        return "spreads"
+    if market in ("total", "totals"):
+        return "totals"
+    if market in ("moneyline", "h2h"):
+        odds = _getval(entry, "best_odds", None)
+        prob = _getval(entry, "consensus_prob", None)
+        if _is_favorite(odds, prob):
+            return "ml_favorite"
+        return "ml_underdog"
+    return "unknown"
+
+
+def _is_favorite(odds: float | None, prob: float | None) -> bool:
+    """Return True if odds/prob indicate a favorite."""
+    if odds is not None:
+        try:
+            odds_f = float(odds)
+            if odds_f < 0:
+                return True
+            # Positive American odds → decimal >= 2.0 → underdog
+        except (TypeError, ValueError):
+            pass
+    if prob is not None:
+        try:
+            if float(prob) >= _MW_FAVORITE_PROB_THRESHOLD:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def market_weight(entry: object) -> float:
+    """Compute the market reliability weight for *entry*.
+
+    Soft bias toward more reliable market types.  Does NOT remove
+    candidates — just scales tier_score and hybrid_score.
+
+    Works with both dict entries and ``BetRecommendation`` objects.
+    """
+    cat = classify_market(entry)
+
+    weight_map = {
+        "spreads": get_market_weight_spread(),
+        "totals": get_market_weight_total(),
+        "ml_favorite": get_market_weight_ml_fav(),
+        "ml_underdog": get_market_weight_ml_dog(),
+        "unknown": 1.0,
+    }
+    w = weight_map.get(cat, 1.0)
+
+    # Longshot penalty: ML + consensus_prob < threshold
+    if cat in ("ml_favorite", "ml_underdog"):
+        prob = _getval(entry, "consensus_prob", 1.0)
+        try:
+            if float(prob or 1.0) < _MW_LONGSHOT_PROB_THRESHOLD:
+                w *= get_market_weight_longshot()
+        except (TypeError, ValueError):
+            pass
+
+    return round(w, 6)
+
+
+# ── Hybrid score computation ─────────────────────────────────────────
+
+
 def compute_hybrid_fields(entry: dict) -> dict:
     """Compute the hybrid risk-adjusted ranking score for *entry*.
 
-    Formula (unchanged from original ``slate.compute_hybrid_score``):
+    Raw formula (unchanged):
         alpha_norm   = alpha_score / 100
         kelly_norm   = clamp(kelly_suggested / 0.05, 0, 1)
         prob_norm    = consensus_prob
 
-        hybrid_score = 0.40 * alpha_norm
-                     + 0.40 * kelly_norm
-                     + 0.20 * prob_norm
+        hybrid_score_raw = 0.40 * alpha_norm
+                         + 0.40 * kelly_norm
+                         + 0.20 * prob_norm
+
+    Market weighting (new):
+        hybrid_score = hybrid_score_raw * market_weight(entry)
 
     Returns a dict with keys:
-        hybrid_score, hybrid_components
+        hybrid_score, hybrid_score_raw, market_weight, hybrid_components
 
     Pure function – does **not** mutate *entry*.
     """
@@ -64,16 +172,22 @@ def compute_hybrid_fields(entry: dict) -> dict:
     kelly_norm = max(0.0, min(kelly / _KELLY_CAP, 1.0))
     prob_norm = prob
 
-    score = round(
+    raw = round(
         _W_ALPHA * alpha_norm + _W_KELLY * kelly_norm + _W_PROB * prob_norm,
         4,
     )
+    mw = market_weight(entry)
+    score = round(raw * mw, 4)
+
     return {
+        "hybrid_score_raw": raw,
         "hybrid_score": score,
+        "market_weight": mw,
         "hybrid_components": {
             "alpha_norm": round(alpha_norm, 4),
             "kelly_norm": round(kelly_norm, 4),
             "prob_norm": round(prob_norm, 4),
+            "market_weight": mw,
             "weights": {
                 "alpha": _W_ALPHA,
                 "kelly": _W_KELLY,
@@ -278,16 +392,54 @@ def compute_confidence_label(entry: dict) -> str:
     return "Low"
 
 
+# ── Effective Kelly sizing ────────────────────────────────────────────
+
+
+def compute_kelly_effective(entry: dict) -> dict:
+    """Compute effective Kelly fields from kelly_base and confidence_label.
+
+    kelly_effective = kelly_base * confidence_label_multiplier
+
+    The multiplier is based on the *confidence_label* (quality/prob/hold/alpha),
+    NOT the edge-z ``confidence`` field.
+
+    Returns a dict with keys:
+        kelly_raw, kelly_multiplier, kelly_effective
+    """
+    kelly_raw = entry.get("kelly_base", 0.0) or 0.0
+    conf_label = entry.get("confidence_label", "Low")
+
+    mult_map = {
+        "High": get_kelly_mult_high(),
+        "Medium": get_kelly_mult_med(),
+        "Low": get_kelly_mult_low(),
+    }
+    mult = mult_map.get(conf_label, get_kelly_mult_low())
+    kelly_eff = round(kelly_raw * mult, 6)
+    # Clamp to same bounds as kelly_base
+    kelly_eff = max(0.0, min(kelly_eff, _KELLY_EFFECTIVE_CAP))
+
+    return {
+        "kelly_raw": round(kelly_raw, 6),
+        "kelly_multiplier": mult,
+        "kelly_effective": kelly_eff,
+    }
+
+
+# ── Convenience: enrich a single entry with all scoring fields ────────
+
+
 def enrich_entry(entry: dict) -> dict:
-    """Add alpha, hybrid, and confidence-label fields to *entry* (mutates).
+    """Add alpha, hybrid, confidence-label, and kelly-effective fields (mutates).
 
     Convenience wrapper that calls ``compute_alpha_fields``,
-    ``compute_hybrid_fields``, and ``compute_confidence_label`` and
-    merges results into *entry*.
+    ``compute_hybrid_fields``, ``compute_confidence_label``, and
+    ``compute_kelly_effective`` and merges results into *entry*.
 
     Returns *entry* for chaining.
     """
     entry.update(compute_alpha_fields(entry))
     entry.update(compute_hybrid_fields(entry))
     entry["confidence_label"] = compute_confidence_label(entry)
+    entry.update(compute_kelly_effective(entry))
     return entry
