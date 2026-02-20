@@ -597,6 +597,18 @@ def assign_tiers(
     else:
         _METHODS[method](recommendations)
 
+    # ── Confidence gating: constrain Tier 1 eligibility ──────────
+    # A Tier 1 candidate must satisfy:
+    #   consensus_prob >= 0.40  OR  alpha_label == "Strong"
+    # If not, demote to Tier 2 (candidate is NOT removed from ranking).
+    _CONFIDENCE_GATE_PROB = 0.40
+    for rec in recommendations:
+        if rec.bet_tier == TIER_1:
+            prob = getattr(rec, "consensus_prob", 1.0)
+            a_label = getattr(rec, "alpha_label", "")
+            if prob < _CONFIDENCE_GATE_PROB and a_label != "Strong":
+                rec.bet_tier = TIER_2
+
     # Propagate bet_tier to attached BestBetResult objects
     for rec in recommendations:
         bbr = getattr(rec, "best_bet_result", None)

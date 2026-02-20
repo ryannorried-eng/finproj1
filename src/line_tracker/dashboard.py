@@ -1068,6 +1068,17 @@ def _detail_best_bet_section(game_lines):
     # Mode-aware filtering (hit mode skips edge gate).
     qualified = filter_candidates(ranked, ranking_mode, min_edge, min_quality)
 
+    # ── Confidence-gating: promote best non-Low candidate as primary ──
+    # Hit mode: prefer High/Medium confidence_label as primary card.
+    # Hybrid mode: prefer High/Medium confidence_label as primary card.
+    # Value mode: no gating (EV-first); always use ranked[0].
+    if ranking_mode in ("hit", "hybrid") and len(qualified) > 1:
+        non_low = [e for e in qualified if e.get("confidence_label") != "Low"]
+        if non_low:
+            primary = non_low[0]
+            others_q = [e for e in qualified if e is not primary]
+            qualified = [primary] + others_q
+
     # ── Thin-market UX note ──────────────────────────────────────
     ranked_markets = {e.get("market", "").lower() for e in ranked}
     has_ml = "moneyline" in ranked_markets
@@ -1116,15 +1127,24 @@ def _detail_best_bet_section(game_lines):
                 f"**{top.consensus_prob_weighted * 100:.1f}%** | "
                 f"Breakeven: **{top.breakeven_prob * 100:.1f}%**"
             )
+            # Confidence-label badge
+            _cl = top_e.get("confidence_label", "")
+            _cl_colors = {"High": "green", "Medium": "orange", "Low": "gray"}
+            _cl_color = _cl_colors.get(_cl, "gray")
+            _cl_badge = f":{_cl_color}[**[{_cl} Confidence]**]" if _cl else ""
+
             # Alpha + Hybrid badge
             st.markdown(
+                f"{_cl_badge}  "
                 f"Market confidence: **{top.confidence}** | "
                 f"Quality: **{top.quality_score}/100 ({top.quality_tier})** | "
                 f"Alpha: **{top_e.get('alpha_score', '—')} "
                 f"({top_e.get('alpha_label', '—')})** | "
                 f"Hybrid: **{top_e.get('hybrid_score', 0):.3f}**",
                 help=(
-                    "Confidence measures sportsbook disagreement. "
+                    "Confidence Label is a gating signal (High/Medium/Low) "
+                    "derived from quality, probability, hold, and alpha. "
+                    "Market confidence measures sportsbook disagreement. "
                     "Quality is a composite score of edge, agreement, "
                     "coverage, and data freshness. "
                     "Alpha is a 0–100 robustness score. "
@@ -2968,7 +2988,14 @@ def _render_slate_card(entry: dict, rank: int | None = None) -> None:
             )
         with cols[2]:
             st.metric("Slate Score", f"{entry['slate_score']:.0f}")
-            st.caption(f"Confidence: {entry['confidence']}")
+            _cl = entry.get("confidence_label", "")
+            _cl_colors = {"High": "green", "Medium": "orange", "Low": "gray"}
+            _cl_color = _cl_colors.get(_cl, "gray")
+            _cl_badge = f":{_cl_color}[{_cl} Confidence]" if _cl else ""
+            st.caption(
+                f"Confidence: {entry['confidence']}"
+                + (f" | {_cl_badge}" if _cl_badge else "")
+            )
             k_sugg = entry.get("kelly_suggested", 0)
             if k_sugg and k_sugg > 0:
                 br = _bankroll()
@@ -3062,6 +3089,7 @@ def _render_slate_table(entries: list[dict]) -> None:
             "Alpha": _alpha_col,
             "Tier": entry.get("bet_tier", ""),
             "Confidence": entry["confidence"],
+            "Conf. Label": entry.get("confidence_label", ""),
             "Sizing": sizing_str,
         })
     st.dataframe(

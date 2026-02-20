@@ -438,6 +438,80 @@ def alpha_clv_report(rows: list[dict]) -> dict:
     }
 
 
+def confidence_label_report(df: pd.DataFrame) -> dict:
+    """Performance breakdown by ``confidence_label_at_pick``.
+
+    Returns ``{"by_label": {label: {count, beating_pct, avg_clv_decimal,
+    avg_clv_prob}}, "by_prob_bucket": {bucket: same}}``.
+
+    If the ``confidence_label_at_pick`` column is not present, falls back
+    to ``confidence_at_pick`` (legacy data).
+    """
+    result: dict = {"by_label": {}, "by_prob_bucket": {}}
+    if df.empty:
+        return result
+
+    # ── Part 1: by confidence_label ────────────────────────────────
+    label_col = (
+        "confidence_label_at_pick"
+        if "confidence_label_at_pick" in df.columns
+        else None
+    )
+    if label_col:
+        for label in ("High", "Medium", "Low"):
+            sub = df[df[label_col] == label]
+            n = len(sub)
+            if n == 0:
+                result["by_label"][label] = {
+                    "count": 0, "beating_pct": 0.0,
+                    "avg_clv_decimal": 0.0, "avg_clv_prob": 0.0,
+                }
+                continue
+            result["by_label"][label] = {
+                "count": n,
+                "beating_pct": round(
+                    100.0 * (sub["clv_prob"] > 0).sum() / n, 1,
+                ),
+                "avg_clv_decimal": round(float(sub["clv_decimal"].mean()), 4),
+                "avg_clv_prob": round(float(sub["clv_prob"].mean()), 4),
+            }
+
+    # ── Part 2: by probability bucket ──────────────────────────────
+    prob_col = None
+    for candidate in ("consensus_prob_at_pick", "consensus_prob"):
+        if candidate in df.columns:
+            prob_col = candidate
+            break
+
+    if prob_col:
+        buckets = [
+            ("< 0.30", lambda p: p < 0.30),
+            ("0.30–0.45", lambda p: 0.30 <= p < 0.45),
+            ("> 0.45", lambda p: p >= 0.45),
+        ]
+        probs = pd.to_numeric(df[prob_col], errors="coerce")
+        for label, mask_fn in buckets:
+            mask = probs.apply(mask_fn)
+            sub = df[mask]
+            n = len(sub)
+            if n == 0:
+                result["by_prob_bucket"][label] = {
+                    "count": 0, "beating_pct": 0.0,
+                    "avg_clv_decimal": 0.0, "avg_clv_prob": 0.0,
+                }
+                continue
+            result["by_prob_bucket"][label] = {
+                "count": n,
+                "beating_pct": round(
+                    100.0 * (sub["clv_prob"] > 0).sum() / n, 1,
+                ),
+                "avg_clv_decimal": round(float(sub["clv_decimal"].mean()), 4),
+                "avg_clv_prob": round(float(sub["clv_prob"].mean()), 4),
+            }
+
+    return result
+
+
 def calibration_stats(df: pd.DataFrame) -> dict[str, dict]:
     """Compare CLV performance across proxy tier groups.
 

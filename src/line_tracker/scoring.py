@@ -237,14 +237,57 @@ def _debug_ranking(candidates: list[dict], mode: str) -> None:
 # ── Convenience: enrich a single entry with all scoring fields ────────
 
 
-def enrich_entry(entry: dict) -> dict:
-    """Add alpha and hybrid fields to *entry* (mutates in-place).
+def compute_confidence_label(entry: dict) -> str:
+    """Derive a confidence label from existing signals.
 
-    Convenience wrapper that calls ``compute_alpha_fields`` and
-    ``compute_hybrid_fields`` and merges results into *entry*.
+    This is a **gating-only** label used for Tier 1 eligibility and
+    primary-card selection.  It does NOT affect EV math, ranking order,
+    or the existing ``confidence`` field (edge-z based).
+
+    Inputs (all read from *entry*):
+        consensus_prob, quality_score, market_hold_median (as hold_max),
+        alpha_label, edge_z (optional).
+
+    Returns ``"High"``, ``"Medium"``, or ``"Low"``.
+    """
+    quality_score = entry.get("quality_score", 0)
+    consensus_prob = entry.get("consensus_prob", 0.0)
+    hold_max = entry.get("market_hold_median", 0.0) / 100.0  # pct → decimal
+    alpha_label_val = entry.get("alpha_label", "")
+    edge_z = entry.get("edge_z", 0.0)
+
+    # HIGH: quality >= 70, prob >= 0.45, hold <= 0.09,
+    #       AND (alpha Strong OR edge_z >= 0.8)
+    if (
+        quality_score >= 70
+        and consensus_prob >= 0.45
+        and hold_max <= 0.09
+        and (alpha_label_val == "Strong" or edge_z >= 0.8)
+    ):
+        return "High"
+
+    # MEDIUM: quality >= 60, prob >= 0.35, hold <= 0.10
+    if (
+        quality_score >= 60
+        and consensus_prob >= 0.35
+        and hold_max <= 0.10
+    ):
+        return "Medium"
+
+    # LOW: everything else
+    return "Low"
+
+
+def enrich_entry(entry: dict) -> dict:
+    """Add alpha, hybrid, and confidence-label fields to *entry* (mutates).
+
+    Convenience wrapper that calls ``compute_alpha_fields``,
+    ``compute_hybrid_fields``, and ``compute_confidence_label`` and
+    merges results into *entry*.
 
     Returns *entry* for chaining.
     """
     entry.update(compute_alpha_fields(entry))
     entry.update(compute_hybrid_fields(entry))
+    entry["confidence_label"] = compute_confidence_label(entry)
     return entry
