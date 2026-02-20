@@ -3089,6 +3089,10 @@ def _bet_history_dialog():
             active = load_bets_from_db(_db, status="active")
             settled = load_bets_from_db(_db, status=None)
         settled = [b for b in settled if b.status in ("won", "lost", "push")]
+        # Sync DB-loaded active bets into session state so settle_bet() can
+        # find them when the user clicks Won / Lost / Push.
+        st.session_state["active_bets"] = active
+        st.session_state["settled_bets"] = settled
     except Exception:
         active = st.session_state["active_bets"]
         settled = st.session_state["settled_bets"]
