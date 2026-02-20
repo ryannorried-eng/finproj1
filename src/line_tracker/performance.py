@@ -442,7 +442,12 @@ def confidence_label_report(df: pd.DataFrame) -> dict:
     """Performance breakdown by ``confidence_label_at_pick``.
 
     Returns ``{"by_label": {label: {count, beating_pct, avg_clv_decimal,
-    avg_clv_prob}}, "by_prob_bucket": {bucket: same}}``.
+    avg_clv_prob, avg_kelly_raw, avg_kelly_effective, total_kelly_effective}},
+    "by_prob_bucket": {bucket: same}}``.
+
+    Kelly effective fields are included when the corresponding columns
+    (``kelly_base_at_pick`` / ``kelly_effective_at_pick``) exist in the
+    DataFrame.
 
     If the ``confidence_label_at_pick`` column is not present, falls back
     to ``confidence_at_pick`` (legacy data).
@@ -450,6 +455,25 @@ def confidence_label_report(df: pd.DataFrame) -> dict:
     result: dict = {"by_label": {}, "by_prob_bucket": {}}
     if df.empty:
         return result
+
+    has_kelly_raw = "kelly_base_at_pick" in df.columns
+    has_kelly_eff = "kelly_effective_at_pick" in df.columns
+
+    def _kelly_stats(sub: pd.DataFrame) -> dict:
+        """Compute optional Kelly stats for a sub-DataFrame."""
+        stats: dict = {}
+        if has_kelly_raw:
+            raw = pd.to_numeric(sub["kelly_base_at_pick"], errors="coerce")
+            stats["avg_kelly_raw"] = round(float(raw.mean()), 6) if len(raw) else 0.0
+        if has_kelly_eff:
+            eff = pd.to_numeric(
+                sub["kelly_effective_at_pick"], errors="coerce",
+            )
+            avg_ke = round(float(eff.mean()), 6) if len(eff) else 0.0
+            tot_ke = round(float(eff.sum()), 6) if len(eff) else 0.0
+            stats["avg_kelly_effective"] = avg_ke
+            stats["total_kelly_effective"] = tot_ke
+        return stats
 
     # ── Part 1: by confidence_label ────────────────────────────────
     label_col = (
@@ -462,12 +486,14 @@ def confidence_label_report(df: pd.DataFrame) -> dict:
             sub = df[df[label_col] == label]
             n = len(sub)
             if n == 0:
-                result["by_label"][label] = {
+                entry = {
                     "count": 0, "beating_pct": 0.0,
                     "avg_clv_decimal": 0.0, "avg_clv_prob": 0.0,
                 }
+                entry.update(_kelly_stats(sub))
+                result["by_label"][label] = entry
                 continue
-            result["by_label"][label] = {
+            entry = {
                 "count": n,
                 "beating_pct": round(
                     100.0 * (sub["clv_prob"] > 0).sum() / n, 1,
@@ -475,6 +501,8 @@ def confidence_label_report(df: pd.DataFrame) -> dict:
                 "avg_clv_decimal": round(float(sub["clv_decimal"].mean()), 4),
                 "avg_clv_prob": round(float(sub["clv_prob"].mean()), 4),
             }
+            entry.update(_kelly_stats(sub))
+            result["by_label"][label] = entry
 
     # ── Part 2: by probability bucket ──────────────────────────────
     prob_col = None

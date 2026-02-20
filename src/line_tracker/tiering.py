@@ -18,6 +18,8 @@ from __future__ import annotations
 from statistics import median as _median
 from typing import TYPE_CHECKING
 
+from line_tracker.scoring import market_weight
+
 if TYPE_CHECKING:
     from line_tracker.best_bets import BetRecommendation
 
@@ -381,7 +383,7 @@ def _rec_tier_score(rec: BetRecommendation) -> float:
     edge_ev_shrunk_pct = getattr(rec, "edge_ev_shrunk", 0.0) * 100.0
     hold = getattr(rec, "market_hold_median", 0.0) / 100.0  # pct → decimal
     consensus_prob = getattr(rec, "consensus_prob", 1.0)
-    alpha_label = getattr(rec, "alpha_label", "")
+    alpha_lbl = getattr(rec, "alpha_label", "")
     return tier_score(
         edge_z=rec.edge_z,
         edge_ev_shrunk_pct=edge_ev_shrunk_pct,
@@ -390,8 +392,21 @@ def _rec_tier_score(rec: BetRecommendation) -> float:
         quality_score=float(rec.quality_score),
         hold_max=hold,
         consensus_prob=consensus_prob,
-        alpha_label=alpha_label,
+        alpha_label=alpha_lbl,
     )
+
+
+def _rec_tier_score_weighted(rec: BetRecommendation) -> tuple[float, float]:
+    """Compute (base_score, weighted_score) for a BetRecommendation.
+
+    ``weighted_score = base_score * market_weight(rec)``.
+    Quantile cutoffs use the weighted score; the base is preserved for
+    reporting/debugging.
+    """
+    base = _rec_tier_score(rec)
+    mw = market_weight(rec)
+    weighted = round(base * mw, 6)
+    return base, weighted
 
 
 def assign_tiers_quantile(
@@ -403,6 +418,10 @@ def assign_tiers_quantile(
     min_quality: int = _Q_MIN_QUALITY,
 ) -> dict:
     """Assign tiers via quantile/target-volume bucketing.
+
+    Tier scores are multiplied by ``market_weight`` before quantile
+    bucketing so that more reliable markets (spreads) get a soft
+    advantage over less reliable ones (ML underdogs).
 
     Parameters
     ----------
@@ -421,9 +440,11 @@ def assign_tiers_quantile(
     Returns
     -------
     dict with keys:
-        ``tier1_cut``  — score cut point for Tier 1
-        ``tier2_cut``  — score cut point for Tier 2
-        ``scores``     — list of (index, score) for all recs
+        ``tier1_cut``  — score cut point for Tier 1 (weighted)
+        ``tier2_cut``  — score cut point for Tier 2 (weighted)
+        ``scores``     — list of (index, weighted_score) for all recs
+        ``base_scores`` — list of (index, base_score) for debugging
+        ``market_weights`` — list of (index, market_weight) for debugging
         ``n_eligible`` — number of eligible candidates
         ``n_total``    — total recs
         ``fallback``   — True if small-slate fallback was used
@@ -434,15 +455,22 @@ def assign_tiers_quantile(
             "tier1_cut": 0.0,
             "tier2_cut": 0.0,
             "scores": [],
+            "base_scores": [],
+            "market_weights": [],
             "n_eligible": 0,
             "n_total": 0,
             "fallback": False,
         }
 
-    # ── Compute scores for all recs ──────────────────────────────────
-    scores: list[tuple[int, float]] = []
+    # ── Compute base and weighted scores for all recs ────────────────
+    scores: list[tuple[int, float]] = []          # (idx, weighted)
+    base_scores: list[tuple[int, float]] = []     # (idx, base)
+    mw_list: list[tuple[int, float]] = []         # (idx, market_weight)
     for i, rec in enumerate(recommendations):
-        scores.append((i, _rec_tier_score(rec)))
+        base, weighted = _rec_tier_score_weighted(rec)
+        scores.append((i, weighted))
+        base_scores.append((i, base))
+        mw_list.append((i, market_weight(rec)))
 
     # ── Eligible pool: positive shrunk edge + min quality ────────────
     eligible_indices: set[int] = set()
@@ -507,6 +535,8 @@ def assign_tiers_quantile(
         "tier1_cut": round(tier1_cut, 6) if tier1_cut != float("inf") else None,
         "tier2_cut": round(tier2_cut, 6) if tier2_cut != float("inf") else None,
         "scores": scores,
+        "base_scores": base_scores,
+        "market_weights": mw_list,
         "n_eligible": n_eligible,
         "n_total": n_total,
         "fallback": fallback,
@@ -697,3 +727,52 @@ def tier_frequency_report(
             round(sum(edges) / len(edges), 4) if edges else 0.0
         )
     return result
+
+
+def market_tier_report(
+    recs: list[BetRecommendation],
+) -> dict:
+    """Market breakdown for an already-tiered slate.
+
+    Returns a dict with:
+        ``by_market``   — {market_type: {count, tier1, tier2, ...}}
+        ``by_tier``     — {tier: {avg_market_weight}}
+    """
+    from line_tracker.scoring import classify_market as _classify_market
+
+    by_market: dict[str, dict] = {}
+    tier_weights: dict[str, list[float]] = {
+        TIER_1: [], TIER_2: [], TIER_3: [], STAY_AWAY: [],
+    }
+
+    for rec in recs:
+        mtype = _classify_market(rec)
+        t = rec.bet_tier or STAY_AWAY
+        mw = market_weight(rec)
+
+        if mtype not in by_market:
+            by_market[mtype] = {
+                "count": 0,
+                TIER_1: 0, TIER_2: 0, TIER_3: 0, STAY_AWAY: 0,
+                "avg_market_weight": 0.0,
+                "weights": [],
+            }
+        by_market[mtype]["count"] += 1
+        by_market[mtype][t] = by_market[mtype].get(t, 0) + 1
+        by_market[mtype]["weights"].append(mw)
+
+        tier_weights.setdefault(t, []).append(mw)
+
+    # Compute averages
+    for mtype, info in by_market.items():
+        ws = info.pop("weights")
+        info["avg_market_weight"] = round(sum(ws) / len(ws), 4) if ws else 0.0
+
+    by_tier: dict[str, dict] = {}
+    for tier in (TIER_1, TIER_2, TIER_3, STAY_AWAY):
+        ws = tier_weights.get(tier, [])
+        by_tier[tier] = {
+            "avg_market_weight": round(sum(ws) / len(ws), 4) if ws else 0.0,
+        }
+
+    return {"by_market": by_market, "by_tier": by_tier}

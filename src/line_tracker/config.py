@@ -102,3 +102,57 @@ def get_tier_min_candidates() -> int:
     """Minimum candidate count for stable quantile tiers (default 10)."""
     raw = _read_secret("TIER_MIN_CANDIDATES", "10")
     return int(raw) if raw else 10
+
+
+# ── Market weighting configuration ────────────────────────────────
+
+
+def get_market_weight_spread() -> float:
+    """Market weight for spreads (default 1.00)."""
+    raw = _read_secret("MARKET_W_SPREAD", "1.00")
+    return float(raw) if raw else 1.00
+
+
+def get_market_weight_total() -> float:
+    """Market weight for totals (default 0.95)."""
+    raw = _read_secret("MARKET_W_TOTAL", "0.95")
+    return float(raw) if raw else 0.95
+
+
+def get_market_weight_ml_fav() -> float:
+    """Market weight for moneyline favorites (default 0.90)."""
+    raw = _read_secret("MARKET_W_ML_FAV", "0.90")
+    return float(raw) if raw else 0.90
+
+
+def get_market_weight_ml_dog() -> float:
+    """Market weight for moneyline underdogs (default 0.75)."""
+    raw = _read_secret("MARKET_W_ML_DOG", "0.75")
+    return float(raw) if raw else 0.75
+
+
+def get_market_weight_longshot() -> float:
+    """Longshot penalty for ML, consensus_prob < 0.20 (default 0.90)."""
+    raw = _read_secret("MARKET_W_LONGSHOT", "0.90")
+    return float(raw) if raw else 0.90
+
+
+# ── Kelly effective multiplier configuration ──────────────────────
+
+
+def get_kelly_mult_high() -> float:
+    """Kelly effective multiplier for High confidence_label (default 1.00)."""
+    raw = _read_secret("KELLY_MULT_HIGH", "1.00")
+    return float(raw) if raw else 1.00
+
+
+def get_kelly_mult_med() -> float:
+    """Kelly effective multiplier for Medium confidence_label (default 0.70)."""
+    raw = _read_secret("KELLY_MULT_MED", "0.70")
+    return float(raw) if raw else 0.70
+
+
+def get_kelly_mult_low() -> float:
+    """Kelly effective multiplier for Low confidence_label (default 0.40)."""
+    raw = _read_secret("KELLY_MULT_LOW", "0.40")
+    return float(raw) if raw else 0.40
