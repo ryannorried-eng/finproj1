@@ -61,3 +61,32 @@ def has_persistent_db() -> bool:
 def data_mode() -> str:
     """Return ``'db'`` when a persistent database is available, else ``'live'``."""
     return "db" if has_persistent_db() else "live"
+
+
+# ── Quantile-tier configuration ─────────────────────────────────────
+
+
+def get_tier_method() -> str:
+    """Return the tiering method (default ``"quantile"``)."""
+    return _read_secret("TIER_METHOD", "quantile") or "quantile"
+
+
+def get_tier1_quantile() -> float:
+    """Top quantile share for Tier 1 (default 0.10 = top 10%)."""
+    raw = _read_secret("TIER1_Q", "0.10")
+    return float(raw) if raw else 0.10
+
+
+def get_tier2_quantile() -> float:
+    """Cumulative quantile for Tier 2 cutoff (default 0.35 = top 35%).
+
+    Tier 2 spans from the Tier 1 cutoff down to this cumulative share.
+    """
+    raw = _read_secret("TIER2_Q", "0.35")
+    return float(raw) if raw else 0.35
+
+
+def get_tier_min_candidates() -> int:
+    """Minimum candidate count for stable quantile tiers (default 10)."""
+    raw = _read_secret("TIER_MIN_CANDIDATES", "10")
+    return int(raw) if raw else 10
