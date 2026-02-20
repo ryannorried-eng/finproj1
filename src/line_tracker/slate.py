@@ -13,6 +13,7 @@ from line_tracker.market_structure import sharp_retail_divergence as _sharp_reta
 from line_tracker.models import BettingLine, BetType
 from line_tracker.scoring import (
     compute_alpha_fields as _compute_alpha_fields,
+    compute_confidence_label as _compute_confidence_label,
     compute_hybrid_fields as _compute_hybrid_fields,
     rank_candidates,
 )
@@ -844,6 +845,9 @@ def build_daily_slate(
 
             # ── Hybrid risk-adjusted ranking score ──────────────────
             compute_hybrid_score(entry)
+
+            # ── Confidence label (gating layer, not ranking) ─────────
+            entry["confidence_label"] = _compute_confidence_label(entry)
 
             all_entries.append(entry)
 
