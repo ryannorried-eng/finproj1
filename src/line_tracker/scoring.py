@@ -16,6 +16,11 @@ import os
 
 from line_tracker.alpha import alpha_label, alpha_score
 from line_tracker.config import (
+    get_conf_w_high,
+    get_conf_w_low,
+    get_conf_w_max,
+    get_conf_w_med,
+    get_conf_w_min,
     get_kelly_mult_high,
     get_kelly_mult_low,
     get_kelly_mult_med,
@@ -24,6 +29,7 @@ from line_tracker.config import (
     get_market_weight_ml_fav,
     get_market_weight_spread,
     get_market_weight_total,
+    get_pro_hybrid_market_conf,
 )
 
 # ── Hybrid score weights ──────────────────────────────────────────────
@@ -141,6 +147,43 @@ def market_weight(entry: object) -> float:
     return round(w, 6)
 
 
+# ── Confidence-adjusted hybrid market weight ──────────────────────────
+
+
+def confidence_factor(confidence_label: str) -> float:
+    """Return the confidence weight factor for *confidence_label*.
+
+    Maps ``"High"`` / ``"Medium"`` / ``"Low"`` to configurable multipliers.
+    Unknown labels default to the Medium factor.
+    """
+    factor_map = {
+        "High": get_conf_w_high(),
+        "Medium": get_conf_w_med(),
+        "Low": get_conf_w_low(),
+    }
+    return factor_map.get(confidence_label, get_conf_w_med())
+
+
+def hybrid_market_weight(entry: object) -> float:
+    """Compute the effective market weight for hybrid scoring.
+
+    When ``PRO_HYBRID_MARKET_CONF`` is **off** (default), returns the
+    base ``market_weight(entry)`` unchanged.
+
+    When the flag is **on**, the base weight is scaled by the confidence
+    factor for the entry's ``confidence_label`` and clamped to
+    ``[CONF_W_MIN, CONF_W_MAX]``.
+    """
+    base = market_weight(entry)
+    if not get_pro_hybrid_market_conf():
+        return base
+    label = str(_getval(entry, "confidence_label", "Medium") or "Medium")
+    cf = confidence_factor(label)
+    effective = base * cf
+    effective = max(get_conf_w_min(), min(effective, get_conf_w_max()))
+    return round(effective, 6)
+
+
 # ── Hybrid score computation ─────────────────────────────────────────
 
 
@@ -176,18 +219,21 @@ def compute_hybrid_fields(entry: dict) -> dict:
         _W_ALPHA * alpha_norm + _W_KELLY * kelly_norm + _W_PROB * prob_norm,
         4,
     )
-    mw = market_weight(entry)
-    score = round(raw * mw, 4)
+    base_mw = market_weight(entry)
+    eff_mw = hybrid_market_weight(entry)
+    score = round(raw * eff_mw, 4)
 
     return {
         "hybrid_score_raw": raw,
         "hybrid_score": score,
-        "market_weight": mw,
+        "market_weight": base_mw,
+        "effective_market_weight": eff_mw,
         "hybrid_components": {
             "alpha_norm": round(alpha_norm, 4),
             "kelly_norm": round(kelly_norm, 4),
             "prob_norm": round(prob_norm, 4),
-            "market_weight": mw,
+            "market_weight": base_mw,
+            "effective_market_weight": eff_mw,
             "weights": {
                 "alpha": _W_ALPHA,
                 "kelly": _W_KELLY,

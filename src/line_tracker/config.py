@@ -156,3 +156,42 @@ def get_kelly_mult_low() -> float:
     """Kelly effective multiplier for Low confidence_label (default 0.40)."""
     raw = _read_secret("KELLY_MULT_LOW", "0.40")
     return float(raw) if raw else 0.40
+
+
+# ── Pro Hybrid confidence-weighted market weighting ───────────────
+
+
+def get_pro_hybrid_market_conf() -> bool:
+    """True when PRO_HYBRID_MARKET_CONF is enabled (default off)."""
+    raw = _read_secret("PRO_HYBRID_MARKET_CONF", "0")
+    return str(raw).strip() in ("1", "true", "True", "yes")
+
+
+def get_conf_w_high() -> float:
+    """Confidence weight factor for High label (default 1.15)."""
+    raw = _read_secret("CONF_W_HIGH", "1.15")
+    return float(raw) if raw else 1.15
+
+
+def get_conf_w_med() -> float:
+    """Confidence weight factor for Medium label (default 1.00)."""
+    raw = _read_secret("CONF_W_MED", "1.00")
+    return float(raw) if raw else 1.00
+
+
+def get_conf_w_low() -> float:
+    """Confidence weight factor for Low label (default 0.85)."""
+    raw = _read_secret("CONF_W_LOW", "0.85")
+    return float(raw) if raw else 0.85
+
+
+def get_conf_w_min() -> float:
+    """Minimum clamped effective market weight (default 0.50)."""
+    raw = _read_secret("CONF_W_MIN", "0.50")
+    return float(raw) if raw else 0.50
+
+
+def get_conf_w_max() -> float:
+    """Maximum clamped effective market weight (default 1.10)."""
+    raw = _read_secret("CONF_W_MAX", "1.10")
+    return float(raw) if raw else 1.10
