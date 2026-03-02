@@ -12,9 +12,11 @@ from line_tracker.db.migrate import ensure_latest
 from line_tracker.db.repos import (
     BetsRepo,
     CalibrationRepo,
+    ClvModelRepo,
     ClvRepo,
     EventsRepo,
     LinesRepo,
+    OutcomesRepo,
     RecSnapshotsRepo,
     SlatePicksRepo,
     SlatesRepo,
@@ -69,6 +71,8 @@ class LineStore:
         self.slates_repo = SlatesRepo(self._conn)
         self.slate_picks_repo = SlatePicksRepo(self._conn)
         self.rec_snapshots_repo = RecSnapshotsRepo(self._conn)
+        self.outcomes_repo = OutcomesRepo(self._conn)
+        self.clv_model_repo = ClvModelRepo(self._conn)
 
     def _maybe_commit(self) -> None:
         if not self._in_explicit_txn:
@@ -386,6 +390,64 @@ class LineStore:
     def get_closed_snapshots(self, tier: str | None = None) -> list[dict]:
         """Return closed rec_snapshots, optionally filtered by tier."""
         return self.rec_snapshots_repo.get_closed(tier)
+
+    # ── Outcomes (settlement import) ────────────────────────────────
+
+    def import_outcomes(self, rows: list[dict]) -> int:
+        """Import outcome rows (from CSV). Returns count upserted."""
+        count = self.outcomes_repo.import_from_rows(rows)
+        self._maybe_commit()
+        return count
+
+    def get_outcome(
+        self, event_id: str, market: str, selection: str,
+    ) -> dict | None:
+        """Look up a single outcome."""
+        return self.outcomes_repo.get_for_event(event_id, market, selection)
+
+    def get_all_outcomes(self) -> list[dict]:
+        """Return all outcome rows."""
+        return self.outcomes_repo.get_all()
+
+    def link_outcomes_to_snapshots(self) -> int:
+        """Join outcomes → rec_snapshots, setting outcome_result + actual_roi.
+
+        Returns count of snapshot rows updated.
+        """
+        updated = self._conn.execute(
+            """UPDATE rec_snapshots
+               SET outcome_result = o.result,
+                   actual_roi = CASE
+                       WHEN o.result = 'win'  THEN (odds_decimal - 1.0)
+                       WHEN o.result = 'loss' THEN -1.0
+                       ELSE 0.0
+                   END
+               FROM outcomes o
+               WHERE rec_snapshots.event_id = o.event_id
+                 AND rec_snapshots.market   = o.market
+                 AND rec_snapshots.selection = o.selection
+                 AND rec_snapshots.outcome_result IS NULL"""
+        ).rowcount
+        self._maybe_commit()
+        return updated
+
+    # ── CLV model scores ─────────────────────────────────────────────
+
+    def save_clv_model_scores(self, scores: list[dict]) -> int:
+        """Persist CLV model prediction scores."""
+        count = self.clv_model_repo.save_scores(scores)
+        self._maybe_commit()
+        return count
+
+    def get_clv_model_score(
+        self, market: str, selection_type: str | None,
+    ) -> dict | None:
+        """Look up a single CLV model score."""
+        return self.clv_model_repo.get_score(market, selection_type)
+
+    def get_all_clv_model_scores(self) -> list[dict]:
+        """Return all CLV model scores."""
+        return self.clv_model_repo.get_all_scores()
 
     def save_calibration(self, key: str, json_str: str) -> None:
         """Persist a calibration result keyed by scope (e.g. 'global')."""

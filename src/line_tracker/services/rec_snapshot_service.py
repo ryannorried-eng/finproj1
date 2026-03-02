@@ -179,6 +179,31 @@ def capture_closing_lines(store, *, window_hours: int = 12) -> int:
     return closed_count
 
 
+def log_snapshot_for_picks(
+    store,
+    picks: list[dict],
+    *,
+    sport: str | None = None,
+    run_ts: str | None = None,
+) -> int:
+    """Log snapshot rows for a list of pick dicts (Step 5 volume helper).
+
+    Converts pick dicts (from pruning/ranking) into snapshot rows and
+    inserts them.  This is called at each automation cycle; volume comes
+    from running frequently, not from relaxed thresholds.
+
+    Returns count of newly inserted rows.
+    """
+    ts = run_ts or datetime.now(timezone.utc).isoformat()
+    rows: list[dict] = []
+    seen: set[tuple] = set()
+    for entry in picks:
+        _add_entry(rows, seen, entry, ts, sport)
+    if not rows:
+        return 0
+    return store.log_rec_snapshots(rows)
+
+
 def _find_closing_odds(
     store,
     event_id: str,

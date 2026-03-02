@@ -36,7 +36,7 @@ def test_linestore_init_runs_migrations_to_latest(tmp_path):
     db = tmp_path / "migrations_a.db"
     with LineStore(db_path=db) as store:
         version = get_schema_version(store._conn)
-        assert version == 9
+        assert version == 10
 
         for table in (
             "schema_version",
@@ -49,6 +49,8 @@ def test_linestore_init_runs_migrations_to_latest(tmp_path):
             "published_slates",
             "slate_picks",
             "rec_snapshots",
+            "outcomes",
+            "clv_model_scores",
         ):
             assert _table_exists(store._conn, table)
 
@@ -59,10 +61,10 @@ def test_ensure_latest_is_idempotent_noop_on_latest(tmp_path):
 
     with sqlite3.connect(db) as conn:
         ensure_latest(conn, migrations)
-        assert get_schema_version(conn) == 9
+        assert get_schema_version(conn) == 10
 
         ensure_latest(conn, migrations)
-        assert get_schema_version(conn) == 9
+        assert get_schema_version(conn) == 10
 
 
 def test_schema_version_one_applies_remaining_migrations(tmp_path):
@@ -81,7 +83,7 @@ def test_schema_version_one_applies_remaining_migrations(tmp_path):
         conn.commit()
 
         ensure_latest(conn, migrations)
-        assert get_schema_version(conn) == 9
+        assert get_schema_version(conn) == 10
 
         for index_name in (
             "idx_bet_clv_bet_id",

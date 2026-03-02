@@ -85,6 +85,58 @@ def main(argv: list[str] | None = None) -> int:
     # --- sports ---
     sub.add_parser("sports", help="List available sports from API")
 
+    # --- slate ---
+    slate_p = sub.add_parser("slate", help="Build and display daily slate")
+    slate_p.add_argument(
+        "--sport", default="nba", choices=list(SPORTS.keys()),
+    )
+    slate_p.add_argument("--db", default="lines.db", help="DB path")
+    slate_p.add_argument(
+        "--mode", default="Standard",
+        choices=["Standard", "Pro", "Auto"],
+    )
+
+    # --- snapshot ---
+    snap_p = sub.add_parser("snapshot", help="Log recommendation snapshots")
+    snap_p.add_argument(
+        "--sport", default="nba", choices=list(SPORTS.keys()),
+    )
+    snap_p.add_argument("--db", default="lines.db", help="DB path")
+
+    # --- cycle ---
+    cycle_p = sub.add_parser(
+        "cycle", help="Run one automation cycle (slate+prune+snapshot)",
+    )
+    cycle_p.add_argument(
+        "--sport", default="nba", choices=list(SPORTS.keys()),
+    )
+    cycle_p.add_argument("--db", default="lines.db", help="DB path")
+    cycle_p.add_argument(
+        "--mode", default="Standard",
+        choices=["Standard", "Pro", "Auto"],
+    )
+    cycle_p.add_argument(
+        "--top-n", type=int, default=3, help="Max top picks",
+    )
+    cycle_p.add_argument("--dry-run", action="store_true")
+
+    # --- import-outcomes ---
+    import_p = sub.add_parser(
+        "import-outcomes", help="Import game outcomes from CSV",
+    )
+    import_p.add_argument("csv_file", help="Path to outcomes CSV")
+    import_p.add_argument("--db", default="lines.db", help="DB path")
+
+    # --- roi-report ---
+    roi_p = sub.add_parser("roi-report", help="Show ROI report")
+    roi_p.add_argument("--db", default="lines.db", help="DB path")
+
+    # --- train-model ---
+    train_p = sub.add_parser(
+        "train-model", help="Train/refresh CLV prediction model",
+    )
+    train_p.add_argument("--db", default="lines.db", help="DB path")
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -103,6 +155,18 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_moves(args)
     if args.command == "events":
         return _cmd_events(args)
+    if args.command == "slate":
+        return _cmd_slate(args)
+    if args.command == "snapshot":
+        return _cmd_snapshot(args)
+    if args.command == "cycle":
+        return _cmd_cycle(args)
+    if args.command == "import-outcomes":
+        return _cmd_import_outcomes(args)
+    if args.command == "roi-report":
+        return _cmd_roi_report(args)
+    if args.command == "train-model":
+        return _cmd_train_model(args)
     return 0
 
 
@@ -238,6 +302,175 @@ def _cmd_events(args) -> int:
         return 0
     for e in events:
         print(f"  {e}")
+    return 0
+
+
+def _cmd_slate(args) -> int:
+    from line_tracker.models import BetType
+    from line_tracker.services.slate_service import build_daily_slate_service
+
+    sport_key = SPORTS[args.sport]
+    with LineStore(args.db) as store:
+        events = store.get_events_rich(sport=sport_key)
+        lines_by_event: dict = {}
+        for ev in events:
+            eid = ev.get("api_event_id") or ev.get("event_id", "")
+            all_lines: list = []
+            for bt in BetType:
+                try:
+                    all_lines.extend(store.get_latest_for_api_event(eid, bt))
+                except Exception:
+                    pass
+            if all_lines:
+                lines_by_event[eid] = all_lines
+
+        if not lines_by_event:
+            print("No lines available. Run 'fetch' first.")
+            return 0
+
+        slate = build_daily_slate_service(
+            lines_by_event,
+            filters={"min_books": 4},
+            mode=args.mode,
+            store=store,
+        )
+
+    for tier_key in ("tier1a", "tier1b", "tier2", "tier3"):
+        entries = slate.get(tier_key, [])
+        if entries:
+            print(f"\n--- {tier_key.upper()} ({len(entries)} picks) ---")
+            for e in entries:
+                print(
+                    f"  {e.get('market', '?')} {e.get('selection', '?')}"
+                    f"  @{e.get('best_sportsbook', '?')}"
+                    f"  odds={e.get('best_odds', 0):+.0f}"
+                    f"  edge_z={e.get('edge_z', 0):.2f}"
+                )
+    return 0
+
+
+def _cmd_snapshot(args) -> int:
+    from line_tracker.models import BetType
+    from line_tracker.services.rec_snapshot_service import build_snapshot_rows
+    from line_tracker.services.slate_service import build_daily_slate_service
+
+    sport_key = SPORTS[args.sport]
+    with LineStore(args.db) as store:
+        events = store.get_events_rich(sport=sport_key)
+        lines_by_event: dict = {}
+        for ev in events:
+            eid = ev.get("api_event_id") or ev.get("event_id", "")
+            all_lines: list = []
+            for bt in BetType:
+                try:
+                    all_lines.extend(store.get_latest_for_api_event(eid, bt))
+                except Exception:
+                    pass
+            if all_lines:
+                lines_by_event[eid] = all_lines
+
+        if not lines_by_event:
+            print("No lines available. Run 'fetch' first.")
+            return 0
+
+        slate = build_daily_slate_service(
+            lines_by_event,
+            filters={"min_books": 4},
+            mode="Standard",
+            store=store,
+        )
+        rows = build_snapshot_rows(slate, sport=sport_key)
+        count = store.log_rec_snapshots(rows)
+
+    print(f"Logged {count} snapshot rows.")
+    return 0
+
+
+def _cmd_cycle(args) -> int:
+    from line_tracker.services.automation_service import run_cycle
+    from line_tracker.services.ranking_service import format_picks_report
+
+    sport_key = SPORTS[args.sport]
+    with LineStore(args.db) as store:
+        result = run_cycle(
+            store,
+            sport=sport_key,
+            mode=args.mode,
+            top_n=args.top_n,
+            dry_run=args.dry_run,
+        )
+
+    print(f"Cycle completed at {result['cycle_ts']}")
+    print(f"  Slate entries: {result['slate_entries']}")
+    print(f"  Passed pruning: {result['pruned_count']}")
+    print(f"  Snapshots logged: {result['snapshot_count']}")
+    print(f"  Snapshots closed: {result['closed_count']}")
+    print()
+    print(format_picks_report(result["top_picks"]))
+    return 0
+
+
+def _cmd_import_outcomes(args) -> int:
+    from line_tracker.services.outcome_service import (
+        import_outcomes_csv,
+        link_outcomes,
+    )
+
+    with LineStore(args.db) as store:
+        imported = import_outcomes_csv(store, args.csv_file)
+        linked = link_outcomes(store)
+
+    print(f"Imported {imported} outcomes.")
+    print(f"Linked {linked} snapshot rows to outcomes.")
+    return 0
+
+
+def _cmd_roi_report(args) -> int:
+    from line_tracker.services.outcome_service import roi_report
+
+    with LineStore(args.db) as store:
+        report = roi_report(store)
+
+    overall = report["overall"]
+    print("=== Overall ROI ===")
+    print(
+        f"  Total: {overall['total']}  W: {overall['wins']}"
+        f"  L: {overall['losses']}  P: {overall['pushes']}"
+    )
+    print(f"  Net units: {overall['net_units']:+.2f}")
+    print(f"  ROI: {overall['roi_pct']:+.1f}%")
+
+    if report["by_tier"]:
+        print("\n=== ROI by Tier ===")
+        for tier, stats in report["by_tier"].items():
+            print(
+                f"  {tier}: {stats['total']} picks"
+                f"  W:{stats['wins']} L:{stats['losses']}"
+                f"  ROI:{stats['roi_pct']:+.1f}%"
+            )
+
+    if report["by_alpha"]:
+        print("\n=== ROI by Alpha ===")
+        for alpha, stats in report["by_alpha"].items():
+            print(
+                f"  {alpha}: {stats['total']} picks"
+                f"  W:{stats['wins']} L:{stats['losses']}"
+                f"  ROI:{stats['roi_pct']:+.1f}%"
+            )
+    return 0
+
+
+def _cmd_train_model(args) -> int:
+    from line_tracker.services.clv_model_service import refresh_model
+
+    with LineStore(args.db) as store:
+        result = refresh_model(store)
+
+    print(f"Model training: {result['status']}")
+    if result.get("groups"):
+        print(f"  Groups trained: {result['groups']}")
+    if result.get("total_samples"):
+        print(f"  Total samples: {result['total_samples']}")
     return 0
 
 
