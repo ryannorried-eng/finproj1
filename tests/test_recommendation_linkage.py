@@ -268,7 +268,7 @@ class TestMigration0003:
         db = tmp_path / "linkage_a.db"
         with LineStore(db_path=db) as store:
             version = get_schema_version(store._conn)
-            assert version == 9
+            assert version == 10
 
     def test_new_columns_exist(self, tmp_path):
         db = tmp_path / "linkage_b.db"
@@ -292,9 +292,9 @@ class TestMigration0003:
 
         with sqlite3.connect(db) as conn:
             ensure_latest(conn, migrations)
-            assert get_schema_version(conn) == 9
+            assert get_schema_version(conn) == 10
             ensure_latest(conn, migrations)
-            assert get_schema_version(conn) == 9
+            assert get_schema_version(conn) == 10
 
     def test_upgrade_from_version_2(self, tmp_path):
         """Upgrade a DB at version 2 to 3 by applying only migration 0003."""
@@ -316,7 +316,7 @@ class TestMigration0003:
 
             assert get_schema_version(conn) == 2
             ensure_latest(conn, migrations)
-            assert get_schema_version(conn) == 9
+            assert get_schema_version(conn) == 10
             assert _column_exists(conn, "bets", "recommendation_id")
 
 
