@@ -195,3 +195,52 @@ def get_conf_w_max() -> float:
     """Maximum clamped effective market weight (default 1.10)."""
     raw = _read_secret("CONF_W_MAX", "1.10")
     return float(raw) if raw else 1.10
+
+
+# ── Pick-pruning gate thresholds ──────────────────────────────────
+
+
+def get_prune_min_edge_z() -> float:
+    """Minimum edge-z to survive pruning (default 1.75)."""
+    raw = _read_secret("PRUNE_MIN_EDGE_Z", "1.75")
+    return float(raw) if raw else 1.75
+
+
+def get_prune_min_ev_shrunk() -> float:
+    """Minimum edge_ev_shrunk; entries must be strictly above this (default 0)."""
+    raw = _read_secret("PRUNE_MIN_EV_SHRUNK", "0")
+    return float(raw) if raw else 0.0
+
+
+def get_prune_min_quality() -> int:
+    """Minimum quality_score to survive pruning (default 65)."""
+    raw = _read_secret("PRUNE_MIN_QUALITY", "65")
+    return int(raw) if raw else 65
+
+
+def get_prune_min_books() -> int:
+    """Minimum books_used to survive pruning (default 5)."""
+    raw = _read_secret("PRUNE_MIN_BOOKS", "5")
+    return int(raw) if raw else 5
+
+
+def get_prune_max_hold() -> float:
+    """Maximum market_hold_median to survive pruning (default 7.0)."""
+    raw = _read_secret("PRUNE_MAX_HOLD", "7.0")
+    return float(raw) if raw else 7.0
+
+
+def get_prune_allowed_tiers() -> frozenset[str]:
+    """Allowed tiers for pruning (default tier1a,tier1b,tier2)."""
+    raw = _read_secret("PRUNE_ALLOWED_TIERS", "tier1a,tier1b,tier2")
+    if not raw:
+        return frozenset({"tier1a", "tier1b", "tier2"})
+    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+
+
+def get_prune_allowed_alpha_labels() -> frozenset[str]:
+    """Allowed alpha labels for pruning (default Strong,Neutral)."""
+    raw = _read_secret("PRUNE_ALLOWED_ALPHA_LABELS", "Strong,Neutral")
+    if not raw:
+        return frozenset({"Strong", "Neutral"})
+    return frozenset(t.strip() for t in raw.split(",") if t.strip())
