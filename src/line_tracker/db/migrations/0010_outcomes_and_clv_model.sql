@@ -6,11 +6,18 @@ CREATE TABLE IF NOT EXISTS outcomes (
     event_id       TEXT NOT NULL,
     market         TEXT NOT NULL,
     selection      TEXT NOT NULL,
+    line_value     REAL,
     result         TEXT NOT NULL CHECK(result IN ('win', 'loss', 'push')),
     settled_at     TEXT,
-    created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(event_id, market, selection)
+    created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Partial unique indexes to correctly handle NULL line_value.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcomes_unique_with_line
+ON outcomes (event_id, market, selection, line_value) WHERE line_value IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcomes_unique_no_line
+ON outcomes (event_id, market, selection) WHERE line_value IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_outcomes_event
 ON outcomes (event_id, market, selection);

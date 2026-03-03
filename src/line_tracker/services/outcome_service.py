@@ -14,7 +14,7 @@ def import_outcomes_csv(store, csv_path: str) -> int:
     """Read a CSV and import outcomes into the database.
 
     Expected CSV columns: ``event_id, market, selection, result``
-    (with optional ``settled_at``).  ``result`` must be one of:
+    (with optional ``settled_at`` and ``line_value``).  ``result`` must be one of:
     ``win``, ``loss``, ``push``.
 
     Returns count of rows upserted.
@@ -27,12 +27,15 @@ def import_outcomes_csv(store, csv_path: str) -> int:
             result = row.get("result", "").strip().lower()
             if result not in ("win", "loss", "push"):
                 continue
+            raw_line = row.get("line_value", "").strip() if "line_value" in row else ""
+            line_value = float(raw_line) if raw_line else None
             rows.append({
                 "event_id": row["event_id"].strip(),
                 "market": row["market"].strip(),
                 "selection": row["selection"].strip(),
                 "result": result,
                 "settled_at": row.get("settled_at", "").strip() or None,
+                "line_value": line_value,
             })
     if not rows:
         return 0
@@ -42,9 +45,50 @@ def import_outcomes_csv(store, csv_path: str) -> int:
 def link_outcomes(store) -> int:
     """Link imported outcomes to rec_snapshots and compute actual_roi.
 
+    For spread/total markets, requires line_value to match rec_snapshots.line.
+    For moneyline (and other non-line markets), treats None line_value as
+    wildcard so only event_id/market/selection need to match.
+
     Returns count of snapshot rows updated.
     """
-    return store.link_outcomes_to_snapshots()
+    # Non-line markets (moneyline, etc.): match without line_value.
+    updated = store._conn.execute(
+        """UPDATE rec_snapshots
+           SET outcome_result = o.result,
+               actual_roi = CASE
+                   WHEN o.result = 'win'  THEN (odds_decimal - 1.0)
+                   WHEN o.result = 'loss' THEN -1.0
+                   ELSE 0.0
+               END
+           FROM outcomes o
+           WHERE rec_snapshots.event_id = o.event_id
+             AND rec_snapshots.market   = o.market
+             AND rec_snapshots.selection = o.selection
+             AND rec_snapshots.outcome_result IS NULL
+             AND o.market NOT IN ('spread', 'total')"""
+    ).rowcount
+
+    # Line markets (spread, total): require line_value match.
+    # SQLite IS handles NULL=NULL correctly.
+    updated += store._conn.execute(
+        """UPDATE rec_snapshots
+           SET outcome_result = o.result,
+               actual_roi = CASE
+                   WHEN o.result = 'win'  THEN (odds_decimal - 1.0)
+                   WHEN o.result = 'loss' THEN -1.0
+                   ELSE 0.0
+               END
+           FROM outcomes o
+           WHERE rec_snapshots.event_id = o.event_id
+             AND rec_snapshots.market   = o.market
+             AND rec_snapshots.selection = o.selection
+             AND rec_snapshots.outcome_result IS NULL
+             AND o.market IN ('spread', 'total')
+             AND rec_snapshots.line IS o.line_value"""
+    ).rowcount
+
+    store._conn.commit()
+    return updated
 
 
 def roi_report(store) -> dict:
