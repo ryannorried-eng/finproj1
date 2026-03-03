@@ -142,3 +142,49 @@ def run_cycle(
         snapshot_count, closed_count,
     )
     return result
+
+
+def kpi_report(store, *, last_hours: int = 24) -> dict:
+    """Compute KPI summary for recent automation cycles.
+
+    Parameters
+    ----------
+    store : LineStore
+        Database connection wrapper.
+    last_hours : int
+        Lookback window in hours (default 24).
+
+    Returns
+    -------
+    dict with keys: ``last_hours``, ``cycles``, ``total_snapshots``,
+    ``pct_closed``, ``closed_count``, ``clv_positive``, ``clv_rate``,
+    ``avg_picks_per_cycle``.
+    """
+    row = store._conn.execute(
+        """SELECT
+               COUNT(*)                                              AS total,
+               COUNT(DISTINCT created_at)                            AS cycles,
+               SUM(CASE WHEN closed_at IS NOT NULL THEN 1 ELSE 0 END) AS closed,
+               SUM(CASE WHEN closed_at IS NOT NULL
+                              AND clv_delta_implied > 0
+                         THEN 1 ELSE 0 END)                          AS clv_pos
+           FROM rec_snapshots
+           WHERE created_at >= datetime('now', ?)""",
+        (f"-{last_hours} hours",),
+    ).fetchone()
+
+    total = row["total"] or 0
+    cycles = row["cycles"] or 0
+    closed = row["closed"] or 0
+    clv_pos = row["clv_pos"] or 0
+
+    return {
+        "last_hours": last_hours,
+        "cycles": cycles,
+        "total_snapshots": total,
+        "pct_closed": (closed / total * 100) if total else 0.0,
+        "closed_count": closed,
+        "clv_positive": clv_pos,
+        "clv_rate": (clv_pos / closed * 100) if closed else 0.0,
+        "avg_picks_per_cycle": total / cycles if cycles else 0.0,
+    }
