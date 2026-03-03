@@ -131,6 +131,14 @@ def main(argv: list[str] | None = None) -> int:
     roi_p = sub.add_parser("roi-report", help="Show ROI report")
     roi_p.add_argument("--db", default="lines.db", help="DB path")
 
+    # --- kpi ---
+    kpi_p = sub.add_parser("kpi", help="Show KPI summary for recent cycles")
+    kpi_p.add_argument(
+        "--last-hours", type=int, default=24,
+        help="Lookback window in hours (default: 24)",
+    )
+    kpi_p.add_argument("--db", default="lines.db", help="DB path")
+
     # --- train-model ---
     train_p = sub.add_parser(
         "train-model", help="Train/refresh CLV prediction model",
@@ -163,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_cycle(args)
     if args.command == "import-outcomes":
         return _cmd_import_outcomes(args)
+    if args.command == "kpi":
+        return _cmd_kpi(args)
     if args.command == "roi-report":
         return _cmd_roi_report(args)
     if args.command == "train-model":
@@ -407,6 +417,28 @@ def _cmd_cycle(args) -> int:
     print(f"  Snapshots closed: {result['closed_count']}")
     print()
     print(format_picks_report(result["top_picks"]))
+    return 0
+
+
+def _cmd_kpi(args) -> int:
+    from line_tracker.services.automation_service import kpi_report
+
+    with LineStore(args.db) as store:
+        kpi = kpi_report(store, last_hours=args.last_hours)
+
+    print(f"=== KPI Report (last {kpi['last_hours']}h) ===")
+    print(f"  Cycles run:          {kpi['cycles']}")
+    print(f"  Snapshots logged:    {kpi['total_snapshots']}")
+    print(
+        f"  Closed:              {kpi['closed_count']}"
+        f" ({kpi['pct_closed']:.1f}%)"
+    )
+    print(
+        f"  CLV+ rate (closed):  {kpi['clv_positive']}"
+        f"/{kpi['closed_count']}"
+        f" ({kpi['clv_rate']:.1f}%)"
+    )
+    print(f"  Avg picks/cycle:     {kpi['avg_picks_per_cycle']:.1f}")
     return 0
 
 
