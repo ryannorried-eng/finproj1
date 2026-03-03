@@ -136,16 +136,38 @@ def compute_clv_for_snapshot(
     }
 
 
-def capture_closing_lines(store, *, window_hours: int = 12) -> int:
+def capture_closing_lines(
+    store,
+    *,
+    window_hours: int = 12,
+    batch_size: int = 200,
+    prioritize_hours: int = 6,
+) -> int:
     """Find unclosed snapshots and try to close them with latest odds.
 
-    For each unclosed snapshot, queries the lines table for the last
-    observed odds for the same event_id + market before the event start
-    (or within *window_hours* of the snapshot).
+    Only considers snapshots whose ``closed_at IS NULL``.  Events with
+    ``commence_time`` within *prioritize_hours* (or already started) are
+    processed first.  At most *batch_size* snapshots are attempted per
+    call to keep each cycle bounded.
+
+    Parameters
+    ----------
+    store : LineStore
+        Database connection wrapper.
+    window_hours : int
+        (Legacy) Unused but kept for API compat.
+    batch_size : int
+        Maximum number of unclosed snapshots to process per cycle.
+    prioritize_hours : int
+        Events whose commence_time is within this many hours from now
+        (or in the past) are processed first.
 
     Returns count of snapshots closed.
     """
-    unclosed = store.get_unclosed_snapshots()
+    unclosed = store.get_unclosed_snapshots(
+        prioritize_hours=prioritize_hours,
+        limit=batch_size,
+    )
     closed_count = 0
 
     for snap in unclosed:

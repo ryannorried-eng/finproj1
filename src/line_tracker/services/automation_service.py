@@ -29,6 +29,7 @@ def run_cycle(
     top_n: int = 3,
     use_clv_filter: bool = True,
     dry_run: bool = False,
+    closing_batch_size: int = 200,
 ) -> dict:
     """Execute one automation cycle: slate → prune → rank → snapshot.
 
@@ -50,6 +51,8 @@ def run_cycle(
         Whether to apply CLV profile filtering during pruning.
     dry_run : bool
         If True, compute everything but skip DB writes.
+    closing_batch_size : int
+        Maximum unclosed snapshots to attempt closing per cycle.
 
     Returns
     -------
@@ -123,7 +126,7 @@ def run_cycle(
     # 6. Close previously-open snapshots
     closed_count = 0
     if not dry_run:
-        closed_count = capture_closing_lines(store)
+        closed_count = capture_closing_lines(store, batch_size=closing_batch_size)
 
     result = {
         "cycle_ts": cycle_ts,
