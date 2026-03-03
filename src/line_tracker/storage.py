@@ -351,10 +351,18 @@ class LineStore:
         return count
 
     def get_unclosed_snapshots(
-        self, before_iso: str | None = None,
+        self,
+        before_iso: str | None = None,
+        *,
+        prioritize_hours: int = 6,
+        limit: int = 0,
     ) -> list[dict]:
         """Return rec_snapshots that haven't been closed yet."""
-        return self.rec_snapshots_repo.get_unclosed(before_iso)
+        return self.rec_snapshots_repo.get_unclosed(
+            before_iso,
+            prioritize_hours=prioritize_hours,
+            limit=limit,
+        )
 
     def close_snapshot(
         self,

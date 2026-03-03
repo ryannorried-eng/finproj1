@@ -158,17 +158,48 @@ class RecSnapshotsRepo:
             ),
         )
 
-    def get_unclosed(self, before_iso: str | None = None) -> list[dict]:
-        """Return snapshots that haven't been closed yet.
+    def get_unclosed(
+        self,
+        before_iso: str | None = None,
+        *,
+        prioritize_hours: int = 6,
+        limit: int = 0,
+    ) -> list[dict]:
+        """Return snapshots where ``closed_at IS NULL``.
 
-        Optionally filter to snapshots created before *before_iso*.
+        Parameters
+        ----------
+        before_iso:
+            Only include snapshots created before this ISO timestamp.
+        prioritize_hours:
+            Events whose ``commence_time`` is within this many hours from
+            now (or already in the past) are returned first.
+        limit:
+            Maximum number of rows to return.  0 means unlimited.
         """
-        query = "SELECT * FROM rec_snapshots WHERE closed_at IS NULL"
+        query = """
+            SELECT rs.*
+            FROM rec_snapshots rs
+            LEFT JOIN events e ON rs.event_id = e.api_event_id
+            WHERE rs.closed_at IS NULL
+        """
         params: list = []
         if before_iso:
-            query += " AND created_at <= ?"
+            query += " AND rs.created_at <= ?"
             params.append(before_iso)
-        query += " ORDER BY created_at"
+        # Order: events starting soonest (within prioritize_hours or
+        # already started) come first, then the rest by created_at.
+        query += f"""
+            ORDER BY
+                CASE WHEN e.commence_time IS NOT NULL
+                          AND e.commence_time <= datetime('now', '+{prioritize_hours} hours')
+                     THEN 0 ELSE 1 END,
+                e.commence_time ASC,
+                rs.created_at ASC
+        """
+        if limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
         rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
