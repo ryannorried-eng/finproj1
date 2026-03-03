@@ -13,34 +13,72 @@ class OutcomesRepo:
         """Bulk upsert outcome rows. Returns count of rows inserted/updated."""
         count = 0
         for row in rows:
-            cursor = self._conn.execute(
-                """INSERT INTO outcomes
-                   (event_id, market, selection, result, settled_at)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(event_id, market, selection)
-                   DO UPDATE SET result = excluded.result,
-                                 settled_at = excluded.settled_at""",
-                (
-                    row["event_id"],
-                    row["market"],
-                    row["selection"],
-                    row["result"],
-                    row.get("settled_at"),
-                ),
-            )
+            line_value = row.get("line_value")
+            if line_value is not None:
+                line_value = float(line_value)
+
+            # Manual upsert: partial unique indexes require explicit NULL handling.
+            if line_value is None:
+                existing = self._conn.execute(
+                    """SELECT outcome_id FROM outcomes
+                       WHERE event_id = ? AND market = ? AND selection = ?
+                       AND line_value IS NULL""",
+                    (row["event_id"], row["market"], row["selection"]),
+                ).fetchone()
+            else:
+                existing = self._conn.execute(
+                    """SELECT outcome_id FROM outcomes
+                       WHERE event_id = ? AND market = ? AND selection = ?
+                       AND line_value = ?""",
+                    (row["event_id"], row["market"], row["selection"], line_value),
+                ).fetchone()
+
+            if existing:
+                cursor = self._conn.execute(
+                    """UPDATE outcomes SET result = ?, settled_at = ?
+                       WHERE outcome_id = ?""",
+                    (row["result"], row.get("settled_at"), existing["outcome_id"]),
+                )
+            else:
+                cursor = self._conn.execute(
+                    """INSERT INTO outcomes
+                       (event_id, market, selection, line_value, result, settled_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        row["event_id"],
+                        row["market"],
+                        row["selection"],
+                        line_value,
+                        row["result"],
+                        row.get("settled_at"),
+                    ),
+                )
             if cursor.rowcount > 0:
                 count += 1
         return count
 
     def get_for_event(
-        self, event_id: str, market: str, selection: str,
+        self,
+        event_id: str,
+        market: str,
+        selection: str,
+        line_value: float | None = None,
     ) -> dict | None:
         """Look up a single outcome."""
-        row = self._conn.execute(
-            """SELECT * FROM outcomes
-               WHERE event_id = ? AND market = ? AND selection = ?""",
-            (event_id, market, selection),
-        ).fetchone()
+        if line_value is None:
+            row = self._conn.execute(
+                """SELECT * FROM outcomes
+                   WHERE event_id = ? AND market = ? AND selection = ?
+                   AND line_value IS NULL""",
+                (event_id, market, selection),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """SELECT * FROM outcomes
+                   WHERE event_id = ? AND market = ? AND selection = ?
+                   AND line_value = ?""",
+                (event_id, market, selection, line_value),
+            ).fetchone()
         return dict(row) if row else None
 
     def get_all(self) -> list[dict]:
