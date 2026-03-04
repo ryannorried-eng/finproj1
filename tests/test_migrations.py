@@ -145,3 +145,46 @@ def test_fresh_db_has_rec_snapshots_with_all_columns(tmp_path):
 
         for idx in ("idx_rec_snap_created", "idx_rec_snap_run_id"):
             assert _index_exists(conn, idx)
+
+
+def test_legacy_db_missing_rec_snapshots_repaired(tmp_path):
+    """A legacy DB whose schema_version is already high (>= 11) but has no
+    rec_snapshots table should be repaired by the 0012 migration."""
+    db = tmp_path / "legacy.db"
+    migrations = _migrations_path()
+    latest = _latest_version()
+
+    with sqlite3.connect(db) as conn:
+        # Simulate a legacy DB at version 11 with no rec_snapshots table.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version "
+            "(version INTEGER NOT NULL)"
+        )
+        conn.execute("INSERT INTO schema_version(version) VALUES (11)")
+        conn.commit()
+
+        assert not _table_exists(conn, "rec_snapshots")
+
+        ensure_latest(conn, migrations)
+        assert get_schema_version(conn) == latest
+        assert _table_exists(conn, "rec_snapshots")
+
+        expected_cols = {
+            "snapshot_id", "created_at", "event_id", "sport", "market",
+            "selection", "book", "line", "odds_american", "odds_decimal",
+            "consensus_prob", "tier", "close_odds_american",
+            "close_odds_decimal", "close_implied_prob", "open_implied_prob",
+            "clv_delta_american", "clv_delta_implied", "closed_at",
+            "outcome_result", "actual_roi", "run_id",
+        }
+        actual_cols = _column_names(conn, "rec_snapshots")
+        assert expected_cols.issubset(actual_cols), (
+            f"Missing columns: {expected_cols - actual_cols}"
+        )
+
+        for idx in (
+            "idx_rec_snap_created",
+            "idx_rec_snap_run_id",
+            "idx_rec_snap_event_market",
+        ):
+            assert _index_exists(conn, idx)
