@@ -1,6 +1,5 @@
--- Baseline: ensure rec_snapshots exists with all columns before ALTER-TABLE
--- migrations (0009-0011) run.  On a fresh DB this creates the table; on an
--- existing DB that already ran 0008 this is a no-op.
+-- Baseline: create rec_snapshots with the core schema matching migration 0008.
+-- Later migrations (0009-0011) add columns via ALTER TABLE.
 CREATE TABLE IF NOT EXISTS rec_snapshots (
     snapshot_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -30,19 +29,11 @@ CREATE TABLE IF NOT EXISTS rec_snapshots (
     clv_delta_american  REAL,
     clv_delta_implied   REAL,
     closed_at           TEXT,
-    alpha_score         INTEGER,
-    alpha_label         TEXT,
-    outcome_result      TEXT,
-    actual_roi          REAL,
-    run_id              TEXT,
     UNIQUE(event_id, market, selection, book, odds_american, created_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_rec_snap_created
 ON rec_snapshots (created_at);
-
-CREATE INDEX IF NOT EXISTS idx_rec_snap_run_id
-ON rec_snapshots (run_id);
 
 CREATE INDEX IF NOT EXISTS idx_rec_snap_event_market
 ON rec_snapshots (event_id, market, selection, created_at);

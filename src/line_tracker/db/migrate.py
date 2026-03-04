@@ -41,34 +41,8 @@ def _discover_migrations(migrations_path: Path) -> list[tuple[int, Path]]:
     return migrations
 
 
-def _strip_comments(text: str) -> str:
-    """Remove SQL single-line comments from *text*."""
-    lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("--")]
-    return "\n".join(lines).strip()
-
-
-def _apply_lenient(
-    conn: sqlite3.Connection, sql: str, version: int
-) -> None:
-    """Re-apply a migration statement-by-statement, ignoring duplicate columns."""
-    conn.execute("BEGIN IMMEDIATE")
-    for raw_stmt in sql.split(";"):
-        stmt = _strip_comments(raw_stmt)
-        if not stmt:
-            continue
-        try:
-            conn.execute(stmt)
-        except sqlite3.OperationalError as exc:
-            if "duplicate column name" not in str(exc):
-                conn.execute("ROLLBACK")
-                raise
-            _log.debug("Skipping already-applied: %s", exc)
-    conn.execute(f"UPDATE schema_version SET version = {version}")
-    conn.execute("COMMIT")
-
-
 def ensure_latest(conn: sqlite3.Connection, migrations_path: str | Path) -> None:
-    """Apply all pending migrations in version order, safely and idempotently."""
+    """Apply all pending migrations in version order. Fails on any SQL error."""
     mpath = Path(migrations_path)
     current_version = get_schema_version(conn)
 
@@ -91,20 +65,5 @@ def ensure_latest(conn: sqlite3.Connection, migrations_path: str | Path) -> None
             f"UPDATE schema_version SET version = {version};\n"
             "COMMIT;"
         )
-        try:
-            conn.executescript(script)
-            current_version = version
-        except sqlite3.OperationalError as exc:
-            if "duplicate column name" in str(exc):
-                if conn.in_transaction:
-                    conn.execute("ROLLBACK")
-                _apply_lenient(conn, sql, version)
-                current_version = version
-            else:
-                if conn.in_transaction:
-                    conn.execute("ROLLBACK")
-                raise
-        except Exception:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise
+        conn.executescript(script)
+        current_version = version
