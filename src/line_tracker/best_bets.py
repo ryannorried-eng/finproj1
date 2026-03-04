@@ -261,6 +261,18 @@ def _weighted_median(values: list[float], weights: list[float]) -> float:
 _SHRINKAGE_K = 5.0  # Bayesian shrinkage constant for n_eff
 _MIN_EV_SIGMA = 0.002  # 0.2% EV floor for edge_z denominator
 
+# Configurable sigma floor imported lazily to avoid circular imports at module level.
+_EDGE_Z_SIGMA_MIN_CACHED: float | None = None
+
+
+def _get_edge_z_sigma_min() -> float:
+    """Return the configured EDGE_Z_SIGMA_MIN (cached after first call)."""
+    global _EDGE_Z_SIGMA_MIN_CACHED
+    if _EDGE_Z_SIGMA_MIN_CACHED is None:
+        from line_tracker.config import get_edge_z_sigma_min
+        _EDGE_Z_SIGMA_MIN_CACHED = get_edge_z_sigma_min()
+    return _EDGE_Z_SIGMA_MIN_CACHED
+
 
 def weighted_robust_consensus(
     probs: list[float],
@@ -330,9 +342,16 @@ def compute_shrinkage(
 def compute_edge_z(
     edge_ev_shrunk: float,
     ev_sigma: float,
-    min_ev_sigma: float = _MIN_EV_SIGMA,
+    min_ev_sigma: float | None = None,
 ) -> float:
-    """Edge z-score in EV space: edge_ev_shrunk / max(ev_sigma, floor)."""
+    """Edge z-score in EV space: edge_ev_shrunk / max(ev_sigma, floor).
+
+    The floor is the larger of the hard-coded ``_MIN_EV_SIGMA`` and the
+    configurable ``EDGE_Z_SIGMA_MIN`` (default 0.02).  This prevents
+    pathologically small sigma from compressing edge_z toward zero.
+    """
+    if min_ev_sigma is None:
+        min_ev_sigma = max(_MIN_EV_SIGMA, _get_edge_z_sigma_min())
     return edge_ev_shrunk / max(ev_sigma, min_ev_sigma)
 
 

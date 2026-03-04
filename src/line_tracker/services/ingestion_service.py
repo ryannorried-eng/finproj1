@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from time import perf_counter
 
+from line_tracker.config import get_books_csv, get_regions
 from line_tracker.core.logging import get_logger
 from line_tracker.scraper import OddsClient
 
@@ -25,7 +26,11 @@ def fetch_and_persist_snapshot(
 
     fetch_started = perf_counter()
     with OddsClient(api_key=api_key) as client:
-        lines = client.get_odds(sport=sport)
+        lines = client.get_odds(
+            sport=sport,
+            regions=get_regions(),
+            bookmakers=get_books_csv(),
+        )
     fetch_ms = round((perf_counter() - fetch_started) * 1000.0, 2)
 
     if not lines:

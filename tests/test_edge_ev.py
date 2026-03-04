@@ -128,23 +128,23 @@ class TestEdgeZUsesEvSigmaFloor:
         """When ev_sigma is tiny, denominator is min_ev_sigma → finite z."""
         edge_ev_shrunk = 0.02
         ev_sigma = 0.0001  # well below floor
-        z = compute_edge_z(edge_ev_shrunk, ev_sigma)
+        z = compute_edge_z(edge_ev_shrunk, ev_sigma, min_ev_sigma=_MIN_EV_SIGMA)
         expected = edge_ev_shrunk / _MIN_EV_SIGMA
         assert abs(z - expected) < 1e-10
 
     def test_zero_sigma_uses_floor(self):
         """ev_sigma=0 → denominator = min_ev_sigma."""
-        z = compute_edge_z(0.01, 0.0)
+        z = compute_edge_z(0.01, 0.0, min_ev_sigma=_MIN_EV_SIGMA)
         assert z == 0.01 / _MIN_EV_SIGMA
 
     def test_large_sigma_not_floored(self):
         """When ev_sigma > floor, use actual sigma."""
-        z = compute_edge_z(0.02, 0.01)
+        z = compute_edge_z(0.02, 0.01, min_ev_sigma=_MIN_EV_SIGMA)
         assert abs(z - 2.0) < 1e-10
 
     def test_negative_edge_gives_negative_z(self):
         """Negative edge_ev_shrunk → negative edge_z."""
-        z = compute_edge_z(-0.01, 0.005)
+        z = compute_edge_z(-0.01, 0.005, min_ev_sigma=_MIN_EV_SIGMA)
         assert z < 0
 
     def test_custom_floor(self):
