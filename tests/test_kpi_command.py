@@ -1,5 +1,6 @@
 """Tests for the ``kpi`` CLI command and ``kpi_report`` service function."""
 
+import uuid
 from datetime import datetime, timezone
 
 from line_tracker.__main__ import main
@@ -21,6 +22,7 @@ def test_kpi_report_with_data(tmp_path):
     """kpi_report returns correct aggregates for seeded snapshots."""
     db = str(tmp_path / "kpi.db")
     now = datetime.now(timezone.utc).isoformat()
+    rid = uuid.uuid4().hex
 
     with LineStore(db) as store:
         # Insert 3 snapshots: 2 closed (1 CLV+, 1 CLV-), 1 open.
@@ -36,6 +38,7 @@ def test_kpi_report_with_data(tmp_path):
                 "odds_decimal": 1.6667,
                 "consensus_prob": 0.60,
                 "tier": "tier1a",
+                "run_id": rid,
             },
             {
                 "created_at": now,
@@ -48,6 +51,7 @@ def test_kpi_report_with_data(tmp_path):
                 "odds_decimal": 2.30,
                 "consensus_prob": 0.45,
                 "tier": "tier2",
+                "run_id": rid,
             },
             {
                 "created_at": now,
@@ -60,6 +64,7 @@ def test_kpi_report_with_data(tmp_path):
                 "odds_decimal": 1.9091,
                 "consensus_prob": 0.52,
                 "tier": "tier1b",
+                "run_id": rid,
             },
         ]
         store.log_rec_snapshots(snaps)
@@ -106,13 +111,15 @@ def test_kpi_last_hours_flag(tmp_path, capsys):
 
 
 def test_kpi_multiple_cycles(tmp_path):
-    """kpi_report counts distinct created_at values as separate cycles."""
+    """kpi_report counts distinct run_id values as separate cycles."""
     db = str(tmp_path / "multi.db")
-    ts1 = datetime.now(timezone.utc).isoformat()
-    ts2 = datetime.now(timezone.utc).isoformat() + "1"  # distinct value
+    now = datetime.now(timezone.utc).isoformat()
+    rid1 = uuid.uuid4().hex
+    rid2 = uuid.uuid4().hex
 
     with LineStore(db) as store:
         base = {
+            "created_at": now,
             "event_id": "evt1",
             "sport": "basketball_nba",
             "market": "moneyline",
@@ -123,9 +130,9 @@ def test_kpi_multiple_cycles(tmp_path):
             "consensus_prob": 0.60,
             "tier": "tier1a",
         }
-        store.log_rec_snapshots([{**base, "created_at": ts1}])
+        store.log_rec_snapshots([{**base, "run_id": rid1}])
         store.log_rec_snapshots([
-            {**base, "created_at": ts2, "book": "FanDuel"},
+            {**base, "run_id": rid2, "book": "FanDuel"},
         ])
 
         kpi = kpi_report(store, last_hours=1)

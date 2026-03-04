@@ -341,11 +341,19 @@ class LineStore:
 
     # ── Recommendation snapshots (CLV logging) ──────────────────────
 
-    def log_rec_snapshots(self, snapshots: list[dict]) -> int:
+    def log_rec_snapshots(
+        self, snapshots: list[dict], *, run_id: str | None = None,
+    ) -> int:
         """Persist recommendation snapshots (idempotent per run).
+
+        If *run_id* is provided it is stamped onto every snapshot dict
+        before insertion (unless the dict already carries one).
 
         Returns count of newly inserted rows.
         """
+        if run_id is not None:
+            for snap in snapshots:
+                snap.setdefault("run_id", run_id)
         count = self.rec_snapshots_repo.insert_many(snapshots)
         self._maybe_commit()
         return count

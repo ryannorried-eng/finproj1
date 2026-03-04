@@ -84,9 +84,9 @@ class RecSnapshotsRepo:
                 consensus_prob, breakeven_prob,
                 edge_pct, edge_ev, edge_ev_shrunk, ev_100,
                 edge_z, quality_score, confidence_label, tier, meta,
-                alpha_score, alpha_label)
+                alpha_score, alpha_label, run_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 snap["created_at"],
                 snap["event_id"],
@@ -112,6 +112,7 @@ class RecSnapshotsRepo:
                 else None,
                 snap.get("alpha_score"),
                 snap.get("alpha_label"),
+                snap.get("run_id"),
             ),
         )
         return cursor.lastrowid if cursor.rowcount > 0 else None
