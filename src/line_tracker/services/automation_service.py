@@ -7,6 +7,7 @@ by an external scheduler or cron job via the CLI ``cycle`` command.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from line_tracker.core.logging import get_logger
@@ -62,7 +63,8 @@ def run_cycle(
     from line_tracker.services.slate_service import build_daily_slate_service
 
     cycle_ts = datetime.now(timezone.utc).isoformat()
-    _log.info("run_cycle:start sport=%s mode=%s dry_run=%s", sport, mode, dry_run)
+    run_id = uuid.uuid4().hex
+    _log.info("run_cycle:start sport=%s mode=%s dry_run=%s run_id=%s", sport, mode, dry_run, run_id)
 
     # 1. Gather latest lines grouped by event
     events = store.get_events_rich(sport=sport)
@@ -120,7 +122,7 @@ def run_cycle(
     # 5. Snapshot (all tier entries, not just top picks — for CLV tracking)
     snapshot_count = 0
     if not dry_run:
-        snap_rows = build_snapshot_rows(slate, sport=sport, run_ts=cycle_ts)
+        snap_rows = build_snapshot_rows(slate, sport=sport, run_ts=cycle_ts, run_id=run_id)
         snapshot_count = store.log_rec_snapshots(snap_rows)
 
     # 6. Close previously-open snapshots
@@ -163,13 +165,14 @@ def kpi_report(store, *, last_hours: int = 24) -> dict:
     row = store._conn.execute(
         """SELECT
                COUNT(*)                                              AS total,
-               COUNT(DISTINCT created_at)                            AS cycles,
+               COUNT(DISTINCT run_id)                                AS cycles,
                SUM(CASE WHEN closed_at IS NOT NULL THEN 1 ELSE 0 END) AS closed,
                SUM(CASE WHEN closed_at IS NOT NULL
                               AND clv_delta_implied > 0
                          THEN 1 ELSE 0 END)                          AS clv_pos
            FROM rec_snapshots
-           WHERE created_at >= datetime('now', ?)""",
+           WHERE created_at >= datetime('now', ?)
+             AND run_id IS NOT NULL""",
         (f"-{last_hours} hours",),
     ).fetchone()
 

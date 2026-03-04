@@ -16,6 +16,7 @@ def build_snapshot_rows(
     *,
     sport: str | None = None,
     run_ts: str | None = None,
+    run_id: str | None = None,
 ) -> list[dict]:
     """Convert a slate result into a list of snapshot dicts for DB insertion.
 
@@ -43,11 +44,11 @@ def build_snapshot_rows(
 
     for tier_key in tiers_to_log:
         for entry in slate.get(tier_key, []):
-            _add_entry(rows, seen, entry, ts, sport)
+            _add_entry(rows, seen, entry, ts, sport, run_id=run_id)
 
     # Also log closest_candidates (they may overlap with tier2/tier3)
     for entry in slate.get("closest_candidates", []):
-        _add_entry(rows, seen, entry, ts, sport)
+        _add_entry(rows, seen, entry, ts, sport, run_id=run_id)
 
     return rows
 
@@ -58,6 +59,8 @@ def _add_entry(
     entry: dict,
     ts: str,
     sport: str | None,
+    *,
+    run_id: str | None = None,
 ) -> None:
     """Append a snapshot dict if not already seen."""
     dedup_key = (
@@ -97,6 +100,7 @@ def _add_entry(
         "meta": None,
         "alpha_score": entry.get("alpha_score"),
         "alpha_label": entry.get("alpha_label"),
+        "run_id": run_id,
     })
 
 
@@ -207,6 +211,7 @@ def log_snapshot_for_picks(
     *,
     sport: str | None = None,
     run_ts: str | None = None,
+    run_id: str | None = None,
 ) -> int:
     """Log snapshot rows for a list of pick dicts (Step 5 volume helper).
 
@@ -220,7 +225,7 @@ def log_snapshot_for_picks(
     rows: list[dict] = []
     seen: set[tuple] = set()
     for entry in picks:
-        _add_entry(rows, seen, entry, ts, sport)
+        _add_entry(rows, seen, entry, ts, sport, run_id=run_id)
     if not rows:
         return 0
     return store.log_rec_snapshots(rows)
