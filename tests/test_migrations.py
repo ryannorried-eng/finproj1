@@ -36,7 +36,7 @@ def test_linestore_init_runs_migrations_to_latest(tmp_path):
     db = tmp_path / "migrations_a.db"
     with LineStore(db_path=db) as store:
         version = get_schema_version(store._conn)
-        assert version == 10
+        assert version == 11
 
         for table in (
             "schema_version",
@@ -61,10 +61,10 @@ def test_ensure_latest_is_idempotent_noop_on_latest(tmp_path):
 
     with sqlite3.connect(db) as conn:
         ensure_latest(conn, migrations)
-        assert get_schema_version(conn) == 10
+        assert get_schema_version(conn) == 11
 
         ensure_latest(conn, migrations)
-        assert get_schema_version(conn) == 10
+        assert get_schema_version(conn) == 11
 
 
 def test_schema_version_one_applies_remaining_migrations(tmp_path):
@@ -83,7 +83,7 @@ def test_schema_version_one_applies_remaining_migrations(tmp_path):
         conn.commit()
 
         ensure_latest(conn, migrations)
-        assert get_schema_version(conn) == 10
+        assert get_schema_version(conn) == 11
 
         for index_name in (
             "idx_bet_clv_bet_id",
@@ -96,3 +96,35 @@ def test_schema_version_one_applies_remaining_migrations(tmp_path):
             "idx_events_sport_time",
         ):
             assert _index_exists(conn, index_name)
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {r[1] for r in rows}
+
+
+def test_fresh_db_has_rec_snapshots_with_all_columns(tmp_path):
+    """A brand-new DB can run all migrations and ends with rec_snapshots."""
+    db = tmp_path / "fresh.db"
+    migrations = _migrations_path()
+
+    with sqlite3.connect(db) as conn:
+        ensure_latest(conn, migrations)
+        assert get_schema_version(conn) == 11
+        assert _table_exists(conn, "rec_snapshots")
+
+        expected_cols = {
+            "snapshot_id", "created_at", "event_id", "sport", "market",
+            "selection", "book", "line", "odds_american", "odds_decimal",
+            "consensus_prob", "tier", "close_odds_american",
+            "close_odds_decimal", "close_implied_prob", "open_implied_prob",
+            "clv_delta_american", "clv_delta_implied", "closed_at",
+            "outcome_result", "actual_roi", "run_id",
+        }
+        actual_cols = _column_names(conn, "rec_snapshots")
+        assert expected_cols.issubset(actual_cols), (
+            f"Missing columns: {expected_cols - actual_cols}"
+        )
+
+        for idx in ("idx_rec_snap_created", "idx_rec_snap_run_id"):
+            assert _index_exists(conn, idx)
