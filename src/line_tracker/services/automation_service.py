@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from line_tracker.core.logging import get_logger
 from line_tracker.services.clv_selection_service import build_clv_filter_profile
-from line_tracker.services.pick_pruning_service import prune_picks
+from line_tracker.services.pick_pruning_service import prune_picks_with_reasons
 from line_tracker.services.ranking_service import select_top_picks
 from line_tracker.services.rec_snapshot_service import (
     build_snapshot_rows,
@@ -114,7 +114,14 @@ def run_cycle(
         if clv_profile.get("total_closed", 0) == 0:
             clv_profile = None
 
-    pruned = prune_picks(all_entries, clv_profile=clv_profile)
+    pruned, prune_reasons = prune_picks_with_reasons(
+        all_entries, clv_profile=clv_profile,
+    )
+
+    # Log prune breakdown when nothing survives or in dry_run mode
+    if dry_run or len(pruned) == 0:
+        parts = " ".join(f"{k}={v}" for k, v in prune_reasons.items())
+        _log.info("prune_breakdown %s", parts)
 
     # 4. Rank and select top
     top_picks = select_top_picks(pruned, top_n=top_n)

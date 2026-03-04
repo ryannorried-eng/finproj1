@@ -25,7 +25,7 @@ class _FakeClient:
     def __exit__(self, *args):
         return None
 
-    def get_odds(self, sport):
+    def get_odds(self, sport, **kwargs):
         return [
             BettingLine(
                 sportsbook="DraftKings",

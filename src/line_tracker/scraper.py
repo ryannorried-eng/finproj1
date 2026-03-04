@@ -49,17 +49,21 @@ class OddsClient:
         regions: str = "us",
         markets: str = "h2h,spreads,totals",
         odds_format: str = "american",
+        bookmakers: str | None = None,
     ) -> list[BettingLine]:
         """Fetch live odds for a sport and return as BettingLine objects."""
         try:
+            params: dict[str, str] = {
+                "apiKey": self.api_key,
+                "regions": regions,
+                "markets": markets,
+                "oddsFormat": odds_format,
+            }
+            if bookmakers:
+                params["bookmakers"] = bookmakers
             resp = self._client.get(
                 f"{BASE_URL}/sports/{sport}/odds/",
-                params={
-                    "apiKey": self.api_key,
-                    "regions": regions,
-                    "markets": markets,
-                    "oddsFormat": odds_format,
-                },
+                params=params,
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:

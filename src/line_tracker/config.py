@@ -244,3 +244,40 @@ def get_prune_allowed_alpha_labels() -> frozenset[str]:
     if not raw:
         return frozenset({"Strong", "Neutral"})
     return frozenset(t.strip() for t in raw.split(",") if t.strip())
+
+
+# ── Slate markets configuration ─────────────────────────────────
+
+
+def get_slate_markets() -> list[str]:
+    """Return list of markets to include in slates (default moneyline,spread,total)."""
+    raw = _read_secret("SLATE_MARKETS", "moneyline,spread,total")
+    if not raw:
+        return ["moneyline", "spread", "total"]
+    return [m.strip().lower() for m in raw.split(",") if m.strip()]
+
+
+# ── Odds API book / region configuration ─────────────────────────
+
+
+def get_books_csv() -> str:
+    """Return comma-separated bookmaker keys for Odds API requests."""
+    default = (
+        "fanduel,draftkings,betmgm,pointsbetus,"
+        "caesars,barstool,betrivers,unibet_us"
+    )
+    return _read_secret("ODDS_BOOKS", default) or default
+
+
+def get_regions() -> str:
+    """Return regions parameter for Odds API requests (default 'us')."""
+    return _read_secret("ODDS_REGIONS", "us") or "us"
+
+
+# ── Edge-z sigma floor ──────────────────────────────────────────
+
+
+def get_edge_z_sigma_min() -> float:
+    """Minimum ev_sigma for edge_z computation to prevent compression (default 0.02)."""
+    raw = _read_secret("EDGE_Z_SIGMA_MIN", "0.02")
+    return float(raw) if raw else 0.02
