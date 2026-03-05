@@ -683,6 +683,21 @@ def compute_slate_debug_stats(entries: list[dict]) -> dict:
 # ── display filters (applied AFTER classification) ─────────────────
 
 
+_MARKET_ALIASES: dict[str, str] = {
+    "h2h": "moneyline",
+    "moneyline": "moneyline",
+    "spreads": "spread",
+    "spread": "spread",
+    "totals": "total",
+    "total": "total",
+}
+
+
+def _normalize_market(raw: str) -> str:
+    """Normalize a market name to its canonical form."""
+    return _MARKET_ALIASES.get(raw.lower(), raw.lower())
+
+
 def _passes_filters(entry: dict, filters: dict) -> bool:
     """Return True if the entry survives all user-supplied display filters.
 
@@ -697,8 +712,10 @@ def _passes_filters(entry: dict, filters: dict) -> bool:
             return False
     if filters.get("min_quality") and entry["quality_score"] < filters["min_quality"]:
         return False
-    if filters.get("markets") and entry["market"] not in filters["markets"]:
-        return False
+    if filters.get("markets"):
+        allowed = {_normalize_market(m) for m in filters["markets"]}
+        if _normalize_market(entry["market"]) not in allowed:
+            return False
     if filters.get("hide_low_confidence") and entry["confidence"] == "Low":
         return False
     if (
