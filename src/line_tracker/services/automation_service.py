@@ -106,6 +106,17 @@ def run_cycle(
         all_entries.extend(slate.get(tier_key, []))
     all_entries.extend(slate.get("closest_candidates", []))
 
+    # Debug: log first few slate entries before pruning
+    if dry_run:
+        _debug_fields = (
+            "market", "selection", "tier", "alpha_label", "alpha_score",
+            "edge_z", "edge_ev_shrunk", "quality_score", "books_used",
+            "market_hold_median",
+        )
+        for entry in all_entries[:3]:
+            vals = " ".join(f"{f}={entry.get(f)}" for f in _debug_fields)
+            _log.info("dry_run:slate_entry %s", vals)
+
     # 3. Prune
     clv_profile = None
     if use_clv_filter:
