@@ -14,6 +14,7 @@ from line_tracker.slate import (
     _STAY_AWAY_LIMIT,
     _TIER1_BASE_EDGE,
     _TIER1_SIGMA_MULT,
+    _normalize_market,
     _passes_filters,
     _slate_score,
     _stay_away_sort_key,
@@ -2046,3 +2047,95 @@ class TestHybridScoreIntegration:
         # Classification is still tier1b, not affected by hybrid
         assert result["tier1"][0]["tier"] == "tier1b"
         assert result["counts"]["tier1b"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Market alias normalization
+# ---------------------------------------------------------------------------
+
+
+class TestMarketNormalization:
+    """Verify that market alias normalization works for filtering."""
+
+    def test_normalize_canonical_names(self):
+        assert _normalize_market("moneyline") == "moneyline"
+        assert _normalize_market("spread") == "spread"
+        assert _normalize_market("total") == "total"
+
+    def test_normalize_api_aliases(self):
+        assert _normalize_market("h2h") == "moneyline"
+        assert _normalize_market("spreads") == "spread"
+        assert _normalize_market("totals") == "total"
+
+    def test_passes_filters_markets_aliases(self):
+        """Filter with canonical names matches entries using API aliases."""
+        entry_h2h = _entry(market="h2h")
+        entry_spreads = _entry(market="spreads")
+        entry_totals = _entry(market="totals")
+
+        filters = {"markets": ["moneyline", "spread", "total"]}
+        assert _passes_filters(entry_h2h, filters) is True
+        assert _passes_filters(entry_spreads, filters) is True
+        assert _passes_filters(entry_totals, filters) is True
+
+    def test_passes_filters_markets_canonical(self):
+        """Filter with canonical names matches entries using canonical names."""
+        entry_ml = _entry(market="moneyline")
+        entry_sp = _entry(market="spread")
+        entry_tot = _entry(market="total")
+
+        filters = {"markets": ["moneyline", "spread", "total"]}
+        assert _passes_filters(entry_ml, filters) is True
+        assert _passes_filters(entry_sp, filters) is True
+        assert _passes_filters(entry_tot, filters) is True
+
+    def test_passes_filters_single_market(self):
+        """Filtering to a single market excludes the others."""
+        entry_ml = _entry(market="moneyline")
+        entry_sp = _entry(market="spread")
+        entry_tot = _entry(market="total")
+
+        filters = {"markets": ["spread"]}
+        assert _passes_filters(entry_ml, filters) is False
+        assert _passes_filters(entry_sp, filters) is True
+        assert _passes_filters(entry_tot, filters) is False
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_build_daily_slate_all_markets(self, mock_rbb):
+        """build_daily_slate with markets=[moneyline,spread,total] returns all 3."""
+        mock_rbb.return_value = [
+            _make_rec(market="moneyline", quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+            _make_rec(market="spread", quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+            _make_rec(market="total", quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+        ]
+        result = build_daily_slate(
+            {"evt1": _event_lines()},
+            filters={"markets": ["moneyline", "spread", "total"], "max_per_event": 3},
+        )
+        all_entries = result["tier1"] + result["tier2"] + result["tier3"]
+        markets_found = {e["market"] for e in all_entries}
+        assert "moneyline" in markets_found
+        assert "spread" in markets_found
+        assert "total" in markets_found
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_build_daily_slate_spread_only(self, mock_rbb):
+        """build_daily_slate with markets=[spread] returns only spread entries."""
+        mock_rbb.return_value = [
+            _make_rec(market="moneyline", quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+            _make_rec(market="spread", quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+            _make_rec(market="total", quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+        ]
+        result = build_daily_slate(
+            {"evt1": _event_lines()},
+            filters={"markets": ["spread"], "max_per_event": 3},
+        )
+        all_entries = result["tier1"] + result["tier2"] + result["tier3"]
+        assert len(all_entries) == 1
+        assert all_entries[0]["market"] == "spread"
