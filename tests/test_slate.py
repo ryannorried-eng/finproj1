@@ -2139,3 +2139,66 @@ class TestMarketNormalization:
         all_entries = result["tier1"] + result["tier2"] + result["tier3"]
         assert len(all_entries) == 1
         assert all_entries[0]["market"] == "spread"
+
+    def test_normalize_enum_markets(self):
+        """BetType enum members normalize to canonical strings."""
+        assert _normalize_market(BetType.MONEYLINE) == "moneyline"
+        assert _normalize_market(BetType.SPREAD) == "spread"
+        assert _normalize_market(BetType.TOTAL) == "total"
+
+    def test_normalize_none(self):
+        """None normalizes to empty string (no crash)."""
+        assert _normalize_market(None) == ""
+
+    def test_normalize_case_insensitive(self):
+        """Mixed-case input normalizes correctly."""
+        assert _normalize_market("Moneyline") == "moneyline"
+        assert _normalize_market("H2H") == "moneyline"
+        assert _normalize_market("SPREADS") == "spread"
+
+    def test_normalize_unknown_passthrough(self):
+        """Unknown market names pass through lowercased."""
+        assert _normalize_market("player_props") == "player_props"
+
+    def test_passes_filters_enum_market_entry(self):
+        """Entry with BetType enum market passes canonical filter."""
+        entry = _entry()
+        entry["market"] = BetType.MONEYLINE
+        assert _passes_filters(entry, {"markets": ["moneyline"]}) is True
+        assert _passes_filters(entry, {"markets": ["spread"]}) is False
+
+    def test_passes_filters_bet_type_key(self):
+        """Entry using 'bet_type' key instead of 'market' still works."""
+        entry = {"edge_pct": 3.0, "quality_score": 80, "confidence": "High",
+                 "books_used": 5, "bet_type": "spread"}
+        assert _passes_filters(entry, {"markets": ["spread"]}) is True
+        assert _passes_filters(entry, {"markets": ["moneyline"]}) is False
+
+    def test_passes_filters_bet_types_filter_key(self):
+        """Filters using 'bet_types' key (alternative) works like 'markets'."""
+        entry = _entry(market="moneyline")
+        assert _passes_filters(entry, {"bet_types": ["moneyline"]}) is True
+        assert _passes_filters(entry, {"bet_types": ["spread"]}) is False
+
+    def test_passes_filters_missing_market_key(self):
+        """Entry with neither 'market' nor 'bet_type' does not crash."""
+        entry = {"edge_pct": 3.0, "quality_score": 80, "confidence": "High",
+                 "books_used": 5}
+        # normalize(None) -> "" which won't match any real market
+        assert _passes_filters(entry, {"markets": ["moneyline"]}) is False
+        # But no filter means it passes
+        assert _passes_filters(entry, {}) is True
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_slate_service_markets_filter_nonzero(self, mock_rbb):
+        """Regression: slate_service injecting markets filter must NOT zero out results."""
+        mock_rbb.return_value = [
+            _make_rec(market="moneyline", quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+        ]
+        result = build_daily_slate(
+            {"evt1": _event_lines()},
+            filters={"markets": ["moneyline", "spread", "total"], "max_per_event": 3},
+        )
+        all_entries = result["tier1"] + result["tier2"] + result["tier3"]
+        assert len(all_entries) > 0

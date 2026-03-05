@@ -693,9 +693,18 @@ _MARKET_ALIASES: dict[str, str] = {
 }
 
 
-def _normalize_market(raw: str) -> str:
-    """Normalize a market name to its canonical form."""
-    return _MARKET_ALIASES.get(raw.lower(), raw.lower())
+def _normalize_market(raw) -> str:
+    """Normalize a market name to its canonical form.
+
+    Accepts plain strings, enum members (with a ``.value`` attribute),
+    or ``None``.  Always returns a lowercase canonical string.
+    """
+    if raw is None:
+        return ""
+    if hasattr(raw, "value"):
+        raw = raw.value
+    s = str(raw).lower()
+    return _MARKET_ALIASES.get(s, s)
 
 
 def _passes_filters(entry: dict, filters: dict) -> bool:
@@ -712,9 +721,11 @@ def _passes_filters(entry: dict, filters: dict) -> bool:
             return False
     if filters.get("min_quality") and entry["quality_score"] < filters["min_quality"]:
         return False
-    if filters.get("markets"):
-        allowed = {_normalize_market(m) for m in filters["markets"]}
-        if _normalize_market(entry["market"]) not in allowed:
+    market_filter = filters.get("markets") or filters.get("bet_types")
+    if market_filter:
+        allowed = {_normalize_market(m) for m in market_filter}
+        raw_market = entry.get("market", entry.get("bet_type"))
+        if _normalize_market(raw_market) not in allowed:
             return False
     if filters.get("hide_low_confidence") and entry["confidence"] == "Low":
         return False
