@@ -1,6 +1,6 @@
 """Tests for the Daily Slate aggregator (slate module)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -14,7 +14,9 @@ from line_tracker.slate import (
     _STAY_AWAY_LIMIT,
     _TIER1_BASE_EDGE,
     _TIER1_SIGMA_MULT,
+    _is_future_event,
     _normalize_market,
+    _parse_commence_time,
     _passes_filters,
     _slate_score,
     _stay_away_sort_key,
@@ -474,7 +476,7 @@ class TestBuildDailySlate:
     @patch("line_tracker.slate.recommend_best_bets")
     def test_metadata_attached(self, mock_rbb):
         """Slate entries carry event metadata."""
-        ct = datetime(2025, 6, 2, 19, 0)
+        ct = datetime(2099, 6, 2, 19, 0, tzinfo=timezone.utc)
         mock_rbb.return_value = [_make_rec(
             books_used_count=6, newest_update_age_min=5.0,
             quality_tier="Strong", confidence="High",
@@ -2202,3 +2204,154 @@ class TestMarketNormalization:
         )
         all_entries = result["tier1"] + result["tier2"] + result["tier3"]
         assert len(all_entries) > 0
+
+
+# ---------------------------------------------------------------------------
+# _parse_commence_time
+# ---------------------------------------------------------------------------
+
+
+class TestParseCommenceTime:
+    def test_iso_with_utc_offset(self):
+        dt = _parse_commence_time("2026-03-07T00:00:00+00:00")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt == datetime(2026, 3, 7, tzinfo=timezone.utc)
+
+    def test_iso_with_positive_offset(self):
+        dt = _parse_commence_time("2026-03-07T05:00:00+05:00")
+        assert dt is not None
+        assert dt == datetime(2026, 3, 7, 0, 0, tzinfo=timezone.utc)
+
+    def test_iso_no_offset_treated_as_utc(self):
+        dt = _parse_commence_time("2026-03-07T12:00:00")
+        assert dt is not None
+        assert dt.tzinfo == timezone.utc
+        assert dt == datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc)
+
+    def test_aware_datetime_passthrough(self):
+        src = datetime(2026, 3, 7, tzinfo=timezone.utc)
+        assert _parse_commence_time(src) == src
+
+    def test_naive_datetime_gets_utc(self):
+        src = datetime(2026, 3, 7)
+        result = _parse_commence_time(src)
+        assert result is not None
+        assert result.tzinfo == timezone.utc
+
+    def test_none_returns_none(self):
+        assert _parse_commence_time(None) is None
+
+    def test_invalid_string_returns_none(self):
+        assert _parse_commence_time("not-a-date") is None
+
+    def test_empty_string_returns_none(self):
+        assert _parse_commence_time("") is None
+
+    def test_non_string_non_datetime_returns_none(self):
+        assert _parse_commence_time(12345) is None
+
+
+# ---------------------------------------------------------------------------
+# _is_future_event
+# ---------------------------------------------------------------------------
+
+
+class TestIsFutureEvent:
+    def test_future_iso_string_included(self):
+        now = datetime(2026, 3, 7, 0, 0, tzinfo=timezone.utc)
+        assert _is_future_event("2026-03-07T12:00:00+00:00", now=now) is True
+
+    def test_past_iso_string_excluded(self):
+        now = datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc)
+        assert _is_future_event("2026-03-06T00:00:00+00:00", now=now) is False
+
+    def test_same_instant_included(self):
+        now = datetime(2026, 3, 7, 0, 0, tzinfo=timezone.utc)
+        assert _is_future_event("2026-03-07T00:00:00+00:00", now=now) is True
+
+    def test_none_commence_time_included(self):
+        assert _is_future_event(None) is True
+
+    def test_invalid_string_included(self):
+        assert _is_future_event("garbage") is True
+
+    def test_later_same_utc_day(self):
+        now = datetime(2026, 3, 7, 10, 0, tzinfo=timezone.utc)
+        assert _is_future_event("2026-03-07T20:00:00+00:00", now=now) is True
+
+    def test_next_utc_day(self):
+        now = datetime(2026, 3, 7, 23, 59, tzinfo=timezone.utc)
+        assert _is_future_event("2026-03-08T01:00:00+00:00", now=now) is True
+
+    def test_future_datetime_object_included(self):
+        now = datetime(2026, 3, 7, 0, 0, tzinfo=timezone.utc)
+        ct = datetime(2026, 3, 8, 0, 0, tzinfo=timezone.utc)
+        assert _is_future_event(ct, now=now) is True
+
+    def test_past_datetime_object_excluded(self):
+        now = datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc)
+        ct = datetime(2026, 3, 6, 0, 0, tzinfo=timezone.utc)
+        assert _is_future_event(ct, now=now) is False
+
+
+# ---------------------------------------------------------------------------
+# build_daily_slate commence_time filtering regression
+# ---------------------------------------------------------------------------
+
+
+class TestCommenceTimeFiltering:
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_future_event_with_offset_included(self, mock_rbb):
+        """Events with +00:00 commence_time in the future are included."""
+        future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        mock_rbb.return_value = [
+            _make_rec(quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+        ]
+        result = build_daily_slate(
+            {"evt1": _event_lines(commence=future)},
+        )
+        total = result["counts"]["total_recs"]
+        assert total > 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_past_event_excluded(self, mock_rbb):
+        """Events with commence_time in the past are excluded."""
+        past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        mock_rbb.return_value = [
+            _make_rec(quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+        ]
+        result = build_daily_slate(
+            {"evt1": _event_lines(commence=past)},
+        )
+        assert result["counts"]["total_recs"] == 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_missing_commence_time_does_not_crash(self, mock_rbb):
+        """Events with None commence_time are included (fail-open)."""
+        mock_rbb.return_value = [
+            _make_rec(quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+        ]
+        result = build_daily_slate(
+            {"evt1": _event_lines(commence=None)},
+        )
+        total = result["counts"]["total_recs"]
+        assert total > 0
+
+    @patch("line_tracker.slate.recommend_best_bets")
+    def test_mixed_future_and_past_events(self, mock_rbb):
+        """Only future events contribute entries."""
+        future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        mock_rbb.return_value = [
+            _make_rec(quality_score=80, edge_pct=3.0,
+                      quality_tier="Strong", confidence="High"),
+        ]
+        result = build_daily_slate({
+            "future_evt": _event_lines(commence=future),
+            "past_evt": _event_lines(commence=past),
+        })
+        assert result["counts"]["total_recs"] == 1
