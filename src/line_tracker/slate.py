@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 
 from line_tracker.alpha import ALPHA_GATE_ENABLED
 from line_tracker.best_bets import recommend_best_bets
+from line_tracker.config import get_prune_debug_mode
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
 from line_tracker.models import BettingLine, BetType
+from line_tracker.core.logging import get_logger
 from line_tracker.scoring import (
     compute_alpha_fields as _compute_alpha_fields,
     compute_confidence_label as _compute_confidence_label,
@@ -19,6 +21,8 @@ from line_tracker.scoring import (
     rank_candidates,
 )
 from line_tracker.tiering import assign_tiers
+
+_log = get_logger(__name__, source="slate")
 
 # ── tier thresholds (EV/$100 space) ───────────────────────────────
 # edge_pct is now EV per $100 (= 100 * edge_ev).  All edge thresholds
@@ -808,6 +812,11 @@ def build_daily_slate(
     th = thresholds or STANDARD_THRESHOLDS
     max_per_event: int = filters.get("max_per_event", 1)
 
+    show_debug = (
+        os.environ.get("LINE_TRACKER_DEBUG", "").lower() in ("1", "true", "yes")
+        or filters.get("debug", False)
+    )
+
     all_entries: list[dict] = []
 
     for event_id, lines in lines_by_event.items():
@@ -825,6 +834,25 @@ def build_daily_slate(
 
         # Apply pluggable tiering to all recs for this event
         assign_tiers(recs, method=tiering_method)
+
+        # Diagnostics: log per-event rec counts and top candidates
+        _debug_mode = get_prune_debug_mode()
+        if _debug_mode or show_debug:
+            _log.info(
+                "slate_diag:event %s recs_total=%d max_per_event=%d",
+                event_id, len(recs), max_per_event,
+            )
+            for _r in recs[:3]:
+                _log.info(
+                    "slate_diag:top_rec event=%s market=%s sel=%s "
+                    "edge_z=%.3f ev_shrunk=%.4f qs=%d alpha=%s tier=%s",
+                    event_id, _r.market, _r.selection,
+                    getattr(_r, "edge_z", 0.0) or 0.0,
+                    getattr(_r, "edge_ev_shrunk", 0.0) or 0.0,
+                    getattr(_r, "quality_score", 0) or 0,
+                    getattr(_r, "alpha_label", "n/a"),
+                    getattr(_r, "bet_tier", "n/a"),
+                )
 
         top_recs = recs[: max(1, max_per_event)]
 
@@ -992,10 +1020,6 @@ def build_daily_slate(
     result["debug_stats"] = compute_slate_debug_stats(all_entries)
 
     # ── Debug counters (extended breakdown, shown only on flag) ───
-    show_debug = (
-        os.environ.get("LINE_TRACKER_DEBUG", "").lower() in ("1", "true", "yes")
-        or filters.get("debug", False)
-    )
     if show_debug:
         result["debug"] = {
             **result["counts"],

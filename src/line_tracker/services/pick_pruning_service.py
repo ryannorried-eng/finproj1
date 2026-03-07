@@ -7,8 +7,10 @@ Volume comes from frequent snapshots (Step 5), not from relaxing thresholds.
 from __future__ import annotations
 
 from line_tracker.config import (
+    get_debug_prune_profile,
     get_prune_allowed_alpha_labels,
     get_prune_allowed_tiers,
+    get_prune_debug_mode,
     get_prune_max_hold,
     get_prune_min_books,
     get_prune_min_edge_z,
@@ -28,21 +30,46 @@ def _resolve_thresholds(
     min_books_used: int | None,
     max_market_hold: float | None,
 ) -> tuple:
-    """Resolve gate thresholds from explicit kwargs or config defaults."""
-    if allowed_tiers is None:
-        allowed_tiers = get_prune_allowed_tiers()
-    if allowed_alpha is None:
-        allowed_alpha = get_prune_allowed_alpha_labels()
-    if min_edge_z is None:
-        min_edge_z = get_prune_min_edge_z()
-    if min_ev_shrunk is None:
-        min_ev_shrunk = get_prune_min_ev_shrunk()
-    if min_quality_score is None:
-        min_quality_score = get_prune_min_quality()
-    if min_books_used is None:
-        min_books_used = get_prune_min_books()
-    if max_market_hold is None:
-        max_market_hold = get_prune_max_hold()
+    """Resolve gate thresholds from explicit kwargs or config defaults.
+
+    When ``PRUNE_DEBUG_MODE`` is enabled and no explicit kwarg overrides
+    are provided, uses relaxed thresholds from ``get_debug_prune_profile``
+    so that Tier 3 and Weak-alpha entries survive pruning for diagnostics.
+    """
+    debug = get_prune_debug_mode()
+
+    if debug:
+        profile = get_debug_prune_profile()
+        if allowed_tiers is None:
+            allowed_tiers = profile["allowed_tiers"]
+        if allowed_alpha is None:
+            allowed_alpha = profile["allowed_alpha"]
+        if min_edge_z is None:
+            min_edge_z = profile["min_edge_z"]
+        if min_ev_shrunk is None:
+            min_ev_shrunk = profile["min_ev_shrunk"]
+        if min_quality_score is None:
+            min_quality_score = profile["min_quality"]
+        if min_books_used is None:
+            min_books_used = profile["min_books"]
+        if max_market_hold is None:
+            max_market_hold = profile["max_hold"]
+    else:
+        if allowed_tiers is None:
+            allowed_tiers = get_prune_allowed_tiers()
+        if allowed_alpha is None:
+            allowed_alpha = get_prune_allowed_alpha_labels()
+        if min_edge_z is None:
+            min_edge_z = get_prune_min_edge_z()
+        if min_ev_shrunk is None:
+            min_ev_shrunk = get_prune_min_ev_shrunk()
+        if min_quality_score is None:
+            min_quality_score = get_prune_min_quality()
+        if min_books_used is None:
+            min_books_used = get_prune_min_books()
+        if max_market_hold is None:
+            max_market_hold = get_prune_max_hold()
+
     return (
         allowed_tiers, allowed_alpha, min_edge_z, min_ev_shrunk,
         min_quality_score, min_books_used, max_market_hold,

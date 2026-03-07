@@ -7,7 +7,9 @@ by an external scheduler or cron job via the CLI ``cycle`` command.
 
 from __future__ import annotations
 
+import statistics
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 from line_tracker.core.logging import get_logger
@@ -20,6 +22,32 @@ from line_tracker.services.rec_snapshot_service import (
 )
 
 _log = get_logger(__name__, source="automation_service")
+
+
+def _log_candidate_summary(entries: list[dict]) -> None:
+    """Log a compact candidate summary before pruning."""
+    tier_counts = dict(Counter(e.get("tier", "?") for e in entries))
+    market_counts = dict(Counter(e.get("market", "?") for e in entries))
+    alpha_counts = dict(Counter(e.get("alpha_label", "?") for e in entries))
+
+    edge_zs = [e.get("edge_z", 0.0) for e in entries if e.get("edge_z") is not None]
+    ev_shrunk = [e.get("edge_ev_shrunk", 0.0) for e in entries if e.get("edge_ev_shrunk") is not None]
+
+    def _mmm(vals: list[float]) -> str:
+        if not vals:
+            return "n/a"
+        return f"{min(vals):.3f}/{statistics.median(vals):.3f}/{max(vals):.3f}"
+
+    tier_str = " ".join(f"{k}={v}" for k, v in sorted(tier_counts.items()))
+    mkt_str = " ".join(f"{k}={v}" for k, v in sorted(market_counts.items()))
+    alpha_str = " ".join(f"{k}={v}" for k, v in sorted(alpha_counts.items()))
+
+    _log.info(
+        "candidate_summary n=%d tiers=[%s] markets=[%s] alpha=[%s] "
+        "edge_z(min/med/max)=%s ev_shrunk(min/med/max)=%s",
+        len(entries), tier_str, mkt_str, alpha_str,
+        _mmm(edge_zs), _mmm(ev_shrunk),
+    )
 
 
 def run_cycle(
@@ -116,6 +144,10 @@ def run_cycle(
         for entry in all_entries[:3]:
             vals = " ".join(f"{f}={entry.get(f)}" for f in _debug_fields)
             _log.info("dry_run:slate_entry %s", vals)
+
+    # Compact candidate summary before pruning
+    if dry_run and all_entries:
+        _log_candidate_summary(all_entries)
 
     # 3. Prune
     clv_profile = None
