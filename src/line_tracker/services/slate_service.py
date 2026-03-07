@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from line_tracker.config import get_slate_markets
+from line_tracker.config import get_prune_debug_mode, get_slate_markets, get_slate_max_per_event
 from line_tracker.slate import build_daily_slate, thresholds_from_calibration
 
 
@@ -28,6 +28,14 @@ def build_daily_slate_service(
     merged_filters = dict(filters) if filters else {}
     if "markets" not in merged_filters:
         merged_filters["markets"] = get_slate_markets()
+
+    # Inject max_per_event from config (debug mode defaults to 3)
+    if "max_per_event" not in merged_filters:
+        cfg_max = get_slate_max_per_event()
+        if cfg_max > 1:
+            merged_filters["max_per_event"] = cfg_max
+        elif get_prune_debug_mode():
+            merged_filters["max_per_event"] = 3
 
     return build_daily_slate(
         lines_by_event,

@@ -281,3 +281,41 @@ def get_edge_z_sigma_min() -> float:
     """Minimum ev_sigma for edge_z computation to prevent compression (default 0.02)."""
     raw = _read_secret("EDGE_Z_SIGMA_MIN", "0.02")
     return float(raw) if raw else 0.02
+
+
+# ── Debug / observability configuration ──────────────────────────
+
+
+def get_prune_debug_mode() -> bool:
+    """True when PRUNE_DEBUG_MODE is enabled (default off)."""
+    raw = _read_secret("PRUNE_DEBUG_MODE", "0")
+    return str(raw).strip() in ("1", "true", "True", "yes")
+
+
+def get_slate_max_per_event() -> int:
+    """Maximum recommendations per event in slate (default 1)."""
+    raw = _read_secret("SLATE_MAX_PER_EVENT", "1")
+    return int(raw) if raw else 1
+
+
+def get_debug_prune_profile() -> dict:
+    """Return effective pruning thresholds for debug mode.
+
+    When PRUNE_DEBUG_MODE is enabled, relaxes tier and alpha gates and
+    lowers edge_z / ev_shrunk floors so that Tier 3 candidates survive
+    pruning and the next real bottleneck becomes visible.
+
+    Normal-mode callers should NOT use this — it is only for diagnostics.
+    """
+    base_edge_z = get_prune_min_edge_z()
+    base_ev_shrunk = get_prune_min_ev_shrunk()
+
+    return {
+        "allowed_tiers": frozenset({"tier1a", "tier1b", "tier2", "tier3"}),
+        "allowed_alpha": frozenset({"Strong", "Neutral", "Weak", ""}),
+        "min_edge_z": min(base_edge_z, 0.50),
+        "min_ev_shrunk": min(base_ev_shrunk, 0.0) if base_ev_shrunk > 0 else base_ev_shrunk,
+        "min_quality": get_prune_min_quality(),
+        "min_books": get_prune_min_books(),
+        "max_hold": get_prune_max_hold(),
+    }
