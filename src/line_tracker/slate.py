@@ -6,6 +6,7 @@ import os
 import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 from line_tracker.alpha import ALPHA_GATE_ENABLED
 from line_tracker.best_bets import recommend_best_bets
@@ -683,6 +684,45 @@ def compute_slate_debug_stats(entries: list[dict]) -> dict:
 # ── display filters (applied AFTER classification) ─────────────────
 
 
+def _parse_commence_time(raw) -> datetime | None:
+    """Parse a commence_time value into a timezone-aware UTC datetime.
+
+    Accepts ``datetime`` objects (aware or naive) and ISO 8601 strings
+    (with or without timezone offsets like ``+00:00``).  Returns ``None``
+    for missing or unparseable values — callers should treat ``None`` as
+    "include the event" (fail-open).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw.astimezone(timezone.utc)
+    if isinstance(raw, str):
+        try:
+            dt = datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    return None
+
+
+def _is_future_event(commence_time, *, now: datetime | None = None) -> bool:
+    """Return True if the event should be included in the slate.
+
+    An event is included when its commence_time is >= *now* (UTC) or when
+    commence_time is missing / unparseable (fail-open).
+    """
+    parsed = _parse_commence_time(commence_time)
+    if parsed is None:
+        return True  # fail-open: include events we can't parse
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return parsed >= now
+
+
 _MARKET_ALIASES: dict[str, str] = {
     "h2h": "moneyline",
     "moneyline": "moneyline",
@@ -772,6 +812,11 @@ def build_daily_slate(
 
     for event_id, lines in lines_by_event.items():
         if not lines:
+            continue
+
+        # Skip past events — only include future (or unparseable) commence_times
+        sample_ct = lines[0].commence_time
+        if not _is_future_event(sample_ct):
             continue
 
         recs = recommend_best_bets(lines)
