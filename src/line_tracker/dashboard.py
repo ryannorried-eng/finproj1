@@ -632,6 +632,31 @@ def _sidebar():
                     "emitted to the app logger."
                 )
 
+            # Automation cycle runner
+            if _mode == "db":
+                st.divider()
+                from line_tracker.ui.components.cycle_runner import (
+                    render_cycle_panel,
+                )
+                _cycle_api_key = (
+                    st.session_state.get("api_key") or None
+                )
+                _cycle_sport = SPORTS.get(
+                    st.session_state.get("sport_name", "NBA"),
+                    "basketball_nba",
+                )
+                try:
+                    with LineStore(DB_PATH) as _cycle_store:
+                        render_cycle_panel(
+                            _cycle_store,
+                            _cycle_sport,
+                            _cycle_api_key,
+                        )
+                except Exception as exc:
+                    st.caption(
+                        f"Cycle runner unavailable: {exc}"
+                    )
+
 
 # ---------------------------------------------------------------------------
 # Arb stake calculator
