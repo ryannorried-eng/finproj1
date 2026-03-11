@@ -657,6 +657,36 @@ def _sidebar():
                         f"Cycle runner unavailable: {exc}"
                     )
 
+            # Recent cycle runs history
+            if _mode == "db":
+                try:
+                    with LineStore(DB_PATH) as _runs_store:
+                        _recent = (
+                            _runs_store.cycle_runs_repo.get_recent_cycles(
+                                limit=10
+                            )
+                        )
+                    if _recent:
+                        import pandas as _pd
+
+                        st.divider()
+                        st.caption("**Recent Cycle Runs**")
+                        _cols = [
+                            "started_at",
+                            "sport",
+                            "picks_generated",
+                            "snapshots_written",
+                            "clv_updates_completed",
+                            "success",
+                        ]
+                        _df = _pd.DataFrame(_recent)[_cols]
+                        _df["success"] = _df["success"].map(
+                            {1: "Yes", 0: "No"}
+                        )
+                        st.dataframe(_df, use_container_width=True)
+                except Exception:
+                    pass
+
 
 # ---------------------------------------------------------------------------
 # Arb stake calculator

@@ -4,6 +4,7 @@ from .bets_repo import BetsRepo
 from .calibration_repo import CalibrationRepo
 from .clv_model_repo import ClvModelRepo
 from .clv_repo import ClvRepo
+from .cycle_runs_repo import CycleRunsRepo
 from .events_repo import EventsRepo
 from .lines_repo import LinesRepo
 from .outcomes_repo import OutcomesRepo
@@ -17,6 +18,7 @@ __all__ = [
     "ClvRepo",
     "CalibrationRepo",
     "ClvModelRepo",
+    "CycleRunsRepo",
     "EventsRepo",
     "OutcomesRepo",
     "RecSnapshotsRepo",
