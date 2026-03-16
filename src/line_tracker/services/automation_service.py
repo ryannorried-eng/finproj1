@@ -214,6 +214,13 @@ def run_full_cycle(
         len(result["warnings"]),
         len(result["errors"]),
     )
+
+    # Persist cycle run for observability (best-effort)
+    try:
+        store.cycle_runs_repo.insert_cycle_run(result)
+    except Exception as exc:
+        _log.warning("run_full_cycle:persist_cycle_run_failed %s", exc)
+
     return result
 
 

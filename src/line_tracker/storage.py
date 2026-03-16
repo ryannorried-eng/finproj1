@@ -14,6 +14,7 @@ from line_tracker.db.repos import (
     CalibrationRepo,
     ClvModelRepo,
     ClvRepo,
+    CycleRunsRepo,
     EventsRepo,
     LinesRepo,
     OutcomesRepo,
@@ -73,6 +74,7 @@ class LineStore:
         self.rec_snapshots_repo = RecSnapshotsRepo(self._conn)
         self.outcomes_repo = OutcomesRepo(self._conn)
         self.clv_model_repo = ClvModelRepo(self._conn)
+        self.cycle_runs_repo = CycleRunsRepo(self._conn)
 
     def _maybe_commit(self) -> None:
         if not self._in_explicit_txn:
