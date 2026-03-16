@@ -121,7 +121,7 @@ class TestPrunePicksWithReasons:
         assert all(v == 0 for v in reasons.values())
 
     def test_tier_failure_counted(self):
-        entries = [_make_entry(tier="tier3")]
+        entries = [_make_entry(tier="avoid")]
         survivors, reasons = prune_picks_with_reasons(entries)
         assert len(survivors) == 0
         assert reasons["tier"] == 1
@@ -160,7 +160,7 @@ class TestPrunePicksWithReasons:
     def test_multiple_entries_different_gates(self):
         """Different gates produce correct counts."""
         entries = [
-            _make_entry(tier="tier3"),
+            _make_entry(tier="avoid"),
             _make_entry(alpha_label="Weak"),
             _make_entry(edge_z=0.1),
             _make_entry(edge_ev_shrunk=-0.01),
@@ -180,7 +180,7 @@ class TestPrunePicksWithReasons:
     def test_first_failure_only(self):
         """Entry counted only for its first failing gate."""
         entries = [
-            _make_entry(tier="tier3", alpha_label="Weak"),
+            _make_entry(tier="avoid", alpha_label="Weak"),
         ]
         survivors, reasons = prune_picks_with_reasons(entries)
         assert reasons["tier"] == 1
@@ -211,7 +211,7 @@ class TestAutomationPruneBreakdownLogging:
         )
 
         entries = [
-            _make_entry(tier="tier3"),
+            _make_entry(tier="avoid"),
             _make_entry(edge_z=0.1),
         ]
         pruned, prune_reasons = prune_picks_with_reasons(

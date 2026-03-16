@@ -31,8 +31,12 @@ class TestPrunePicks:
         result = prune_picks([_make_entry()])
         assert len(result) == 1
 
-    def test_tier3_filtered(self):
+    def test_tier3_allowed(self):
         result = prune_picks([_make_entry(tier="tier3")])
+        assert len(result) == 1
+
+    def test_avoid_filtered(self):
+        result = prune_picks([_make_entry(tier="avoid")])
         assert len(result) == 0
 
     def test_weak_alpha_filtered(self):
@@ -84,7 +88,7 @@ class TestPrunePicks:
     def test_multiple_entries_mixed(self):
         entries = [
             _make_entry(event_id="e1"),
-            _make_entry(event_id="e2", tier="tier3"),
+            _make_entry(event_id="e2", tier="avoid"),
             _make_entry(event_id="e3", edge_z=1.0),
             _make_entry(event_id="e4"),
         ]
@@ -92,13 +96,14 @@ class TestPrunePicks:
         assert len(result) == 2
         assert {e["event_id"] for e in result} == {"e1", "e4"}
 
-    def test_tier1a_and_tier2_allowed(self):
+    def test_tier1a_tier2_tier3_allowed(self):
         entries = [
             _make_entry(tier="tier1a"),
             _make_entry(tier="tier2"),
+            _make_entry(tier="tier3"),
         ]
         result = prune_picks(entries)
-        assert len(result) == 2
+        assert len(result) == 3
 
     def test_neutral_alpha_allowed(self):
         result = prune_picks([_make_entry(alpha_label="Neutral")])
