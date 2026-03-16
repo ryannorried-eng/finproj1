@@ -252,7 +252,7 @@ def get_prune_allowed_alpha_labels() -> frozenset[str]:
     raw = _read_secret("PRUNE_ALLOWED_ALPHA_LABELS", "Strong,Neutral,Weak")
     if not raw:
         return frozenset({"Strong", "Neutral", "Weak"})
-    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+    return frozenset(t.strip().title() for t in raw.split(",") if t.strip())
 
 
 # ── Slate markets configuration ─────────────────────────────────

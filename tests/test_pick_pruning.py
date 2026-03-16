@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from line_tracker.services.pick_pruning_service import prune_picks
+import pytest
+
+from line_tracker.services.pick_pruning_service import (
+    prune_picks,
+    prune_picks_with_reasons,
+)
 
 
 def _make_entry(**overrides) -> dict:
@@ -123,3 +128,47 @@ class TestPrunePicks:
             min_edge_z=1.0,
         )
         assert len(result) == 1
+
+
+class TestAlphaLabelNormalization:
+    """Verify that alpha_label comparison is case-insensitive."""
+
+    @pytest.mark.parametrize(
+        "label",
+        ["weak", "WEAK", "Weak", " weak ", "NEUTRAL", "neutral", "Neutral",
+         "strong", "STRONG", "Strong"],
+    )
+    def test_case_variants_pass(self, label):
+        """All case variants of valid labels should survive the alpha gate."""
+        result = prune_picks([_make_entry(alpha_label=label)])
+        assert len(result) == 1, f"alpha_label={label!r} was rejected"
+
+    @pytest.mark.parametrize("label", ["weak", "WEAK", " Weak "])
+    def test_case_variants_no_alpha_rejection(self, label):
+        """Ensure zero alpha rejections for case-variant labels."""
+        _, reasons = prune_picks_with_reasons([_make_entry(alpha_label=label)])
+        assert reasons["alpha"] == 0, (
+            f"alpha_label={label!r} caused alpha rejection"
+        )
+
+    @pytest.mark.parametrize("label", [None, "", "  ", "Unknown", "invalid"])
+    def test_invalid_labels_rejected(self, label):
+        """None, empty, whitespace-only, and unknown labels must be blocked."""
+        result = prune_picks([_make_entry(alpha_label=label)])
+        assert len(result) == 0, f"alpha_label={label!r} should be rejected"
+
+    def test_lowercase_env_var_config_normalised(self, monkeypatch):
+        """Config with lowercase env var should still produce title-cased set."""
+        monkeypatch.setenv("PRUNE_ALLOWED_ALPHA_LABELS", "strong,neutral,weak")
+        from line_tracker.config import get_prune_allowed_alpha_labels
+
+        allowed = get_prune_allowed_alpha_labels()
+        assert allowed == frozenset({"Strong", "Neutral", "Weak"})
+
+    def test_mixed_case_env_var_config_normalised(self, monkeypatch):
+        """Config with UPPER env var should still produce title-cased set."""
+        monkeypatch.setenv("PRUNE_ALLOWED_ALPHA_LABELS", "STRONG,NEUTRAL")
+        from line_tracker.config import get_prune_allowed_alpha_labels
+
+        allowed = get_prune_allowed_alpha_labels()
+        assert allowed == frozenset({"Strong", "Neutral"})

@@ -167,7 +167,8 @@ def prune_picks_with_reasons(
         if entry.get("tier", "") not in allowed_tiers:
             reasons["tier"] += 1
             continue
-        if entry.get("alpha_label", "") not in allowed_alpha:
+        alpha = (entry.get("alpha_label") or "").strip().title()
+        if alpha not in allowed_alpha:
             reasons["alpha"] += 1
             continue
         if (entry.get("edge_z") or 0) < min_edge_z:
