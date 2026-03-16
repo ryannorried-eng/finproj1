@@ -33,9 +33,15 @@ def _make_entry(**overrides) -> dict:
 class TestPruneDebugModeTierGate:
     """PRUNE_DEBUG_MODE allows tier3 through tier gate."""
 
-    def test_tier3_blocked_in_normal_mode(self, monkeypatch):
+    def test_tier3_allowed_in_normal_mode(self, monkeypatch):
         monkeypatch.delenv("PRUNE_DEBUG_MODE", raising=False)
         entry = _make_entry(tier="tier3")
+        result = prune_picks([entry])
+        assert len(result) == 1
+
+    def test_avoid_blocked_in_normal_mode(self, monkeypatch):
+        monkeypatch.delenv("PRUNE_DEBUG_MODE", raising=False)
+        entry = _make_entry(tier="avoid")
         result = prune_picks([entry])
         assert len(result) == 0
 
@@ -92,7 +98,7 @@ class TestNormalModeBehaviorUnchanged:
 
     def test_normal_tier_gate(self, monkeypatch):
         monkeypatch.delenv("PRUNE_DEBUG_MODE", raising=False)
-        entry = _make_entry(tier="tier3")
+        entry = _make_entry(tier="avoid")
         result = prune_picks([entry])
         assert len(result) == 0
 

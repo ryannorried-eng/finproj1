@@ -201,9 +201,14 @@ def get_conf_w_max() -> float:
 
 
 def get_prune_min_edge_z() -> float:
-    """Minimum edge-z to survive pruning (default 1.75)."""
-    raw = _read_secret("PRUNE_MIN_EDGE_Z", "1.75")
-    return float(raw) if raw else 1.75
+    """Minimum edge-z to survive pruning (default 1.15).
+
+    Lowered from 1.75 to 1.15 to align with TIER3_MIN_EDGE_Z in slate.py,
+    allowing Tier 3 candidates to survive pruning.  Other gates (quality,
+    books, hold, ev_shrunk) still apply.
+    """
+    raw = _read_secret("PRUNE_MIN_EDGE_Z", "1.15")
+    return float(raw) if raw else 1.15
 
 
 def get_prune_min_ev_shrunk() -> float:
@@ -235,10 +240,10 @@ def get_prune_max_hold() -> float:
 
 
 def get_prune_allowed_tiers() -> frozenset[str]:
-    """Allowed tiers for pruning (default tier1a,tier1b,tier2)."""
-    raw = _read_secret("PRUNE_ALLOWED_TIERS", "tier1a,tier1b,tier2")
+    """Allowed tiers for pruning (default tier1a,tier1b,tier2,tier3)."""
+    raw = _read_secret("PRUNE_ALLOWED_TIERS", "tier1a,tier1b,tier2,tier3")
     if not raw:
-        return frozenset({"tier1a", "tier1b", "tier2"})
+        return frozenset({"tier1a", "tier1b", "tier2", "tier3"})
     return frozenset(t.strip() for t in raw.split(",") if t.strip())
 
 
