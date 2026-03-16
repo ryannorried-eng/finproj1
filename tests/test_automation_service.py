@@ -210,3 +210,59 @@ class TestCaptureClosingLinesBatchSize:
 
         sig = inspect.signature(capture_closing_lines)
         assert sig.parameters["batch_size"].default == 200
+
+
+# ---------------------------------------------------------------------------
+# run_full_cycle — cycle_runs persistence & dry_run contract
+# ---------------------------------------------------------------------------
+
+_MOCK_INNER = {
+    "cycle_ts": "2025-01-01T00:00:00",
+    "slate_entries": 5,
+    "pruned_count": 3,
+    "top_picks": [{"pick": 1}],
+    "snapshot_count": 1,
+    "closed_count": 0,
+}
+
+
+class TestRunFullCyclePersistence:
+    """run_full_cycle should persist cycle_runs only when dry_run=False."""
+
+    def test_normal_run_persists_cycle_run(self, tmp_path, monkeypatch):
+        from line_tracker.services import automation_service
+
+        monkeypatch.setattr(
+            automation_service, "run_cycle", lambda *a, **kw: _MOCK_INNER
+        )
+        db = tmp_path / "test.db"
+        with LineStore(db) as store:
+            result = automation_service.run_full_cycle(
+                store, sport="basketball_nba", dry_run=False
+            )
+            rows = store.cycle_runs_repo.get_recent_cycles(limit=5)
+            assert len(rows) == 1
+            assert rows[0]["sport"] == "basketball_nba"
+            assert rows[0]["success"] == 1
+            # Result dict is still returned
+            assert result["sport"] == "basketball_nba"
+            assert result["picks_generated"] == 1
+
+    def test_dry_run_does_not_persist_cycle_run(self, tmp_path, monkeypatch):
+        from line_tracker.services import automation_service
+
+        monkeypatch.setattr(
+            automation_service, "run_cycle", lambda *a, **kw: _MOCK_INNER
+        )
+        db = tmp_path / "test.db"
+        with LineStore(db) as store:
+            result = automation_service.run_full_cycle(
+                store, sport="basketball_nba", dry_run=True
+            )
+            rows = store.cycle_runs_repo.get_recent_cycles(limit=5)
+            assert len(rows) == 0
+            # Result dict is still returned with full payload
+            assert result["sport"] == "basketball_nba"
+            assert result["picks_generated"] == 1
+            assert "started_at" in result
+            assert "finished_at" in result
