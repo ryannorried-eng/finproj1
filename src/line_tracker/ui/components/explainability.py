@@ -23,6 +23,7 @@ def render_pick_explanation(
     *,
     debug_enabled: bool,
     context: str = "slate",
+    key_suffix: str | None = None,
 ) -> None:
     """Render a 'Why this pick?' expander for a single recommendation.
 
@@ -39,6 +40,9 @@ def render_pick_explanation(
     context:
         ``"slate"`` for Daily Slate entries, ``"shopping"`` for Best Lines
         standouts.
+    key_suffix:
+        Optional unique suffix appended to all widget keys to prevent
+        duplicate-key errors when the same pick appears more than once.
     """
     if not debug_enabled:
         return
@@ -46,7 +50,7 @@ def render_pick_explanation(
     if context == "shopping":
         _render_shopping_explanation(entry)
     else:
-        _render_slate_explanation(entry)
+        _render_slate_explanation(entry, key_suffix=key_suffix)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +58,11 @@ def render_pick_explanation(
 # ---------------------------------------------------------------------------
 
 
-def _render_slate_explanation(entry: dict[str, Any]) -> None:
+def _render_slate_explanation(
+    entry: dict[str, Any],
+    *,
+    key_suffix: str | None = None,
+) -> None:
     """Render explainability for a Daily Slate entry backed by BestBetResult."""
     bbr: BestBetResult | None = entry.get("best_bet_result")
 
@@ -75,13 +83,20 @@ def _render_slate_explanation(entry: dict[str, Any]) -> None:
 
         # (c) Raw JSON toggle
         if bbr is not None and bbr.explanation:
+            # Build a unique widget key. Use the caller-provided suffix when
+            # available so that duplicate event/market/selection combos get
+            # distinct keys; fall back to the legacy derivation otherwise.
+            if key_suffix is not None:
+                widget_key = f"raw_json_{key_suffix}"
+            else:
+                widget_key = (
+                    f"raw_json_{entry.get('event_id', entry.get('event', ''))}"
+                    f"_{entry.get('market', '')}_{entry.get('selection', '')}"
+                )
             if st.checkbox(
                 "Show raw explanation JSON",
                 value=False,
-                key=(
-                    f"raw_json_{entry.get('event_id', entry.get('event', ''))}"
-                    f"_{entry.get('market', '')}_{entry.get('selection', '')}"
-                ),
+                key=widget_key,
             ):
                 st.json(bbr.explanation)
 
