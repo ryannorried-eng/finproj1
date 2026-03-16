@@ -248,10 +248,10 @@ def get_prune_allowed_tiers() -> frozenset[str]:
 
 
 def get_prune_allowed_alpha_labels() -> frozenset[str]:
-    """Allowed alpha labels for pruning (default Strong,Neutral)."""
-    raw = _read_secret("PRUNE_ALLOWED_ALPHA_LABELS", "Strong,Neutral")
+    """Allowed alpha labels for pruning (default Strong,Neutral,Weak)."""
+    raw = _read_secret("PRUNE_ALLOWED_ALPHA_LABELS", "Strong,Neutral,Weak")
     if not raw:
-        return frozenset({"Strong", "Neutral"})
+        return frozenset({"Strong", "Neutral", "Weak"})
     return frozenset(t.strip() for t in raw.split(",") if t.strip())
 
 

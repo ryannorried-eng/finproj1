@@ -39,8 +39,16 @@ class TestPrunePicks:
         result = prune_picks([_make_entry(tier="avoid")])
         assert len(result) == 0
 
-    def test_weak_alpha_filtered(self):
+    def test_weak_alpha_allowed(self):
         result = prune_picks([_make_entry(alpha_label="Weak")])
+        assert len(result) == 1
+
+    def test_unknown_alpha_filtered(self):
+        result = prune_picks([_make_entry(alpha_label="Unknown")])
+        assert len(result) == 0
+
+    def test_empty_alpha_filtered(self):
+        result = prune_picks([_make_entry(alpha_label="")])
         assert len(result) == 0
 
     def test_low_edge_z_filtered(self):
