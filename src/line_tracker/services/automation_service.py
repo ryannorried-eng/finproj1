@@ -195,8 +195,14 @@ def run_full_cycle(
         result["events_processed"] = inner["slate_entries"]
         result["picks_generated"] = len(inner["top_picks"])
         result["snapshots_written"] = inner["snapshot_count"]
-        result["clv_updates_attempted"] = closing_batch_size
-        result["clv_updates_completed"] = inner["closed_count"]
+        closed = inner["closed_count"]
+        # closed_count may be a _ClosingResult dict with attempted/completed
+        if isinstance(closed, dict):
+            result["clv_updates_attempted"] = closed.get("attempted", 0)
+            result["clv_updates_completed"] = closed.get("completed", 0)
+        else:
+            result["clv_updates_attempted"] = int(closed)
+            result["clv_updates_completed"] = int(closed)
     except Exception as exc:
         msg = f"Cycle failed: {exc}"
         _log.error("run_full_cycle:cycle_error %s", msg)

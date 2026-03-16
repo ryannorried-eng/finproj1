@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from line_tracker.core.math import (
@@ -9,6 +10,8 @@ from line_tracker.core.math import (
     decimal_to_american,
     implied_probability,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def build_snapshot_rows(
@@ -146,7 +149,7 @@ def capture_closing_lines(
     window_hours: int = 12,
     batch_size: int = 200,
     prioritize_hours: int = 6,
-) -> int:
+) -> dict:
     """Find unclosed snapshots and try to close them with latest odds.
 
     Only considers snapshots whose ``closed_at IS NULL``.  Events with
@@ -166,12 +169,17 @@ def capture_closing_lines(
         Events whose commence_time is within this many hours from now
         (or in the past) are processed first.
 
-    Returns count of snapshots closed.
+    Returns
+    -------
+    dict with ``attempted`` and ``completed`` counts.
+    For backward compatibility, the dict also supports ``int()`` coercion
+    returning the completed count.
     """
     unclosed = store.get_unclosed_snapshots(
         prioritize_hours=prioritize_hours,
         limit=batch_size,
     )
+    attempted = len(unclosed)
     closed_count = 0
 
     for snap in unclosed:
@@ -181,7 +189,6 @@ def capture_closing_lines(
         book = snap["book"]
         open_american = snap["odds_american"]
 
-        # Look for the latest line for this event/market/book after the snapshot
         close_american = _find_closing_odds(
             store, event_id, market, book, selection, open_american,
         )
@@ -202,7 +209,38 @@ def capture_closing_lines(
         )
         closed_count += 1
 
-    return closed_count
+    _log.info(
+        "capture_closing_lines: attempted=%d completed=%d skipped=%d",
+        attempted,
+        closed_count,
+        attempted - closed_count,
+    )
+    return _ClosingResult(attempted=attempted, completed=closed_count)
+
+
+class _ClosingResult(dict):
+    """Dict-like result that also behaves as ``int`` for backward compat.
+
+    Legacy callers that do ``closed_count = capture_closing_lines(...)``
+    and treat the return value as an int will get the *completed* count
+    via ``__eq__``, ``__int__``, and comparison dunder methods.
+    """
+
+    def __init__(self, *, attempted: int, completed: int):
+        super().__init__(attempted=attempted, completed=completed)
+        self.attempted = attempted
+        self.completed = completed
+
+    def __int__(self) -> int:
+        return self.completed
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return self.completed == other
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:  # pragma: no cover
+        return hash(self.completed)
 
 
 def log_snapshot_for_picks(
@@ -231,6 +269,68 @@ def log_snapshot_for_picks(
     return store.log_rec_snapshots(rows)
 
 
+def _resolve_side(
+    ln,
+    market: str,
+    selection: str,
+) -> float | None:
+    """Return closing American odds for *selection* from a BettingLine.
+
+    Market-aware logic — no substring matching, no silent fallbacks.
+
+    Moneyline
+        selection must exactly equal home_team or away_team.
+        Returns home_value or away_value (the American odds).
+
+    Spread
+        selection must exactly equal home_team or away_team.
+        Returns home_price or away_price (the juice / American odds).
+
+    Total
+        selection must be "Over" or "Under" (case-insensitive).
+        Returns home_price (over juice) or away_price (under juice).
+
+    Returns ``None`` if the selection cannot be resolved.
+    """
+    sel_lower = selection.lower().strip()
+
+    if market == "moneyline":
+        home = (ln.home_team or "").strip()
+        away = (ln.away_team or "").strip()
+        if selection.strip() == home:
+            return ln.home_value
+        if selection.strip() == away:
+            return ln.away_value
+        # Case-insensitive exact match as fallback
+        if sel_lower == home.lower():
+            return ln.home_value
+        if sel_lower == away.lower():
+            return ln.away_value
+        return None
+
+    if market == "spread":
+        home = (ln.home_team or "").strip()
+        away = (ln.away_team or "").strip()
+        if selection.strip() == home:
+            return ln.home_price
+        if selection.strip() == away:
+            return ln.away_price
+        if sel_lower == home.lower():
+            return ln.home_price
+        if sel_lower == away.lower():
+            return ln.away_price
+        return None
+
+    if market == "total":
+        if sel_lower == "over":
+            return ln.home_price
+        if sel_lower == "under":
+            return ln.away_price
+        return None
+
+    return None
+
+
 def _find_closing_odds(
     store,
     event_id: str,
@@ -241,9 +341,9 @@ def _find_closing_odds(
 ) -> float | None:
     """Find the last observed American odds for the given event/market/book.
 
-    Queries the lines table for the latest line matching the event and book.
-    Returns the relevant American odds (home or away based on selection),
-    or None if no later line is found or the odds haven't changed.
+    Uses structured, market-aware matching via ``_resolve_side``.
+    Returns the closing American odds, or ``None`` if no match is found,
+    the selection cannot be resolved, or the odds haven't changed.
     """
     from line_tracker.models import BetType
 
@@ -254,33 +354,51 @@ def _find_closing_odds(
     }
     bet_type = bt_map.get(market)
     if bet_type is None:
+        _log.warning(
+            "clv_skip: unknown market=%r event=%s selection=%r",
+            market, event_id, selection,
+        )
         return None
 
     try:
         lines = store.get_latest_for_api_event(event_id, bet_type)
     except Exception:
+        _log.warning(
+            "clv_skip: lookup failed event=%s market=%s book=%s",
+            event_id, market, book,
+        )
         return None
 
     if not lines:
         return None
 
-    # Find the line from the same book
     for ln in lines:
-        if ln.sportsbook.lower() == book.lower():
-            # Determine which side to use based on selection
-            # For moneyline: home_value / away_value are the odds
-            # Use home if selection seems to match home
-            # This is a simplified heuristic; in production you'd match
-            # selection to home_team/away_team
-            if selection.lower() in (ln.home_team or "").lower():
-                candidate = ln.home_value
-            elif selection.lower() in (ln.away_team or "").lower():
-                candidate = ln.away_value
-            else:
-                # Fallback: use home_value
-                candidate = ln.home_value
+        if ln.sportsbook.lower() != book.lower():
+            continue
 
-            if candidate is not None and candidate != open_american:
-                return candidate
+        candidate = _resolve_side(ln, market, selection)
+
+        if candidate is None:
+            _log.warning(
+                "clv_skip: unresolved selection=%r market=%s "
+                "home_team=%r away_team=%r event=%s book=%s",
+                selection, market,
+                getattr(ln, "home_team", None),
+                getattr(ln, "away_team", None),
+                event_id, book,
+            )
+            return None
+
+        if candidate != open_american:
+            _log.debug(
+                "clv_match: event=%s market=%s selection=%r book=%s "
+                "open=%s close=%s",
+                event_id, market, selection, book,
+                open_american, candidate,
+            )
+            return candidate
+
+        # Odds unchanged
+        return None
 
     return None
