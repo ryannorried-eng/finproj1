@@ -254,32 +254,41 @@ class RecSnapshotsRepo:
         """
         query = """
             SELECT
-                snapshot_id,
-                created_at,
-                event_id,
-                sport,
-                market,
-                selection,
-                book,
-                odds_american   AS open_odds,
-                close_odds_american AS close_odds,
-                clv_delta_american,
-                clv_delta_implied,
-                closed_at,
-                CASE WHEN closed_at IS NULL THEN 'Open' ELSE 'Closed' END AS status,
-                tier
-            FROM rec_snapshots
+                rs.snapshot_id,
+                rs.created_at,
+                rs.event_id,
+                rs.sport,
+                rs.market,
+                rs.selection,
+                rs.line,
+                rs.book,
+                rs.odds_american   AS open_odds,
+                rs.close_odds_american AS close_odds,
+                rs.clv_delta_american,
+                rs.clv_delta_implied,
+                rs.closed_at,
+                CASE WHEN rs.closed_at IS NULL THEN 'Open' ELSE 'Closed' END AS status,
+                rs.tier,
+                rs.run_id,
+                rs.edge_z,
+                rs.edge_ev_shrunk,
+                rs.quality_score,
+                COALESCE(e.event_display,
+                         e.away_team || ' @ ' || e.home_team,
+                         rs.event_id) AS event_label
+            FROM rec_snapshots rs
+            LEFT JOIN events e ON rs.event_id = e.api_event_id
             WHERE 1=1
         """
         params: list = []
         if status_filter == "Open":
-            query += " AND closed_at IS NULL"
+            query += " AND rs.closed_at IS NULL"
         elif status_filter == "Closed":
-            query += " AND closed_at IS NOT NULL"
+            query += " AND rs.closed_at IS NOT NULL"
         if market_filter != "All":
-            query += " AND market = ?"
+            query += " AND rs.market = ?"
             params.append(market_filter)
-        query += " ORDER BY created_at DESC LIMIT ?"
+        query += " ORDER BY rs.created_at DESC LIMIT ?"
         params.append(limit)
         rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]

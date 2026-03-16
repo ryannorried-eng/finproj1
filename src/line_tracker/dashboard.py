@@ -790,8 +790,13 @@ def _fetch_odds():
                         api_key,
                         sport=_sport_key(),
                     )
-                lines = ingest["lines"]
-                count = ingest["saved_count"]
+                    count = ingest["saved_count"]
+                    # Reload from DB: latest per sportsbook across ALL fetches.
+                    # This prevents book count from dropping when the API
+                    # returns fewer books on a subsequent call.
+                    lines = store.get_latest_for_sport(_sport_key())
+                    if not lines:
+                        lines = ingest["lines"]
             else:
                 # Live mode: fetch directly, no DB persistence
                 lines = _cached_live_fetch(api_key, _sport_key())
@@ -2887,8 +2892,10 @@ def _render_snapshot_audit() -> None:
 
     # Explanatory caption
     st.caption(
-        "Snapshots track **all tier candidates** (Tier 1\u20133 and closest), "
-        "not only final top picks. "
+        "Snapshots track **all tier candidates** (Tier 1\u20133 and closest "
+        "candidates), not only final top picks \u2014 so snapshots can exist "
+        "even when top picks = 0. Each row shows the sportsbook, odds, tier, "
+        "and cycle (run_id) that created it. "
         "CLV only closes when a later line from the **same book** is available "
         "and the odds have actually changed."
     )
@@ -2929,16 +2936,30 @@ def _render_snapshot_audit() -> None:
 
     df = pd.DataFrame(rows)
 
-    # Clean display: replace None with readable placeholders for open rows
+    # Clean display: replace None with readable dashes for open rows
     display_cols = [
-        "snapshot_id", "created_at", "event_id", "sport", "market",
-        "selection", "book", "open_odds", "close_odds",
-        "clv_delta_american", "clv_delta_implied", "closed_at", "status",
-        "tier",
+        "snapshot_id", "run_id", "created_at", "event_label", "sport",
+        "market", "selection", "line", "tier", "book", "open_odds",
+        "edge_z", "edge_ev_shrunk", "quality_score",
+        "close_odds", "clv_delta_american", "clv_delta_implied",
+        "closed_at", "status",
     ]
     # Only keep columns that exist
     display_cols = [c for c in display_cols if c in df.columns]
     df = df[display_cols]
+
+    # Shorten run_id for readability (first 8 chars)
+    if "run_id" in df.columns:
+        df["run_id"] = df["run_id"].apply(
+            lambda x: x[:8] if isinstance(x, str) else "\u2014"
+        )
+
+    # Replace None/NaN with dashes for close-related columns
+    for col in ("close_odds", "clv_delta_american", "clv_delta_implied",
+                "closed_at", "line", "edge_z", "edge_ev_shrunk",
+                "quality_score"):
+        if col in df.columns:
+            df[col] = df[col].fillna("\u2014")
 
     st.dataframe(df, width="stretch", hide_index=True)
     st.caption(f"Showing {len(df)} of {total} total snapshots.")
