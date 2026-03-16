@@ -3249,10 +3249,18 @@ def _render_slate_card(entry: dict, rank: int | None = None) -> None:
                 )
                 st.rerun()
         _render_why_tooltip(entry)
+        _card_ks = (
+            f"card_{rank}_{entry.get('event_id', '')}"
+            f"_{entry.get('market', '')}"
+            f"_{entry.get('selection', '')}"
+            f"_{entry.get('best_sportsbook', '')}"
+            f"_{entry.get('best_odds', '')}"
+        )
         render_pick_explanation(
             entry,
             debug_enabled=st.session_state.get("diag_debug_mode", False),
             context="slate",
+            key_suffix=_card_ks,
         )
 
 
@@ -3298,9 +3306,18 @@ def _render_slate_table(entries: list[dict]) -> None:
     )
     # Per-row Why? expanders below the table
     _debug = st.session_state.get("diag_debug_mode", False)
-    for entry in entries:
+    for idx, entry in enumerate(entries):
         _render_why_tooltip(entry)
-        render_pick_explanation(entry, debug_enabled=_debug, context="slate")
+        _ks = (
+            f"{idx}_{entry.get('event_id', '')}"
+            f"_{entry.get('market', '')}"
+            f"_{entry.get('selection', '')}"
+            f"_{entry.get('best_sportsbook', '')}"
+            f"_{entry.get('best_odds', '')}"
+        )
+        render_pick_explanation(
+            entry, debug_enabled=_debug, context="slate", key_suffix=_ks,
+        )
 
 
 # ---------------------------------------------------------------------------
