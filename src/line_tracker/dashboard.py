@@ -492,41 +492,15 @@ def _sidebar():
 
         st.divider()
 
-        # --- Page navigation ---
+        # =============================================================
+        # A. PRIMARY CONTROLS
+        # =============================================================
+
         st.radio(
             "Page",
             ["Dashboard", "Best Lines to Shop", "Daily Slate", "Performance"],
             key="nav_page",
             horizontal=True,
-        )
-
-        st.divider()
-
-        st.header("Settings")
-
-        st.checkbox(
-            "Debug mode",
-            value=st.session_state.get("diag_debug_mode", False),
-            key="diag_debug_mode",
-            help="Enable extra diagnostics and verbose debug context in the UI.",
-        )
-
-        # API key: prefer secrets/env via config, fall back to manual input
-        _default_key = ""
-        try:
-            _default_key = get_api_key()
-        except ValueError:
-            pass
-        st.text_input(
-            "API Key",
-            value=_default_key,
-            type="password",
-            key="api_key",
-            help=(
-                "Paste your key from https://the-odds-api.com.  \n"
-                "The free plan gives you 500 requests/month.  \n"
-                "On Streamlit Cloud, add ODDS_API_KEY in Settings > Secrets."
-            ),
         )
 
         st.selectbox(
@@ -548,9 +522,59 @@ def _sidebar():
             ),
         )
 
+        # API key: prefer secrets/env via config, fall back to manual input
+        _default_key = ""
+        try:
+            _default_key = get_api_key()
+        except ValueError:
+            pass
+        st.text_input(
+            "API Key",
+            value=_default_key,
+            type="password",
+            key="api_key",
+            help=(
+                "Paste your key from https://the-odds-api.com.  \n"
+                "The free plan gives you 500 requests/month.  \n"
+                "On Streamlit Cloud, add ODDS_API_KEY in Settings > Secrets."
+            ),
+        )
+
+        # Run Cycle Now — primary action when in DB mode
+        _mode = data_mode()
+        if _mode == "db":
+            from line_tracker.ui.components.cycle_runner import (
+                render_cycle_panel,
+            )
+            _cycle_api_key = (
+                st.session_state.get("api_key") or None
+            )
+            _cycle_sport = SPORTS.get(
+                st.session_state.get("sport_name", "NBA"),
+                "basketball_nba",
+            )
+            try:
+                with LineStore(DB_PATH) as _cycle_store:
+                    render_cycle_panel(
+                        _cycle_store,
+                        _cycle_sport,
+                        _cycle_api_key,
+                    )
+            except Exception as exc:
+                st.caption(f"Cycle runner unavailable: {exc}")
+
+        st.caption(
+            "Free tier: 500 requests/month.  \n"
+            "Each \"Fetch\" uses 1-3 requests."
+        )
+
         st.divider()
 
-        with st.expander("Advanced"):
+        # =============================================================
+        # B. ADVANCED SETTINGS
+        # =============================================================
+
+        with st.expander("Advanced Settings"):
             st.select_slider(
                 "Max rows to show",
                 options=[50, 100, 200, 500, 1000],
@@ -600,64 +624,75 @@ def _sidebar():
             )
 
         st.divider()
-        st.caption(
-            "Free tier: 500 requests/month.  \n"
-            "Each \"Fetch\" uses 1-3 requests."
-        )
 
-        with st.expander("Diagnostics", expanded=False):
-            _mode = data_mode()
+        # =============================================================
+        # C. ADMIN & DIAGNOSTICS
+        # =============================================================
+
+        with st.expander("Admin & Diagnostics"):
+            st.checkbox(
+                "Debug mode",
+                value=st.session_state.get("diag_debug_mode", False),
+                key="diag_debug_mode",
+                help="Enable extra diagnostics and verbose debug context in the UI.",
+            )
+
             st.caption(f"Data mode: **{_mode}**")
+
+            # Timezone — resolve to a plain string to avoid rendering
+            # a DeltaGenerator object when browser detection stores
+            # a non-string value in session_state.
+            _raw_tz = st.session_state.get("user_tz")
+            _tz_display = (
+                str(_raw_tz) if isinstance(_raw_tz, str) and _raw_tz
+                else get_display_timezone()
+            )
+            st.caption(f"Display timezone: **{_tz_display}**")
+
             if _mode == "db":
                 try:
                     with LineStore(DB_PATH) as _diag_store:
                         status = get_db_status(_diag_store)
                         counts = get_db_counts(_diag_store)
                         latest = get_latest_timestamps(_diag_store)
-                    st.caption(f"DB: {status['db_path']}")
-                    st.json({
-                        "schema_version": status["schema_version"],
-                        "pragmas": status["pragmas"],
-                    })
-                    st.json({"row_counts": counts, "latest": latest})
+
+                    st.caption(f"DB path: `{status['db_path']}`")
+                    _pragmas = status.get("pragmas", {})
+                    st.caption(
+                        f"Schema version: **{status['schema_version']}**  \n"
+                        f"Journal mode: **{_pragmas.get('journal_mode', '?')}**  \n"
+                        f"Foreign keys: **{'On' if _pragmas.get('foreign_keys') else 'Off'}**  \n"
+                        f"Busy timeout: **{_pragmas.get('busy_timeout', '?')} ms**"
+                    )
+
+                    st.markdown("---")
+                    st.caption("**Row counts**")
+                    for tbl, cnt in counts.items():
+                        st.caption(f"{tbl}: **{cnt:,}**")
+
+                    st.markdown("---")
+                    st.caption("**Latest timestamps**")
+                    for lbl, ts in latest.items():
+                        display_label = (
+                            lbl.replace("latest_", "")
+                            .replace("_", " ")
+                            .title()
+                        )
+                        st.caption(
+                            f"{display_label}: **{ts or 'n/a'}**"
+                        )
                 except Exception as exc:
                     st.caption(f"DB diagnostics unavailable: {exc}")
             else:
                 st.caption("No persistent database. Using live API fetch.")
-            tz_name = st.session_state.get("user_tz") or get_display_timezone()
-            st.caption(f"Display timezone: **{tz_name}**")
+
             if st.session_state.get("diag_debug_mode", False):
                 st.caption(
                     "Debug mode is enabled; verbose service logs are "
                     "emitted to the app logger."
                 )
 
-            # Automation cycle runner
-            if _mode == "db":
-                st.divider()
-                from line_tracker.ui.components.cycle_runner import (
-                    render_cycle_panel,
-                )
-                _cycle_api_key = (
-                    st.session_state.get("api_key") or None
-                )
-                _cycle_sport = SPORTS.get(
-                    st.session_state.get("sport_name", "NBA"),
-                    "basketball_nba",
-                )
-                try:
-                    with LineStore(DB_PATH) as _cycle_store:
-                        render_cycle_panel(
-                            _cycle_store,
-                            _cycle_sport,
-                            _cycle_api_key,
-                        )
-                except Exception as exc:
-                    st.caption(
-                        f"Cycle runner unavailable: {exc}"
-                    )
-
-            # Recent cycle runs history
+            # Recent cycle runs — compact summary
             if _mode == "db":
                 try:
                     with LineStore(DB_PATH) as _runs_store:
@@ -667,23 +702,29 @@ def _sidebar():
                             )
                         )
                     if _recent:
-                        import pandas as _pd
-
-                        st.divider()
-                        st.caption("**Recent Cycle Runs**")
-                        _cols = [
-                            "started_at",
-                            "sport",
-                            "picks_generated",
-                            "snapshots_written",
-                            "clv_updates_completed",
-                            "success",
-                        ]
-                        _df = _pd.DataFrame(_recent)[_cols]
-                        _df["success"] = _df["success"].map(
-                            {1: "Yes", 0: "No"}
+                        st.markdown("---")
+                        last = _recent[0]
+                        _status_icon = "\u2705" if last.get("success") else "\u274c"
+                        st.caption(
+                            f"**Last cycle** {_status_icon}  \n"
+                            f"Sport: **{last.get('sport', '?')}**  \n"
+                            f"Picks: **{last.get('picks_generated', 0)}** \u00b7 "
+                            f"Snapshots: **{last.get('snapshots_written', 0)}** \u00b7 "
+                            f"CLV: **{last.get('clv_updates_completed', 0)}**  \n"
+                            f"Started: {last.get('started_at', '?')}"
                         )
-                        st.dataframe(_df, use_container_width=True)
+                        st.caption(
+                            f"Total recent runs: **{len(_recent)}**"
+                        )
+
+                        with st.expander("Recent cycle history"):
+                            for run in _recent[:5]:
+                                _icon = "\u2705" if run.get("success") else "\u274c"
+                                st.caption(
+                                    f"{_icon} {run.get('started_at', '?')} \u2014 "
+                                    f"{run.get('sport', '?')} \u00b7 "
+                                    f"{run.get('picks_generated', 0)} picks"
+                                )
                 except Exception:
                     pass
 
@@ -3743,7 +3784,9 @@ def main():
         _tz_component = st.components.v1.html(
             _tz_js, height=0,
         )
-        if _tz_component:
+        # Only store if we got an actual timezone string back;
+        # st.components.v1.html can return None or a DeltaGenerator.
+        if isinstance(_tz_component, str) and _tz_component:
             st.session_state["user_tz"] = _tz_component
 
     # --- Data-mode banner ---
