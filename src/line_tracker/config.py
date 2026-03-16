@@ -219,9 +219,13 @@ def get_prune_min_quality() -> int:
 
 
 def get_prune_min_books() -> int:
-    """Minimum books_used to survive pruning (default 5)."""
-    raw = _read_secret("PRUNE_MIN_BOOKS", "5")
-    return int(raw) if raw else 5
+    """Minimum books_used to survive pruning (default 4).
+
+    Aligned with Tier 2 acceptance threshold (books_used >= 4) so that
+    Tier 2 entries are not silently killed by a stricter prune gate.
+    """
+    raw = _read_secret("PRUNE_MIN_BOOKS", "4")
+    return int(raw) if raw else 4
 
 
 def get_prune_max_hold() -> float:
