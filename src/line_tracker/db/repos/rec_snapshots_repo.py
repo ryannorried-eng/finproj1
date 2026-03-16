@@ -234,6 +234,79 @@ class RecSnapshotsRepo:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_recent_snapshots(
+        self,
+        *,
+        limit: int = 50,
+        status_filter: str = "All",
+        market_filter: str = "All",
+    ) -> list[dict]:
+        """Return recent snapshots with derived status, ordered newest first.
+
+        Parameters
+        ----------
+        limit:
+            Maximum rows to return.
+        status_filter:
+            ``"All"``, ``"Open"``, or ``"Closed"``.
+        market_filter:
+            ``"All"`` or a specific market (e.g. ``"moneyline"``).
+        """
+        query = """
+            SELECT
+                snapshot_id,
+                created_at,
+                event_id,
+                sport,
+                market,
+                selection,
+                book,
+                odds_american   AS open_odds,
+                close_odds_american AS close_odds,
+                clv_delta_american,
+                clv_delta_implied,
+                closed_at,
+                CASE WHEN closed_at IS NULL THEN 'Open' ELSE 'Closed' END AS status,
+                tier
+            FROM rec_snapshots
+            WHERE 1=1
+        """
+        params: list = []
+        if status_filter == "Open":
+            query += " AND closed_at IS NULL"
+        elif status_filter == "Closed":
+            query += " AND closed_at IS NOT NULL"
+        if market_filter != "All":
+            query += " AND market = ?"
+            params.append(market_filter)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_snapshot_counts(self) -> dict:
+        """Return open/closed counts and avg CLV on closed snapshots."""
+        row = self._conn.execute(
+            """SELECT
+                   SUM(CASE WHEN closed_at IS NULL
+                       THEN 1 ELSE 0 END) AS open_count,
+                   SUM(CASE WHEN closed_at IS NOT NULL
+                       THEN 1 ELSE 0 END) AS closed_count,
+                   AVG(CASE WHEN closed_at IS NOT NULL
+                       THEN clv_delta_implied END) AS avg_clv_implied
+               FROM rec_snapshots"""
+        ).fetchone()
+        return dict(row) if row else {
+            "open_count": 0, "closed_count": 0, "avg_clv_implied": None,
+        }
+
+    def get_snapshot_markets(self) -> list[str]:
+        """Return distinct market values present in snapshots."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT market FROM rec_snapshots ORDER BY market"
+        ).fetchall()
+        return [r[0] for r in rows if r[0]]
+
     def get_alpha_clv_stats(self) -> list[dict]:
         """Aggregate CLV metrics grouped by alpha_label.
 

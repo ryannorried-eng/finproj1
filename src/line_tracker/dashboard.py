@@ -2840,6 +2840,109 @@ def _page_daily_slate():
             )
         st.success(f"Slate published (slate_id={_sid})")
 
+    # ── Snapshot & CLV Audit ──────────────────────────────────────────
+    st.divider()
+    _render_snapshot_audit()
+
+
+def _render_snapshot_audit() -> None:
+    """Render the Snapshot & CLV Audit section on the Daily Slate page."""
+    st.subheader("Snapshot & CLV Audit")
+
+    if data_mode() != "db":
+        st.info("Snapshot audit requires database mode.")
+        return
+
+    try:
+        with LineStore(DB_PATH) as audit_store:
+            counts = audit_store.get_snapshot_counts()
+            markets = audit_store.get_snapshot_markets()
+    except Exception as exc:
+        st.warning(f"Could not load snapshot data: {exc}")
+        return
+
+    open_count = counts.get("open_count") or 0
+    closed_count = counts.get("closed_count") or 0
+    total = open_count + closed_count
+
+    if total == 0:
+        st.info(
+            "No snapshots yet. Run a cycle to start tracking "
+            "tier candidates and closing-line value."
+        )
+        return
+
+    close_rate = (closed_count / total * 100) if total > 0 else 0.0
+    avg_clv = counts.get("avg_clv_implied")
+
+    # Compact summary metrics
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Open Snapshots", f"{open_count:,}")
+    mc2.metric("Closed Snapshots", f"{closed_count:,}")
+    mc3.metric("Close Rate %", f"{close_rate:.1f}%")
+    mc4.metric(
+        "Avg CLV Delta Implied on Closed",
+        f"{avg_clv:.4f}" if avg_clv is not None else "\u2014",
+    )
+
+    # Explanatory caption
+    st.caption(
+        "Snapshots track **all tier candidates** (Tier 1\u20133 and closest), "
+        "not only final top picks. "
+        "CLV only closes when a later line from the **same book** is available "
+        "and the odds have actually changed."
+    )
+
+    # Filters
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        status_filter = st.selectbox(
+            "Status",
+            options=["All", "Open", "Closed"],
+            index=0,
+            key="snap_status_filter",
+        )
+    with fc2:
+        market_options = ["All"] + markets
+        market_filter = st.selectbox(
+            "Market",
+            options=market_options,
+            index=0,
+            key="snap_market_filter",
+        )
+
+    # Fetch filtered rows
+    try:
+        with LineStore(DB_PATH) as audit_store2:
+            rows = audit_store2.get_recent_snapshots(
+                limit=50,
+                status_filter=status_filter,
+                market_filter=market_filter,
+            )
+    except Exception as exc:
+        st.warning(f"Could not fetch snapshots: {exc}")
+        return
+
+    if not rows:
+        st.info("No snapshots match the current filters.")
+        return
+
+    df = pd.DataFrame(rows)
+
+    # Clean display: replace None with readable placeholders for open rows
+    display_cols = [
+        "snapshot_id", "created_at", "event_id", "sport", "market",
+        "selection", "book", "open_odds", "close_odds",
+        "clv_delta_american", "clv_delta_implied", "closed_at", "status",
+        "tier",
+    ]
+    # Only keep columns that exist
+    display_cols = [c for c in display_cols if c in df.columns]
+    df = df[display_cols]
+
+    st.dataframe(df, width="stretch", hide_index=True)
+    st.caption(f"Showing {len(df)} of {total} total snapshots.")
+
 
 def _render_stay_away_entry(entry: dict) -> None:
     """Render a single Stay Away entry with risk score and reasons."""
