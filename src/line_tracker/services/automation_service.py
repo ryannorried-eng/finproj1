@@ -349,6 +349,32 @@ def run_cycle(
     if dry_run and all_entries:
         _log_candidate_summary(all_entries)
 
+    # Always log per-entry edge_z before pruning when nothing would survive
+    if all_entries:
+        from line_tracker.config import get_prune_min_edge_z as _get_ez_threshold
+
+        _ez_thresh = _get_ez_threshold()
+        _ez_vals = [
+            (
+                e.get("market", "?"),
+                e.get("selection", "?"),
+                e.get("tier", "?"),
+                round(e.get("edge_z", 0.0) or 0.0, 4),
+                round(e.get("edge_ev_shrunk", 0.0) or 0.0, 6),
+                round(e.get("robust_sigma", 0.0) or 0.0, 6),
+            )
+            for e in all_entries
+        ]
+        _log.info(
+            "prune_gate_debug threshold=%.2f entries=%d edge_z_values=[%s]",
+            _ez_thresh,
+            len(all_entries),
+            "; ".join(
+                f"{m}/{s} tier={t} ez={ez} evs={evs} rs={rs}"
+                for m, s, t, ez, evs, rs in _ez_vals
+            ),
+        )
+
     # 3. Prune
     clv_profile = None
     if use_clv_filter:
