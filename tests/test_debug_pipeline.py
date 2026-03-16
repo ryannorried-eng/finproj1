@@ -67,11 +67,17 @@ class TestPruneDebugModeTierGate:
 class TestPruneDebugModeAlphaGate:
     """PRUNE_DEBUG_MODE does not block on Weak/missing alpha."""
 
-    def test_weak_alpha_blocked_in_normal_mode(self, monkeypatch):
+    def test_unknown_alpha_blocked_in_normal_mode(self, monkeypatch):
+        monkeypatch.delenv("PRUNE_DEBUG_MODE", raising=False)
+        entry = _make_entry(alpha_label="Unknown")
+        result = prune_picks([entry])
+        assert len(result) == 0
+
+    def test_weak_alpha_allowed_in_normal_mode(self, monkeypatch):
         monkeypatch.delenv("PRUNE_DEBUG_MODE", raising=False)
         entry = _make_entry(alpha_label="Weak")
         result = prune_picks([entry])
-        assert len(result) == 0
+        assert len(result) == 1
 
     def test_weak_alpha_allowed_in_debug_mode(self, monkeypatch):
         monkeypatch.setenv("PRUNE_DEBUG_MODE", "1")
@@ -104,7 +110,7 @@ class TestNormalModeBehaviorUnchanged:
 
     def test_normal_alpha_gate(self, monkeypatch):
         monkeypatch.delenv("PRUNE_DEBUG_MODE", raising=False)
-        entry = _make_entry(alpha_label="Weak")
+        entry = _make_entry(alpha_label="Unknown")
         result = prune_picks([entry])
         assert len(result) == 0
 

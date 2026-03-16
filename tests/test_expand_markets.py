@@ -128,7 +128,7 @@ class TestPrunePicksWithReasons:
         assert reasons["alpha"] == 0
 
     def test_alpha_failure_counted(self):
-        entries = [_make_entry(alpha_label="Weak")]
+        entries = [_make_entry(alpha_label="Unknown")]
         survivors, reasons = prune_picks_with_reasons(entries)
         assert len(survivors) == 0
         assert reasons["alpha"] == 1
@@ -161,7 +161,7 @@ class TestPrunePicksWithReasons:
         """Different gates produce correct counts."""
         entries = [
             _make_entry(tier="avoid"),
-            _make_entry(alpha_label="Weak"),
+            _make_entry(alpha_label="Unknown"),
             _make_entry(edge_z=0.1),
             _make_entry(edge_ev_shrunk=-0.01),
             _make_entry(quality_score=10),
