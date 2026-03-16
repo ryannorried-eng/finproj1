@@ -409,6 +409,28 @@ class LineStore:
         """Return closed rec_snapshots, optionally filtered by tier."""
         return self.rec_snapshots_repo.get_closed(tier)
 
+    def get_recent_snapshots(
+        self,
+        *,
+        limit: int = 50,
+        status_filter: str = "All",
+        market_filter: str = "All",
+    ) -> list[dict]:
+        """Return recent snapshots for the audit view."""
+        return self.rec_snapshots_repo.get_recent_snapshots(
+            limit=limit,
+            status_filter=status_filter,
+            market_filter=market_filter,
+        )
+
+    def get_snapshot_counts(self) -> dict:
+        """Return aggregate open/closed counts."""
+        return self.rec_snapshots_repo.get_snapshot_counts()
+
+    def get_snapshot_markets(self) -> list[str]:
+        """Return distinct markets in snapshots."""
+        return self.rec_snapshots_repo.get_snapshot_markets()
+
     # ── Outcomes (settlement import) ────────────────────────────────
 
     def import_outcomes(self, rows: list[dict]) -> int:
