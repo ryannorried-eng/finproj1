@@ -97,6 +97,25 @@ class LinesRepo:
             (api_event_id, bet_type),
         ).fetchall()
 
+    def get_latest_for_sport(self, sport: str) -> list[sqlite3.Row]:
+        """Latest line per (api_event_id, bet_type, sportsbook) for a sport.
+
+        Returns the most recent line for every sportsbook that has ever
+        reported on each event, regardless of which API fetch it came from.
+        """
+        return self._conn.execute(
+            """SELECT * FROM (
+                   SELECT *, ROW_NUMBER() OVER (
+                       PARTITION BY api_event_id, bet_type, sportsbook
+                       ORDER BY timestamp DESC, id DESC
+                   ) AS rn
+                   FROM lines
+                   WHERE sport = ? AND api_event_id IS NOT NULL
+               ) WHERE rn = 1
+               ORDER BY api_event_id, bet_type, sportsbook""",
+            (sport,),
+        ).fetchall()
+
     def get_recent_lines(self, limit: int = 10000) -> list[sqlite3.Row]:
         """Fetch recent lines with only needed columns, ordered by timestamp DESC."""
         return self._conn.execute(

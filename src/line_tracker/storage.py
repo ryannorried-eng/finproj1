@@ -194,6 +194,16 @@ class LineStore:
         )
         return [_row_to_line(row) for row in rows]
 
+    def get_latest_for_sport(self, sport: str) -> list[BettingLine]:
+        """Get the most recent line per (event, bet_type, sportsbook) for a sport.
+
+        Unlike a raw API fetch, this returns the latest line from *every*
+        sportsbook that has ever reported on each event — ensuring stable
+        book coverage across repeated fetches.
+        """
+        rows = self.lines_repo.get_latest_for_sport(sport)
+        return [_row_to_line(row) for row in rows]
+
     def get_events(self) -> list[str]:
         """List all distinct events in the database.
 
