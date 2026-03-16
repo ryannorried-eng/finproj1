@@ -57,7 +57,7 @@ class TestPrunePicks:
         assert len(result) == 0
 
     def test_low_edge_z_filtered(self):
-        result = prune_picks([_make_entry(edge_z=1.0)])
+        result = prune_picks([_make_entry(edge_z=0.90)])
         assert len(result) == 0
 
     def test_negative_ev_shrunk_filtered(self):
@@ -102,7 +102,7 @@ class TestPrunePicks:
         entries = [
             _make_entry(event_id="e1"),
             _make_entry(event_id="e2", tier="avoid"),
-            _make_entry(event_id="e3", edge_z=1.0),
+            _make_entry(event_id="e3", edge_z=0.90),
             _make_entry(event_id="e4"),
         ]
         result = prune_picks(entries)

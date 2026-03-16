@@ -55,7 +55,7 @@ _AVOID_NOISE_EDGE_MAX = 2.0  # EV/$100 below which noise matters
 _AVOID_DIVERGENCE_MIN = 0.04  # sharp-retail divergence threshold
 
 # ── Tier 3 tightened thresholds ──────────────────────────────────────
-TIER3_MIN_EDGE_Z = 1.15   # was 1.0 — raises floor to reduce noise
+TIER3_MIN_EDGE_Z = 1.00   # lowered from 1.15 to unblock NCAAB candidates
 TIER3_MIN_EV_100 = 0.50   # optional EV/$100 floor for Tier 3 only
 
 # ── relaxed Tier 2 display thresholds (used when strict mode OFF) ─────

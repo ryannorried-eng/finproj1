@@ -1666,29 +1666,29 @@ class TestNewTieringRules:
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 tightened thresholds (edge_z >= 1.15, ev_100 >= 0.50)
+# Tier 3 thresholds (edge_z >= 1.00, ev_100 >= 0.50)
 # ---------------------------------------------------------------------------
 
 
 class TestTier3Tightened:
-    """Tests for the tightened Tier 3 criteria:
-    - edge_z >= 1.15 (was 1.0)
-    - ev_100 >= 0.50 (new EV floor for strict Tier 3)
+    """Tests for the Tier 3 criteria:
+    - edge_z >= 1.00 (lowered from 1.15 to unblock NCAAB candidates)
+    - ev_100 >= 0.50 (EV floor for strict Tier 3)
     Tier 1 and Tier 2 are unchanged.
     """
 
     def test_tier3_constants(self):
         """Verify the exported Tier 3 constants match spec."""
-        assert TIER3_MIN_EDGE_Z == 1.15
+        assert TIER3_MIN_EDGE_Z == 1.00
         assert TIER3_MIN_EV_100 == 0.50
 
-    def test_edge_z_1_10_falls_to_catchall(self):
-        """edge_z = 1.10 < 1.15 → doesn't qualify for strict Tier 3.
+    def test_edge_z_0_95_falls_to_catchall(self):
+        """edge_z = 0.95 < 1.00 → doesn't qualify for strict Tier 3.
         Falls to catch-all tier3 (positive edge guaranteed)."""
         result = classify_rec(_entry(
             edge_pct=2.0,
             edge_ev_shrunk=0.03,
-            edge_z=1.10,
+            edge_z=0.95,
             quality_score=65,
             consensus_prob=0.40,
             books_used=4,
@@ -1696,12 +1696,12 @@ class TestTier3Tightened:
         # Still tier3 via catch-all, but NOT via the strict Tier 3 block
         assert result["tier"] == "tier3"
 
-    def test_edge_z_1_15_qualifies_strict_tier3(self):
-        """edge_z = 1.15 (exactly at new floor) qualifies for strict Tier 3."""
+    def test_edge_z_1_00_qualifies_strict_tier3(self):
+        """edge_z = 1.00 (exactly at floor) qualifies for strict Tier 3."""
         result = classify_rec(_entry(
             edge_pct=2.0,
             edge_ev_shrunk=0.03,
-            edge_z=1.15,
+            edge_z=1.00,
             quality_score=65,
             consensus_prob=0.40,
             books_used=4,
