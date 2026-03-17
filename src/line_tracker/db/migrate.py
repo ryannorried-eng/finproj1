@@ -59,7 +59,10 @@ def ensure_latest(conn: sqlite3.Connection, migrations_path: str | Path) -> None
             continue
 
         sql = path.read_text(encoding="utf-8")
+        # Re-apply busy_timeout before each migration because executescript()
+        # can reset connection-level pragmas.
         script = (
+            "PRAGMA busy_timeout = 5000;\n"
             "BEGIN IMMEDIATE;\n"
             f"{sql}\n"
             f"UPDATE schema_version SET version = {version};\n"

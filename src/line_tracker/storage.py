@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -9,6 +10,13 @@ from pathlib import Path
 from shutil import copy2
 
 from line_tracker.db.migrate import ensure_latest
+
+_log = logging.getLogger(__name__)
+
+# Tracks DB paths that have already been migrated in this process so we don't
+# re-run ensure_latest() on every LineStore open (the main cause of the
+# "database is locked" crash in Streamlit).
+_migrated_paths: set[str] = set()
 from line_tracker.db.repos import (
     BetsRepo,
     CalibrationRepo,
@@ -61,8 +69,7 @@ class LineStore:
         self._in_explicit_txn = False
         self._txn_depth = 0
         self._configure_connection()
-        migrations_path = Path(__file__).parent / "db" / "migrations"
-        ensure_latest(self._conn, migrations_path)
+        self._maybe_migrate()
 
         self.lines_repo = LinesRepo(self._conn)
         self.bets_repo = BetsRepo(self._conn)
@@ -75,6 +82,30 @@ class LineStore:
         self.outcomes_repo = OutcomesRepo(self._conn)
         self.clv_model_repo = ClvModelRepo(self._conn)
         self.cycle_runs_repo = CycleRunsRepo(self._conn)
+
+    def _maybe_migrate(self) -> None:
+        """Run schema migrations at most once per process per DB path.
+
+        If the DB is locked by another writer we log a warning instead of
+        crashing — the schema is almost certainly already up-to-date and
+        the page can render with stale-but-safe reads.
+        """
+        db_key = str(self.db_path)
+        if db_key in _migrated_paths:
+            return
+        migrations_path = Path(__file__).parent / "db" / "migrations"
+        try:
+            ensure_latest(self._conn, migrations_path)
+            _migrated_paths.add(db_key)
+        except sqlite3.OperationalError as exc:
+            if "database is locked" in str(exc):
+                _log.warning(
+                    "Skipping migrations – DB is locked (%s). "
+                    "Schema is likely already current.",
+                    exc,
+                )
+            else:
+                raise
 
     def _maybe_commit(self) -> None:
         if not self._in_explicit_txn:
