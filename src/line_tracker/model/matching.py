@@ -114,8 +114,8 @@ TEAM_NAME_MAP: dict[str, str] = {
     "troy trojans": "Troy",
     # 14-seeds
     "lipscomb bisons": "Lipscomb",
-    "south florida bulls": "South Fla.",
-    "usf bulls": "South Fla.",
+    "south florida bulls": "South Florida",
+    "usf bulls": "South Florida",
     "lehigh mountain hawks": "Lehigh",
     "siena saints": "Siena",
     # 15-seeds
