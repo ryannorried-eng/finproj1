@@ -103,6 +103,25 @@ class TestConfigDrivenDefaults:
         assert len(result) == 1
 
 
+class TestDefaultEdgeZThreshold:
+    """The default edge_z threshold is 0.75 (no env override)."""
+
+    def test_default_edge_z_passes_above_075(self, monkeypatch):
+        monkeypatch.delenv("PRUNE_MIN_EDGE_Z", raising=False)
+        result = prune_picks([_make_entry(edge_z=0.80)])
+        assert len(result) == 1
+
+    def test_default_edge_z_blocks_below_075(self, monkeypatch):
+        monkeypatch.delenv("PRUNE_MIN_EDGE_Z", raising=False)
+        result = prune_picks([_make_entry(edge_z=0.50)])
+        assert len(result) == 0
+
+    def test_env_override_restores_old_default(self, monkeypatch):
+        monkeypatch.setenv("PRUNE_MIN_EDGE_Z", "1.00")
+        result = prune_picks([_make_entry(edge_z=0.80)])
+        assert len(result) == 0
+
+
 class TestExplicitKwargsOverrideConfig:
     """Explicit keyword arguments take precedence over env config."""
 

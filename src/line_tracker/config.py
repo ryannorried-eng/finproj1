@@ -201,14 +201,15 @@ def get_conf_w_max() -> float:
 
 
 def get_prune_min_edge_z() -> float:
-    """Minimum edge-z to survive pruning (default 1.00).
+    """Minimum edge-z to survive pruning (default 0.75).
 
-    Lowered from 1.15 to 1.00 so NCAAB candidates in the [1.00, 1.15)
-    range can survive pruning.  Other gates (quality, books, hold,
-    ev_shrunk) still apply and prevent low-quality picks from leaking.
+    Lowered from 1.00 to 0.75 so NCAAB candidates whose edge_z lands
+    in the ~0.25–0.75 range (typical after shrinkage + sigma floor) can
+    survive pruning.  Other gates (quality, books, hold, ev_shrunk)
+    still apply and prevent low-quality picks from leaking.
     """
-    raw = _read_secret("PRUNE_MIN_EDGE_Z", "1.00")
-    return float(raw) if raw else 1.00
+    raw = _read_secret("PRUNE_MIN_EDGE_Z", "0.75")
+    return float(raw) if raw else 0.75
 
 
 def get_prune_min_ev_shrunk() -> float:
