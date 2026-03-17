@@ -7,20 +7,25 @@ from __future__ import annotations
 
 
 def _sort_key(entry: dict) -> tuple:
-    """Composite sort key: (edge_z desc, edge_ev_shrunk desc, quality desc)."""
+    """Composite sort key: (edge_z, ev_shrunk, quality, books_used) all desc."""
     return (
         -(entry.get("edge_z") or 0),
         -(entry.get("edge_ev_shrunk") or 0),
         -(entry.get("quality_score") or 0),
+        -(entry.get("books_used") or 0),
     )
 
 
 def select_top_picks(
     pruned: list[dict],
     *,
-    top_n: int = 3,
+    top_n: int = 5,
 ) -> list[dict]:
-    """Sort pruned entries by composite score and return top *top_n*."""
+    """Sort candidates by composite score and return top *top_n*.
+
+    Always returns up to *top_n* entries if candidates exist — returns 0
+    only when there are literally no valid entries.
+    """
     ranked = sorted(pruned, key=_sort_key)
     return ranked[:top_n]
 
@@ -28,9 +33,9 @@ def select_top_picks(
 def format_picks_report(picks: list[dict]) -> str:
     """Format a human-readable CLI report of selected picks."""
     if not picks:
-        return "No actionable picks survived pruning."
+        return "No actionable picks available."
 
-    lines: list[str] = [f"=== Top {len(picks)} Picks ===", ""]
+    lines: list[str] = [f"=== Best {len(picks)} Available Picks ===", ""]
     for i, p in enumerate(picks, 1):
         lines.append(
             f"  #{i}  {p.get('market', '?')} {p.get('selection', '?')}"

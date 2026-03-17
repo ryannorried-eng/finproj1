@@ -32,14 +32,10 @@ def _make_entry(**overrides) -> dict:
 class TestConfigDrivenDefaults:
     """Thresholds pulled from env/secrets when no explicit kwarg given."""
 
-    def test_env_min_edge_z(self, monkeypatch):
+    def test_env_min_edge_z_no_longer_filters(self, monkeypatch):
+        """edge_z is used for ranking only, not as a hard gate."""
         monkeypatch.setenv("PRUNE_MIN_EDGE_Z", "3.0")
-        result = prune_picks([_make_entry(edge_z=2.5)])
-        assert len(result) == 0
-
-    def test_env_min_edge_z_pass(self, monkeypatch):
-        monkeypatch.setenv("PRUNE_MIN_EDGE_Z", "2.0")
-        result = prune_picks([_make_entry(edge_z=2.5)])
+        result = prune_picks([_make_entry(edge_z=0.5)])
         assert len(result) == 1
 
     def test_env_min_ev_shrunk(self, monkeypatch):
@@ -103,31 +99,27 @@ class TestConfigDrivenDefaults:
         assert len(result) == 1
 
 
-class TestDefaultEdgeZThreshold:
-    """The default edge_z threshold is 0.75 (no env override)."""
+class TestEdgeZNoLongerHardGate:
+    """edge_z is used for ranking only, not as a hard pruning gate."""
 
-    def test_default_edge_z_passes_above_075(self, monkeypatch):
+    def test_low_edge_z_passes(self, monkeypatch):
         monkeypatch.delenv("PRUNE_MIN_EDGE_Z", raising=False)
-        result = prune_picks([_make_entry(edge_z=0.80)])
+        result = prune_picks([_make_entry(edge_z=0.10)])
         assert len(result) == 1
 
-    def test_default_edge_z_blocks_below_075(self, monkeypatch):
+    def test_zero_edge_z_passes(self, monkeypatch):
         monkeypatch.delenv("PRUNE_MIN_EDGE_Z", raising=False)
-        result = prune_picks([_make_entry(edge_z=0.50)])
-        assert len(result) == 0
-
-    def test_env_override_restores_old_default(self, monkeypatch):
-        monkeypatch.setenv("PRUNE_MIN_EDGE_Z", "1.00")
-        result = prune_picks([_make_entry(edge_z=0.80)])
-        assert len(result) == 0
+        result = prune_picks([_make_entry(edge_z=0.0)])
+        assert len(result) == 1
 
 
 class TestExplicitKwargsOverrideConfig:
     """Explicit keyword arguments take precedence over env config."""
 
-    def test_explicit_min_edge_z_overrides_env(self, monkeypatch):
+    def test_explicit_min_edge_z_no_longer_filters(self, monkeypatch):
+        """min_edge_z kwarg is accepted but no longer filters."""
         monkeypatch.setenv("PRUNE_MIN_EDGE_Z", "3.0")
-        result = prune_picks([_make_entry(edge_z=2.5)], min_edge_z=2.0)
+        result = prune_picks([_make_entry(edge_z=0.5)], min_edge_z=5.0)
         assert len(result) == 1
 
     def test_explicit_allowed_tiers_overrides_env(self, monkeypatch):

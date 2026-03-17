@@ -1,7 +1,7 @@
-"""Step 2 – Aggressive pick pruning with tight gates.
+"""Step 2 – Pick pruning with quality gates.
 
-Only entries that survive ALL gates are promoted to "actionable picks."
-Volume comes from frequent snapshots (Step 5), not from relaxing thresholds.
+Entries that survive all gates are promoted to candidates for ranking.
+edge_z is NOT a hard gate — it is used as a ranking signal instead.
 """
 
 from __future__ import annotations
@@ -93,12 +93,13 @@ def prune_picks(
     Gate order:
     1. tier in allowed_tiers
     2. alpha_label in allowed_alpha
-    3. edge_z >= min_edge_z
-    4. edge_ev_shrunk > min_ev_shrunk
-    5. quality_score >= min_quality_score
-    6. books_used >= min_books_used
-    7. market_hold_median <= max_market_hold
-    8. CLV filter (if profile provided)
+    3. edge_ev_shrunk > min_ev_shrunk  (negative EV rejected)
+    4. quality_score >= min_quality_score
+    5. books_used >= min_books_used
+    6. market_hold_median <= max_market_hold
+    7. CLV filter (if profile provided)
+
+    Note: edge_z is NOT a hard gate — it is used for ranking only.
     """
     survivors, _ = prune_picks_with_reasons(
         entries,
@@ -171,9 +172,7 @@ def prune_picks_with_reasons(
         if alpha not in allowed_alpha:
             reasons["alpha"] += 1
             continue
-        if (entry.get("edge_z") or 0) < min_edge_z:
-            reasons["edge_z"] += 1
-            continue
+        # edge_z is no longer a hard gate — used for ranking only.
         if (entry.get("edge_ev_shrunk") or 0) <= min_ev_shrunk:
             reasons["ev_shrunk"] += 1
             continue

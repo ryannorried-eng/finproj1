@@ -2471,8 +2471,8 @@ def _page_daily_slate():
                 index=0,
                 key="slate_mode",
                 help=(
-                    "**Standard**: Top Plays = Tier 1A + 1B. "
-                    "**Pro**: Top Plays = Tier 1A only. "
+                    "**Standard**: Best Available Plays = Tier 1A + 1B. "
+                    "**Pro**: Best Available Plays = Tier 1A only. "
                     "**Auto**: Use CLV-calibrated thresholds."
                 ),
                 horizontal=True,
@@ -2495,7 +2495,7 @@ def _page_daily_slate():
                 key="slate_show_stay_away",
             )
             show_closest = st.checkbox(
-                "Show Closest to Top Plays when none qualify",
+                "Show Closest to Best Available Plays when none qualify",
                 value=True,
                 key="slate_show_closest",
             )
@@ -2617,7 +2617,7 @@ def _page_daily_slate():
 
     # Summary metrics
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("Top Plays", len(top_display))
+    mc1.metric("Best Available Plays", len(top_display))
     mc2.metric("More Plays", len(more_display))
     mc3.metric("Tier 3", counts.get("tier3", 0))
     mc4.metric("Stay Away", len(stay_away_display))
@@ -2764,11 +2764,11 @@ def _page_daily_slate():
 
     st.divider()
 
-    # ── Top Plays (Tier 1A, or 1A+1B in Standard mode) ───────────────
-    _top_label = "Top Plays (Tier 1A)" if pro_mode else "Top Plays (Tier 1)"
+    # ── Best Available Plays (Tier 1A, or 1A+1B in Standard mode) ────
+    _top_label = "Best Available Plays (Tier 1A)" if pro_mode else "Best Available Plays (Tier 1)"
     st.subheader(_top_label)
     if not top_display:
-        st.info("No top plays today under current thresholds.")
+        st.info("No best available plays today under current thresholds.")
         if pro_mode:
             st.caption(
                 "Tier 1A requires **High** confidence, **Elite/Strong** "
