@@ -175,6 +175,17 @@ TEAM_NAME_MAP: dict[str, str] = {
     "unc asheville bulldogs": "UNC Asheville",
     "unc greensboro spartans": "UNC Greensboro",
     "unc wilmington seahawks": "UNC Wilmington",
+    # ── Additional teams needed for schedule resolution ────────────────
+    "kennesaw state owls": "Kennesaw St.",
+    "long island university sharks": "LIU",
+    "liu sharks": "LIU",
+    "wright state raiders": "Wright St.",
+    "north dakota state bison": "North Dakota St.",
+    "north dakota st bison": "North Dakota St.",
+    "tennessee state tigers": "Tennessee St.",
+    "tennessee st tigers": "Tennessee St.",
+    "hawai'i rainbow warriors": "Hawaii",
+    "hawaii rainbow warriors": "Hawaii",
 }
 
 # ---------------------------------------------------------------------------
