@@ -70,6 +70,65 @@ def margin_to_total_prob(
 # Game-level prediction
 # ------------------------------------------------------------------
 
+def _build_name_index(torvik_names: list[str]) -> dict[str, str]:
+    """Build a lookup mapping normalised display names → Torvik names.
+
+    ESPN uses full names like ``"Duke Blue Devils"`` while Torvik uses
+    ``"Duke"``.  We build a case-insensitive prefix index so that if the
+    ESPN name *starts with* a Torvik name it resolves correctly.
+    """
+    index: dict[str, str] = {}
+    # Exact (lowered) match first
+    for name in torvik_names:
+        index[name.lower()] = name
+
+    # Common ESPN→Torvik overrides where prefix matching fails
+    _OVERRIDES = {
+        "uconn huskies": "Connecticut",
+        "hawai'i rainbow warriors": "Hawaii",
+        "miami hurricanes": "Miami FL",
+        "miami (oh) redhawks": "Miami OH",
+        "lsu tigers": "LSU",
+        "vcu rams": "VCU",
+        "smu mustangs": "SMU",
+        "tcu horned frogs": "TCU",
+        "byu cougars": "BYU",
+        "ucf knights": "UCF",
+        "usc trojans": "USC",
+        "ole miss rebels": "Ole Miss",
+        "umbc retrievers": "UMBC",
+        "unc asheville bulldogs": "UNC Asheville",
+        "unc greensboro spartans": "UNC Greensboro",
+        "unc wilmington seahawks": "UNC Wilmington",
+        "utep miners": "UTEP",
+        "utsa roadrunners": "UTSA",
+        "unlv rebels": "UNLV",
+    }
+    for espn_lower, torvik in _OVERRIDES.items():
+        if torvik in torvik_names or torvik.lower() in index:
+            index[espn_lower] = torvik
+
+    return index
+
+
+def _resolve_team(name: str, name_index: dict[str, str]) -> str | None:
+    """Resolve an ESPN display name to a Torvik team name."""
+    low = name.lower()
+
+    # Exact match
+    if low in name_index:
+        return name_index[low]
+
+    # Try prefix: longest Torvik name that the ESPN name starts with
+    best: str | None = None
+    best_len = 0
+    for key, torvik in name_index.items():
+        if low.startswith(key) and len(key) > best_len:
+            best = torvik
+            best_len = len(key)
+    return best
+
+
 def predict_games(
     games: list[dict],
     *,
@@ -96,20 +155,24 @@ def predict_games(
     model, scaler, metadata = train.load_model(model_path)
     ratings_df = data.fetch_team_ratings()
     ratings_idx = ratings_df.set_index("team")
+    name_index = _build_name_index(list(ratings_idx.index))
 
     timestamp = datetime.now(timezone.utc).isoformat()
     model_version = metadata.get("model_path", "unknown")
 
     predictions: list[dict] = []
     for game in games:
-        home_name = game["home_team"]
-        away_name = game["away_team"]
+        home_raw = game["home_team"]
+        away_raw = game["away_team"]
 
-        if home_name not in ratings_idx.index:
-            log.warning("Team not found in ratings: %s – skipping", home_name)
+        home_name = _resolve_team(home_raw, name_index)
+        away_name = _resolve_team(away_raw, name_index)
+
+        if home_name is None or home_name not in ratings_idx.index:
+            log.warning("Team not found in ratings: %s – skipping", home_raw)
             continue
-        if away_name not in ratings_idx.index:
-            log.warning("Team not found in ratings: %s – skipping", away_name)
+        if away_name is None or away_name not in ratings_idx.index:
+            log.warning("Team not found in ratings: %s – skipping", away_raw)
             continue
 
         home_stats = ratings_idx.loc[home_name].to_dict()
