@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from line_tracker.alpha import ALPHA_GATE_ENABLED
 from line_tracker.best_bets import recommend_best_bets
-from line_tracker.config import get_prune_debug_mode
+from line_tracker.config import get_model_min_edge, get_prune_debug_mode
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
 from line_tracker.models import BettingLine, BetType
 from line_tracker.core.logging import get_logger
@@ -383,6 +383,7 @@ def classify_rec(
     books_used = entry.get("books_used", 0)
     oldest_age = entry.get("oldest_update_age_min", 0.0)
     hold_median = entry.get("market_hold_median", 0.0)
+    is_model = entry.get("edge_source") == "model"
 
     floor_1a = max(th.tier1a_base_edge, th.tier1a_sigma_mult * sigma)
 
@@ -427,6 +428,12 @@ def classify_rec(
     consensus_prob = entry.get("consensus_prob", 0.0)
     quality_score = entry.get("quality_score", 0)
 
+    # For model-driven entries, edge_z measures inter-book disagreement
+    # which is not the right signal.  When edge_pct >= MODEL_MIN_EDGE,
+    # treat the edge_z requirement as satisfied for tiering purposes.
+    model_min_edge = get_model_min_edge()
+    model_passes_edge = is_model and edge >= model_min_edge
+
     # ── Tier 1 — Core Value ───────────────────────────────────────
     # Dynamic edge floor kept for Tier 1 only (per existing behaviour).
     floor_1b = max(
@@ -435,7 +442,7 @@ def classify_rec(
     )
     if (
         edge_ev_shrunk > 0
-        and edge_z >= 1.75
+        and (edge_z >= 1.75 or model_passes_edge)
         and quality_score >= 70
         and consensus_prob >= 0.30
         and books_used >= 5
@@ -448,9 +455,21 @@ def classify_rec(
     # No dynamic floor; requires low consensus_prob (longshot gate).
     if (
         edge_ev_shrunk > 0
-        and edge_z >= 1.75
+        and (edge_z >= 1.75 or model_passes_edge)
         and quality_score >= 65
         and consensus_prob < 0.30
+        and books_used >= 4
+        and hold_median <= 7.5
+    ):
+        return {"tier": "tier2", "reasons": [], "dynamic_edge_floor": floor_1a}
+
+    # ── Tier 2 — Model-driven with sufficient edge ────────────────
+    # Model entries that pass MODEL_MIN_EDGE but miss consensus-based
+    # tier gates above can still qualify for tier2.
+    if (
+        model_passes_edge
+        and edge_ev_shrunk > 0
+        and quality_score >= 60
         and books_used >= 4
         and hold_median <= 7.5
     ):
