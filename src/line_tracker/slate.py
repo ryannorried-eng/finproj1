@@ -927,11 +927,13 @@ def build_daily_slate(
 
             if model_predictions:
                 _pred = _match_prediction(
-                    event_name, model_predictions,
+                    sample_line.home_team, sample_line.away_team,
+                    model_predictions,
                 )
                 if _pred is not None:
                     _mp = _model_prob_for_market(
-                        _pred, rec.market, rec.selection, event_name,
+                        _pred, rec.market, rec.selection,
+                        sample_line.home_team, sample_line.away_team,
                     )
                     if _mp is not None:
                         entry["model_prob"] = _mp
@@ -1221,22 +1223,19 @@ def print_slate_summary(slate: dict) -> str:
 
 
 def _match_prediction(
-    event_name: str,
+    home_team: str,
+    away_team: str,
     predictions: list[dict],
 ) -> dict | None:
-    """Match an Odds API event name to a model prediction.
+    """Match an Odds API event to a model prediction.
 
     Uses the matching module's three-tier strategy (exact map, normalized,
-    substring).  ``event_name`` is typically ``"Away Team vs Home Team"``.
+    substring).  Accepts individual team names from the BettingLine rather
+    than parsing the event display string.
     """
     from line_tracker.model.matching import match_event_to_prediction
 
-    parts = event_name.split(" vs ")
-    if len(parts) == 2:
-        # Odds API convention: "Away @ Home" but event stored as "Away vs Home"
-        odds_event = {"home_team": parts[1].strip(), "away_team": parts[0].strip()}
-    else:
-        odds_event = {"home_team": event_name, "away_team": ""}
+    odds_event = {"home_team": home_team, "away_team": away_team}
     return match_event_to_prediction(odds_event, predictions)
 
 
@@ -1244,7 +1243,8 @@ def _model_prob_for_market(
     pred: dict,
     market: str,
     selection: str,
-    event_name: str,
+    home_team: str,
+    away_team: str,
 ) -> float | None:
     """Extract the model probability for a specific market/side.
 
@@ -1252,9 +1252,8 @@ def _model_prob_for_market(
     ``"total"``).  ``selection`` identifies the side (team name, ``"Over"``,
     ``"Under"``).
     """
-    parts = event_name.split(" vs ")
-    home_name = parts[1].strip() if len(parts) == 2 else event_name
-    away_name = parts[0].strip() if len(parts) == 2 else ""
+    home_name = home_team
+    away_name = away_team
 
     mkt = market.lower()
     sel = selection.strip().lower()
