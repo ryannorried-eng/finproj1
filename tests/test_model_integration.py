@@ -285,21 +285,21 @@ class TestModelMatching:
     def test_match_prediction_basic(self):
         pred = _sample_prediction()
         result = _match_prediction(
-            "Auburn Tigers vs Duke Blue Devils", [pred],
+            "Duke Blue Devils", "Auburn Tigers", [pred],
         )
         assert result is not None
         assert result["home_team"] == "Duke"
 
     def test_match_prediction_no_match(self):
         pred = _sample_prediction()
-        result = _match_prediction("Lakers vs Celtics", [pred])
+        result = _match_prediction("Lakers", "Celtics", [pred])
         assert result is None
 
     def test_model_prob_for_ml_home(self):
         pred = _sample_prediction()
         prob = _model_prob_for_market(
             pred, "moneyline", "Duke Blue Devils",
-            "Auburn Tigers vs Duke Blue Devils",
+            "Duke Blue Devils", "Auburn Tigers",
         )
         assert prob == 0.65
 
@@ -307,7 +307,7 @@ class TestModelMatching:
         pred = _sample_prediction()
         prob = _model_prob_for_market(
             pred, "moneyline", "Auburn Tigers",
-            "Auburn Tigers vs Duke Blue Devils",
+            "Duke Blue Devils", "Auburn Tigers",
         )
         assert prob == 0.35
 
@@ -315,7 +315,7 @@ class TestModelMatching:
         pred = _sample_prediction()
         prob = _model_prob_for_market(
             pred, "total", "Over 145.5",
-            "Auburn Tigers vs Duke Blue Devils",
+            "Duke Blue Devils", "Auburn Tigers",
         )
         assert prob == 0.52
 
@@ -323,7 +323,7 @@ class TestModelMatching:
         pred = _sample_prediction()
         prob = _model_prob_for_market(
             pred, "total", "Under 145.5",
-            "Auburn Tigers vs Duke Blue Devils",
+            "Duke Blue Devils", "Auburn Tigers",
         )
         assert prob == 0.48
 
