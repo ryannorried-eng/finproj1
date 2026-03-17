@@ -13,6 +13,7 @@ def build_daily_slate_service(
     mode: str,
     store,
     tiering_method: str = "hybrid",
+    model_predictions: list[dict] | None = None,
 ):
     """Build daily slate using optional calibration thresholds in Auto mode."""
     thresholds = None
@@ -42,4 +43,5 @@ def build_daily_slate_service(
         filters=merged_filters,
         thresholds=thresholds,
         tiering_method=tiering_method,
+        model_predictions=model_predictions,
     )

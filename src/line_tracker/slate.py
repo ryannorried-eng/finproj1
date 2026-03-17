@@ -791,6 +791,7 @@ def build_daily_slate(
     settings: dict | None = None,
     thresholds: TierThresholds | None = None,
     tiering_method: str = "hybrid",
+    model_predictions: list[dict] | None = None,
 ) -> dict:
     """Build the daily slate from lines grouped by event.
 
@@ -917,6 +918,36 @@ def build_daily_slate(
                 "bet_tier": rec.bet_tier,
                 "agreement_score": rec.agreement_score,
             }
+
+            # ── Model prediction injection ────────────────────────
+            entry["model_prob"] = None
+            entry["model_margin"] = None
+            entry["model_confidence"] = None
+            entry["edge_source"] = "consensus"
+
+            if model_predictions:
+                _pred = _match_prediction(
+                    event_name, model_predictions,
+                )
+                if _pred is not None:
+                    _mp = _model_prob_for_market(
+                        _pred, rec.market, rec.selection, event_name,
+                    )
+                    if _mp is not None:
+                        entry["model_prob"] = _mp
+                        entry["model_margin"] = _pred.get("predicted_margin")
+                        entry["model_confidence"] = _pred.get(
+                            "model_confidence"
+                        )
+                        entry["edge_source"] = "model"
+                        # Recompute edge from model probability
+                        from line_tracker.core.math import american_to_decimal
+                        _dec = american_to_decimal(entry["best_odds"])
+                        entry["edge_pct"] = round(
+                            100.0 * (_mp * _dec - 1.0), 2,
+                        )
+                        entry["ev_roi"] = round(_mp * _dec - 1.0, 6)
+                        entry["ev_100"] = entry["edge_pct"]
 
             # Classify — runs for EVERY rec, no pre-filtering
             classification = classify_rec(
@@ -1184,3 +1215,79 @@ def print_slate_summary(slate: dict) -> str:
         bh = vt.get("books_histogram", {})
         lines.append(f"  books_histogram: {bh}")
     return "\n".join(lines)
+
+
+# ── Model prediction helpers ──────────────────────────────────────
+
+
+def _match_prediction(
+    event_name: str,
+    predictions: list[dict],
+) -> dict | None:
+    """Match an Odds API event name to a model prediction.
+
+    Uses the matching module's three-tier strategy (exact map, normalized,
+    substring).  ``event_name`` is typically ``"Away Team vs Home Team"``.
+    """
+    from line_tracker.model.matching import match_event_to_prediction
+
+    parts = event_name.split(" vs ")
+    if len(parts) == 2:
+        # Odds API convention: "Away @ Home" but event stored as "Away vs Home"
+        odds_event = {"home_team": parts[1].strip(), "away_team": parts[0].strip()}
+    else:
+        odds_event = {"home_team": event_name, "away_team": ""}
+    return match_event_to_prediction(odds_event, predictions)
+
+
+def _model_prob_for_market(
+    pred: dict,
+    market: str,
+    selection: str,
+    event_name: str,
+) -> float | None:
+    """Extract the model probability for a specific market/side.
+
+    ``market`` is the bet type value (``"moneyline"``, ``"spread"``,
+    ``"total"``).  ``selection`` identifies the side (team name, ``"Over"``,
+    ``"Under"``).
+    """
+    parts = event_name.split(" vs ")
+    home_name = parts[1].strip() if len(parts) == 2 else event_name
+    away_name = parts[0].strip() if len(parts) == 2 else ""
+
+    mkt = market.lower()
+    sel = selection.strip().lower()
+
+    if mkt == "moneyline":
+        # Determine if selection matches home or away team
+        if _sel_matches_team(sel, home_name):
+            return pred.get("home_ml_prob")
+        if _sel_matches_team(sel, away_name):
+            return pred.get("away_ml_prob")
+        return None
+
+    if mkt in ("spread", "spreads"):
+        if _sel_matches_team(sel, home_name):
+            return pred.get("home_spread_prob")
+        if _sel_matches_team(sel, away_name):
+            return pred.get("away_spread_prob")
+        return None
+
+    if mkt in ("total", "totals"):
+        if sel.startswith("over"):
+            return pred.get("over_prob")
+        if sel.startswith("under"):
+            return pred.get("under_prob")
+        return None
+
+    return None
+
+
+def _sel_matches_team(sel: str, team_name: str) -> bool:
+    """Check if a selection string corresponds to a team name."""
+    if not team_name:
+        return False
+    t = team_name.lower()
+    # Exact or prefix/substring match
+    return sel == t or sel.startswith(t) or t.startswith(sel)

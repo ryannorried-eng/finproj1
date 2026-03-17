@@ -8,6 +8,7 @@ from .cycle_runs_repo import CycleRunsRepo
 from .events_repo import EventsRepo
 from .lines_repo import LinesRepo
 from .outcomes_repo import OutcomesRepo
+from .predictions_repo import PredictionsRepo
 from .rec_snapshots_repo import RecSnapshotsRepo
 from .slate_picks_repo import SlatePicksRepo
 from .slates_repo import SlatesRepo
@@ -21,6 +22,7 @@ __all__ = [
     "CycleRunsRepo",
     "EventsRepo",
     "OutcomesRepo",
+    "PredictionsRepo",
     "RecSnapshotsRepo",
     "SlatesRepo",
     "SlatePicksRepo",

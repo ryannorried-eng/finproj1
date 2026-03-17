@@ -73,9 +73,9 @@ class TestRoiReportCommand:
 
 
 class TestTrainModelCommand:
-    def test_train_no_data(self, tmp_path, capsys):
+    def test_train_model_runs(self, tmp_path, capsys):
         db = str(tmp_path / "test.db")
         rc = main(["train-model", "--db", db])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "no_data" in out
+        assert "Model saved to:" in out
