@@ -73,12 +73,12 @@ def evaluate_model(
     if spreads_val is not None:
         spreads = spreads_val.values
         actuals = y_val.values
-        # Model says home covers if predicted margin > spread
-        # Actual home covers if actual margin > spread
-        model_pick = preds > spreads
-        actual_cover = actuals > spreads
-        # Exclude pushes (exact spread)
-        not_push = actuals != spreads
+        # Sign convention: spread is negative when home is favoured (standard
+        # sportsbook notation).  Home covers when margin + spread > 0.
+        model_pick = preds + spreads > 0
+        actual_cover = actuals + spreads > 0
+        # Exclude pushes (margin + spread == 0)
+        not_push = actuals + spreads != 0
         if not_push.sum() > 0:
             correct = (model_pick == actual_cover) & not_push
             result["ats_accuracy"] = float(correct.sum() / not_push.sum())

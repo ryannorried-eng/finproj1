@@ -39,28 +39,23 @@ class TestMarginToMlProb:
 
 
 class TestMarginToSpreadProb:
-    def test_margin_equals_spread(self):
-        # predicted exactly = spread → 0.5
-        assert mod.margin_to_spread_prob(5.0, 5.0) == pytest.approx(0.5)
+    def test_model_agrees_with_market(self):
+        # Model says home wins by 5, spread = -5 (market also says home by 5)
+        # Edge = 5 + (-5) = 0 → Φ(0) = 0.5
+        assert mod.margin_to_spread_prob(5.0, -5.0) == pytest.approx(0.5)
 
     def test_home_covers(self):
-        # predicted 5, spread -3 → (5 - (-3)) / 10.5 = 8/10.5
+        # Model: home +5, spread -3 (market: home by 3)
+        # Edge = 5 + (-3) = 2 points → Φ(2/10.5) ≈ Φ(0.190) ≈ 0.576
         prob = mod.margin_to_spread_prob(5.0, -3.0)
         assert prob > 0.5
-        # Φ(8/10.5) ≈ Φ(0.762) ≈ 0.777
-        assert prob == pytest.approx(0.777, abs=0.01)
-
-    def test_spec_example(self):
-        # predicted 5, spread -3 → Φ(2/10.5) note: spec says Φ((4.5-2.5)/10.5)
-        # Adjusted: predicted 4.5, spread -2.5 → Φ((4.5-(-2.5))/10.5) = Φ(7/10.5)
-        # Wait — spec says spread -2.5 means home favoured by 2.5,
-        # so (4.5 - (-2.5))/10.5 = 7/10.5 ≈ 0.667 → Φ(0.667) ≈ 0.748
-        # Actually re-reading spec: "predicted margin +4.5 and spread is -2.5"
-        # → (4.5 - (-2.5))/10.5 = 7/10.5 → Φ(0.667) ≈ 0.748
-        # But spec says ≈ 0.576 which matches Φ(2/10.5)=Φ(0.190)≈0.576
-        # So they mean market_spread=2.5 (away favoured), margin=4.5
-        prob = mod.margin_to_spread_prob(4.5, 2.5)
         assert prob == pytest.approx(0.576, abs=0.01)
+
+    def test_home_underdog_covers(self):
+        # Model: home +4.5, spread +2.5 (market: home is 2.5-point dog)
+        # Edge = 4.5 + 2.5 = 7 points → Φ(7/10.5) ≈ Φ(0.667) ≈ 0.748
+        prob = mod.margin_to_spread_prob(4.5, 2.5)
+        assert prob == pytest.approx(0.748, abs=0.01)
 
 
 class TestMarginToTotalProb:
@@ -361,6 +356,7 @@ class TestPredictWithMarket:
         p = preds[0]
         assert p["market_spread"] == -3.5
         assert p["home_spread_prob"] is not None
+        # Model predicts +5, spread -3.5 → edge = 5 + (-3.5) = 1.5 → slight home cover
         assert p["home_spread_prob"] > 0.5
         assert p["market_total"] == 145.0
         assert p["model_edge_ml"] is not None
@@ -373,3 +369,47 @@ class TestPredictWithMarket:
         assert p["market_spread"] is None
         assert p["home_spread_prob"] is None
         assert p["model_edge_ml"] is None
+
+
+# ---------------------------------------------------------------------------
+# Edge formula sign convention tests
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeFormulaSign:
+    """Verify edge = predicted_margin + market_spread (sportsbook convention).
+
+    Sign convention:
+    - predicted_margin > 0 → model favours home
+    - market_spread < 0 → home is favoured (sportsbook)
+    - edge > 0 → model thinks home covers better than market
+    """
+
+    def test_texas_tech_positive_edge(self):
+        # Model: home +12.1, spread -8.5 → edge = 12.1 + (-8.5) = +3.6
+        edge = 12.1 + (-8.5)
+        assert edge == pytest.approx(3.6)
+        # P(home covers) should be > 0.5
+        prob = mod.margin_to_spread_prob(12.1, -8.5)
+        assert prob > 0.5
+
+    def test_clemson_small_positive_edge(self):
+        # Model: home -1.8 (away favoured), spread +2.5 (home is dog)
+        # edge = -1.8 + 2.5 = +0.7
+        edge = -1.8 + 2.5
+        assert edge == pytest.approx(0.7)
+        prob = mod.margin_to_spread_prob(-1.8, 2.5)
+        assert prob > 0.5
+
+    def test_negative_edge(self):
+        # Model: home +3.0, spread -7.5 → edge = 3.0 + (-7.5) = -4.5
+        edge = 3.0 + (-7.5)
+        assert edge == pytest.approx(-4.5)
+        # P(home covers) should be < 0.5 (market has it right, model disagrees)
+        prob = mod.margin_to_spread_prob(3.0, -7.5)
+        assert prob < 0.5
+
+    def test_exact_agreement_is_coinflip(self):
+        # Model: home +8.5, spread -8.5 → edge = 0 → P = 0.5
+        prob = mod.margin_to_spread_prob(8.5, -8.5)
+        assert prob == pytest.approx(0.5)

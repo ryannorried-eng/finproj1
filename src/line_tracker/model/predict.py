@@ -47,12 +47,19 @@ def margin_to_spread_prob(
 ) -> float:
     """P(home covers) given a market spread.
 
-    ``market_spread`` is negative for a home favourite (e.g. -2.5 means the
-    home team is favoured by 2.5 points).
+    ``market_spread`` uses standard sportsbook notation: negative means home
+    is favoured (e.g. -2.5 → home favoured by 2.5), positive means home is
+    the underdog (e.g. +3.5 → home is a 3.5-point dog).
 
-    P(home covers) = Φ((predicted_margin - market_spread) / σ)
+    ``predicted_margin`` is positive when the model favours the home team.
+
+    Home covers when ``actual_margin + market_spread > 0``, so:
+
+    P(home covers) = Φ((predicted_margin + market_spread) / σ)
     """
-    return float(norm.cdf((predicted_margin - market_spread) / sigma))
+    # Sign convention: predicted_margin + market_spread gives the model's
+    # edge over the market in points.  Positive = model likes home cover.
+    return float(norm.cdf((predicted_margin + market_spread) / sigma))
 
 
 def margin_to_total_prob(

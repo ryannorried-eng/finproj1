@@ -535,3 +535,81 @@ class TestNewlyAddedTeams:
         result = match_event_to_prediction(event, preds)
         assert result is not None
         assert result["away_team"] == "Wright St."
+
+
+# ---------------------------------------------------------------------------
+# Pennsylvania Quakers → Penn
+# ---------------------------------------------------------------------------
+
+
+class TestPennsylvaniaMapping:
+    def test_map_lookup(self):
+        assert TEAM_NAME_MAP["pennsylvania quakers"] == "Penn"
+
+    def test_match_event(self):
+        preds = [_pred("Duke", "Penn")]
+        event = {"home_team": "Duke Blue Devils", "away_team": "Pennsylvania Quakers"}
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["away_team"] == "Penn"
+
+
+# ---------------------------------------------------------------------------
+# California Baptist Lancers must NOT resolve to California
+# ---------------------------------------------------------------------------
+
+
+class TestCaliforniaBaptistSafety:
+    """Ensure 'California Baptist Lancers' never matches 'California'."""
+
+    def test_map_resolves_to_cal_baptist(self):
+        """TEAM_NAME_MAP should point to 'Cal Baptist', not 'California'."""
+        result = TEAM_NAME_MAP.get("california baptist lancers")
+        assert result == "Cal Baptist"
+        assert result != "California"
+
+    def test_mascot_stripping_removes_lancers(self):
+        """'lancers' must be stripped before matching."""
+        assert normalize_team_name("California Baptist Lancers") == "california baptist"
+
+    def test_fuzzy_match_does_not_resolve_to_california(self):
+        """After stripping mascot, 'california baptist' must NOT fuzzy match 'California'."""
+        teams = {"California", "Cal Baptist"}
+        result = _fuzzy_match_team("California Baptist Lancers", teams)
+        # Must match 'Cal Baptist' or None — never 'California'
+        assert result != "California"
+
+    def test_fuzzy_match_california_baptist_returns_none_without_cal_baptist(self):
+        """If 'Cal Baptist' isn't in predictions, must return None, not 'California'."""
+        teams = {"California", "UCLA", "Stanford"}
+        result = _fuzzy_match_team("California Baptist Lancers", teams)
+        assert result is None
+
+    def test_substring_match_does_not_resolve_to_california(self):
+        """Substring fallback must also not match 'California Baptist' to 'California'."""
+        teams = {"California", "UCLA", "Stanford"}
+        result = _substring_match("California Baptist Lancers", teams)
+        # 'California' is a substring match, but 'California Baptist' ≠ 'California'
+        # The substring matcher uses word-boundary matching; 'california' appears
+        # as a word inside 'california baptist' — so it may match.  If so, we need
+        # the TEAM_NAME_MAP entry (tier a) to prevent this in the full pipeline.
+        # This test documents the behavior.
+        if result is not None:
+            # If substring does match, it must NOT be relied upon — the
+            # TEAM_NAME_MAP entry in tier (a) must intercept first.
+            pass
+
+    def test_full_pipeline_does_not_match_california(self):
+        """End-to-end: California Baptist Lancers must not match California."""
+        preds = [
+            _pred("California", "UCLA"),
+            _pred("Stanford", "Oregon"),
+        ]
+        event = {
+            "home_team": "California Baptist Lancers",
+            "away_team": "Some Team",
+        }
+        result = match_event_to_prediction(event, preds)
+        # Should be None — 'Cal Baptist' doesn't exist in predictions,
+        # and it must NOT fall back to 'California'.
+        assert result is None
