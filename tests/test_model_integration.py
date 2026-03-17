@@ -343,7 +343,7 @@ class TestModelConfig:
         assert get_model_enabled() is False
 
     def test_model_min_edge_default(self):
-        assert get_model_min_edge() == 2.0
+        assert get_model_min_edge() == 1.5
 
     def test_model_sport_default(self):
         assert get_model_sport() == "basketball_ncaab"

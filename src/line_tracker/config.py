@@ -318,9 +318,9 @@ def get_model_enabled() -> bool:
 
 
 def get_model_min_edge() -> float:
-    """Minimum model edge (EV/$100) to surface a bet (default 2.0)."""
-    raw = _read_secret("MODEL_MIN_EDGE", "2.0")
-    return float(raw) if raw else 2.0
+    """Minimum model edge (EV/$100) to surface a bet (default 1.5)."""
+    raw = _read_secret("MODEL_MIN_EDGE", "1.5")
+    return float(raw) if raw else 1.5
 
 
 def get_model_sport() -> str:

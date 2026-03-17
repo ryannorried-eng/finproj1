@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from line_tracker.alpha import ALPHA_GATE_ENABLED
-from line_tracker.best_bets import recommend_best_bets
+from line_tracker.best_bets import _edge_score, _quality_score, recommend_best_bets
 from line_tracker.config import get_model_min_edge, get_prune_debug_mode
 from line_tracker.market_structure import sharp_retail_divergence as _sharp_retail_div
 from line_tracker.models import BettingLine, BetType
@@ -938,6 +938,9 @@ def build_daily_slate(
                 "best_bet_result": getattr(rec, "best_bet_result", None),
                 "bet_tier": rec.bet_tier,
                 "agreement_score": rec.agreement_score,
+                "edge_score": rec.edge_score,
+                "coverage_score": rec.coverage_score,
+                "freshness_score": rec.freshness_score,
             }
 
             # ── Model prediction injection ────────────────────────
@@ -973,6 +976,17 @@ def build_daily_slate(
                         entry["ev_roi"] = round(_mp * _dec - 1.0, 6)
                         entry["ev_100"] = entry["edge_pct"]
                         entry["edge_ev_shrunk"] = entry["ev_roi"]
+                        # Recompute quality subscores from model-derived edge
+                        model_edge_score = round(
+                            _edge_score(entry["edge_pct"]), 1,
+                        )
+                        entry["edge_score"] = model_edge_score
+                        entry["quality_score"] = _quality_score(
+                            model_edge_score,
+                            entry.get("agreement_score", 50.0),
+                            entry.get("coverage_score", 50.0),
+                            entry.get("freshness_score", 50.0),
+                        )
 
             # Classify — runs for EVERY rec, no pre-filtering
             classification = classify_rec(

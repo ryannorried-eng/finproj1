@@ -197,14 +197,14 @@ class TestModelEdgeSourceBypassesEdgeZ:
         assert reasons["edge_z"] == 1
         assert reasons["model_edge"] == 0
 
-    def test_model_default_threshold_is_2(self, monkeypatch):
-        """Default MODEL_MIN_EDGE is 2.0."""
+    def test_model_default_threshold_is_1_5(self, monkeypatch):
+        """Default MODEL_MIN_EDGE is 1.5."""
         monkeypatch.delenv("MODEL_MIN_EDGE", raising=False)
-        # edge_pct=1.9 should be pruned (below default 2.0)
-        entry = _make_entry(edge_z=0.10, edge_pct=1.9, edge_source="model")
+        # edge_pct=1.4 should be pruned (below default 1.5)
+        entry = _make_entry(edge_z=0.10, edge_pct=1.4, edge_source="model")
         result = prune_picks([entry])
         assert len(result) == 0
-        # edge_pct=2.1 should survive
-        entry2 = _make_entry(edge_z=0.10, edge_pct=2.1, edge_source="model")
+        # edge_pct=1.6 should survive
+        entry2 = _make_entry(edge_z=0.10, edge_pct=1.6, edge_source="model")
         result2 = prune_picks([entry2])
         assert len(result2) == 1
