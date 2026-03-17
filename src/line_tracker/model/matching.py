@@ -186,6 +186,9 @@ TEAM_NAME_MAP: dict[str, str] = {
     "tennessee st tigers": "Tennessee St.",
     "hawai'i rainbow warriors": "Hawaii",
     "hawaii rainbow warriors": "Hawaii",
+    # ── Additional team mappings ───────────────────────────────────────
+    "pennsylvania quakers": "Penn",
+    "california baptist lancers": "Cal Baptist",
 }
 
 # ---------------------------------------------------------------------------
@@ -270,6 +273,15 @@ _MASCOT_SUFFIXES: list[str] = [
     "bluejays",
     "foxes",
     "bears",
+    "lancers",
+    "quakers",
+    "hawkeyes",
+    "buckeyes",
+    "utes",
+    "redbirds",
+    "fighting hawks",
+    "badgers",
+    "wolfpack",
 ]
 
 # Build a single regex that strips the longest mascot suffix.
@@ -330,29 +342,16 @@ def _fuzzy_match_team(
     norm = normalize_team_name(odds_name)
     norm_cmp = _normalize_for_cmp(norm)
 
-    # Exact match: raw normalised name or comparison-normalised name
+    # Strict token overlap: require exact match on the normalised or
+    # comparison-normalised name.  No prefix/substring fallback here –
+    # that is handled by _substring_match (tier c) which has its own
+    # safeguards.  This prevents e.g. "California Baptist" from fuzzy-
+    # matching to "California".
     for t in prediction_teams:
         if norm == t.lower() or norm_cmp == _normalize_for_cmp(t):
             return t
 
-    # Word-boundary prefix matching – longest match wins so that
-    # "Iowa St." (longer) beats "Iowa" when the input is "Iowa State …".
-    best: str | None = None
-    best_len = 0
-    for t in prediction_teams:
-        t_cmp = _normalize_for_cmp(t)
-        # Torvik name is a prefix of the odds name
-        if norm_cmp.startswith(t_cmp) and len(t_cmp) > best_len:
-            # Require word boundary after the prefix
-            if len(norm_cmp) == len(t_cmp) or norm_cmp[len(t_cmp)] == " ":
-                best = t
-                best_len = len(t_cmp)
-        # Odds name is a prefix of the Torvik name
-        if t_cmp.startswith(norm_cmp) and len(norm_cmp) > best_len:
-            if len(t_cmp) == len(norm_cmp) or t_cmp[len(norm_cmp)] == " ":
-                best = t
-                best_len = len(norm_cmp)
-    return best
+    return None
 
 
 def match_event_to_prediction(
