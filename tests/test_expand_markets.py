@@ -190,7 +190,7 @@ class TestPrunePicksWithReasons:
         """All expected gate keys are in the histogram."""
         _, reasons = prune_picks_with_reasons([])
         expected = {
-            "tier", "alpha", "edge_z", "ev_shrunk",
+            "tier", "alpha", "edge_z", "model_edge", "ev_shrunk",
             "quality", "books", "hold", "clv",
         }
         assert set(reasons.keys()) == expected

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from line_tracker.config import (
     get_debug_prune_profile,
+    get_model_min_edge,
     get_prune_allowed_alpha_labels,
     get_prune_allowed_tiers,
     get_prune_debug_mode,
@@ -152,10 +153,13 @@ def prune_picks_with_reasons(
         max_market_hold=max_market_hold,
     )
 
+    model_min_edge = get_model_min_edge()
+
     reasons: dict[str, int] = {
         "tier": 0,
         "alpha": 0,
         "edge_z": 0,
+        "model_edge": 0,
         "ev_shrunk": 0,
         "quality": 0,
         "books": 0,
@@ -165,6 +169,8 @@ def prune_picks_with_reasons(
 
     result: list[dict] = []
     for entry in entries:
+        is_model = entry.get("edge_source") == "model"
+
         if entry.get("tier", "") not in allowed_tiers:
             reasons["tier"] += 1
             continue
@@ -172,9 +178,18 @@ def prune_picks_with_reasons(
         if alpha not in allowed_alpha:
             reasons["alpha"] += 1
             continue
-        if (entry.get("edge_z") or 0) < min_edge_z:
-            reasons["edge_z"] += 1
-            continue
+
+        # edge_z gate: only for consensus-driven entries.
+        # Model-driven entries use edge_pct magnitude instead.
+        if is_model:
+            if (entry.get("edge_pct") or 0) < model_min_edge:
+                reasons["model_edge"] += 1
+                continue
+        else:
+            if (entry.get("edge_z") or 0) < min_edge_z:
+                reasons["edge_z"] += 1
+                continue
+
         if (entry.get("edge_ev_shrunk") or 0) <= min_ev_shrunk:
             reasons["ev_shrunk"] += 1
             continue
