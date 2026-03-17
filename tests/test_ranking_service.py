@@ -30,20 +30,20 @@ class TestSelectTopPicks:
     def test_empty_list(self):
         assert select_top_picks([]) == []
 
-    def test_top_n_default_3(self):
-        entries = [_make_entry(i * 0.5 + 1.0) for i in range(5)]
+    def test_top_n_default_5(self):
+        entries = [_make_entry(i * 0.5 + 1.0) for i in range(7)]
         result = select_top_picks(entries)
-        assert len(result) == 3
+        assert len(result) == 5
         # Highest edge_z first
-        assert result[0]["edge_z"] == 3.0
-        assert result[1]["edge_z"] == 2.5
-        assert result[2]["edge_z"] == 2.0
+        assert result[0]["edge_z"] == 4.0
+        assert result[1]["edge_z"] == 3.5
+        assert result[2]["edge_z"] == 3.0
 
     def test_top_n_custom(self):
-        entries = [_make_entry(i * 0.5 + 1.0) for i in range(5)]
+        entries = [_make_entry(i * 0.5 + 1.0) for i in range(7)]
         result = select_top_picks(entries, top_n=1)
         assert len(result) == 1
-        assert result[0]["edge_z"] == 3.0
+        assert result[0]["edge_z"] == 4.0
 
     def test_fewer_than_top_n(self):
         entries = [_make_entry(2.0)]
@@ -66,6 +66,14 @@ class TestSelectTopPicks:
         result = select_top_picks(entries, top_n=2)
         assert result[0]["quality_score"] == 90
 
+    def test_tiebreak_by_books_used(self):
+        entries = [
+            _make_entry(2.0, ev_shrunk=0.03, quality=80, books_used=4),
+            _make_entry(2.0, ev_shrunk=0.03, quality=80, books_used=8),
+        ]
+        result = select_top_picks(entries, top_n=2)
+        assert result[0]["books_used"] == 8
+
 
 class TestFormatPicksReport:
     def test_no_picks(self):
@@ -75,7 +83,7 @@ class TestFormatPicksReport:
     def test_report_has_pick_data(self):
         picks = [_make_entry(2.5)]
         report = format_picks_report(picks)
-        assert "Top 1 Picks" in report
+        assert "Best 1 Available Picks" in report
         assert "spread" in report
         assert "Chiefs" in report
         assert "Edge-Z" in report
