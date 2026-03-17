@@ -19,6 +19,17 @@ from line_tracker.core.logging import get_logger
 
 log = get_logger(__name__)
 
+
+def _normalize_for_cmp(name: str) -> str:
+    """Normalize for comparison: lowercase, strip periods, ``State`` → ``St``.
+
+    This ensures that Torvik names like ``"Iowa St."`` and normalised Odds API
+    names like ``"iowa state"`` compare as equal.
+    """
+    s = name.lower().replace(".", "")
+    s = re.sub(r"\bstate\b", "st", s)
+    return re.sub(r"\s+", " ", s).strip()
+
 # ---------------------------------------------------------------------------
 # 1.  Manual override map: Odds API display name  →  Torvik canonical name
 #
@@ -306,20 +317,31 @@ def _fuzzy_match_team(
     Returns the matched Torvik team name or None.
     """
     norm = normalize_team_name(odds_name)
+    norm_cmp = _normalize_for_cmp(norm)
 
-    # Check if normalized Odds name equals a lowered Torvik name
+    # Exact match: raw normalised name or comparison-normalised name
     for t in prediction_teams:
-        if norm == t.lower():
+        if norm == t.lower() or norm_cmp == _normalize_for_cmp(t):
             return t
 
-    # Substring: check if any Torvik name is a prefix of the normalized name
-    # or the normalized name starts with the Torvik name (lowered)
-    for t in sorted(prediction_teams, key=len, reverse=True):
-        t_low = t.lower()
-        if norm.startswith(t_low) or t_low.startswith(norm):
-            return t
-
-    return None
+    # Word-boundary prefix matching – longest match wins so that
+    # "Iowa St." (longer) beats "Iowa" when the input is "Iowa State …".
+    best: str | None = None
+    best_len = 0
+    for t in prediction_teams:
+        t_cmp = _normalize_for_cmp(t)
+        # Torvik name is a prefix of the odds name
+        if norm_cmp.startswith(t_cmp) and len(t_cmp) > best_len:
+            # Require word boundary after the prefix
+            if len(norm_cmp) == len(t_cmp) or norm_cmp[len(t_cmp)] == " ":
+                best = t
+                best_len = len(t_cmp)
+        # Odds name is a prefix of the Torvik name
+        if t_cmp.startswith(norm_cmp) and len(norm_cmp) > best_len:
+            if len(t_cmp) == len(norm_cmp) or t_cmp[len(norm_cmp)] == " ":
+                best = t
+                best_len = len(norm_cmp)
+    return best
 
 
 def match_event_to_prediction(
@@ -415,14 +437,36 @@ def match_event_to_prediction(
 
 
 def _substring_match(odds_name: str, pred_teams: set[str]) -> str | None:
-    """Last-resort substring matching."""
+    """Last-resort substring matching – longest match wins.
+
+    Forward matches (Torvik name found inside the odds name) are preferred
+    over reverse matches (odds name found inside a Torvik name).
+    """
     norm = normalize_team_name(odds_name)
-    # Check if any torvik name appears as a substring in the odds name
-    for t in sorted(pred_teams, key=len, reverse=True):
-        t_low = t.lower()
-        if t_low in norm or norm in t_low:
-            return t
-    return None
+    norm_cmp = _normalize_for_cmp(norm)
+
+    # Forward: Torvik name appears as whole words inside the odds name
+    best: str | None = None
+    best_len = 0
+    for t in pred_teams:
+        t_cmp = _normalize_for_cmp(t)
+        if re.search(r"\b" + re.escape(t_cmp) + r"\b", norm_cmp) and len(t_cmp) > best_len:
+            best = t
+            best_len = len(t_cmp)
+    if best:
+        return best
+
+    # Reverse: odds name appears as whole words inside a Torvik name
+    # (e.g. "Omaha" found in "Nebraska Omaha").  Prefer the shortest
+    # Torvik name that contains the odds name.
+    best_rev: str | None = None
+    best_rev_len = float("inf")
+    for t in pred_teams:
+        t_cmp = _normalize_for_cmp(t)
+        if re.search(r"\b" + re.escape(norm_cmp) + r"\b", t_cmp) and len(t_cmp) < best_rev_len:
+            best_rev = t
+            best_rev_len = len(t_cmp)
+    return best_rev
 
 
 # ---------------------------------------------------------------------------

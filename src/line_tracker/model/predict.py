@@ -70,6 +70,15 @@ def margin_to_total_prob(
 # Game-level prediction
 # ------------------------------------------------------------------
 
+def _normalize_for_cmp(name: str) -> str:
+    """Normalize for comparison: lowercase, strip periods, ``State`` → ``St``."""
+    import re
+
+    s = name.lower().replace(".", "")
+    s = re.sub(r"\bstate\b", "st", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _build_name_index(torvik_names: list[str]) -> dict[str, str]:
     """Build a lookup mapping normalised display names → Torvik names.
 
@@ -81,6 +90,16 @@ def _build_name_index(torvik_names: list[str]) -> dict[str, str]:
     # Exact (lowered) match first
     for name in torvik_names:
         index[name.lower()] = name
+
+    # Add "St." ↔ "State" variants so both spellings resolve correctly.
+    for name in torvik_names:
+        low = name.lower()
+        if " st." in low:
+            variant = low.replace(" st.", " state")
+            index.setdefault(variant, name)
+        elif " state" in low:
+            variant = low.replace(" state", " st.")
+            index.setdefault(variant, name)
 
     # Common ESPN→Torvik overrides where prefix matching fails
     _OVERRIDES = {
@@ -119,13 +138,24 @@ def _resolve_team(name: str, name_index: dict[str, str]) -> str | None:
     if low in name_index:
         return name_index[low]
 
-    # Try prefix: longest Torvik name that the ESPN name starts with
+    # Try comparison-normalised exact match (handles "State" vs "St.")
+    low_cmp = _normalize_for_cmp(low)
+    for key, torvik in name_index.items():
+        if _normalize_for_cmp(key) == low_cmp:
+            return torvik
+
+    # Try prefix: longest Torvik name that the ESPN name starts with,
+    # requiring a word boundary after the prefix to avoid "Iowa" matching
+    # "Iowa State".
     best: str | None = None
     best_len = 0
     for key, torvik in name_index.items():
-        if low.startswith(key) and len(key) > best_len:
-            best = torvik
-            best_len = len(key)
+        key_cmp = _normalize_for_cmp(key)
+        if low_cmp.startswith(key_cmp) and len(key_cmp) > best_len:
+            # Require word boundary: next char must be space or end-of-string
+            if len(low_cmp) == len(key_cmp) or low_cmp[len(key_cmp)] == " ":
+                best = torvik
+                best_len = len(key_cmp)
     return best
 
 

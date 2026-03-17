@@ -6,6 +6,9 @@ import pytest
 
 from line_tracker.model.matching import (
     TEAM_NAME_MAP,
+    _fuzzy_match_team,
+    _normalize_for_cmp,
+    _substring_match,
     match_all_events,
     match_event_to_prediction,
     normalize_team_name,
@@ -375,3 +378,107 @@ class TestRealTournamentMatchups:
         result = match_event_to_prediction(event, preds)
         assert result is not None
         assert result["away_team"] == "Southeast Missouri St."
+
+
+# ---------------------------------------------------------------------------
+# State vs St. disambiguation (regression tests for name mismatch bugs)
+# ---------------------------------------------------------------------------
+
+class TestStateStDotDisambiguation:
+    """Ensure 'Iowa State' never matches 'Iowa', etc."""
+
+    def test_normalize_for_cmp_state_to_st(self):
+        assert _normalize_for_cmp("Iowa State") == "iowa st"
+        assert _normalize_for_cmp("Iowa St.") == "iowa st"
+        assert _normalize_for_cmp("Iowa") == "iowa"
+
+    def test_fuzzy_iowa_state_vs_iowa(self):
+        """Iowa State Cyclones must match Iowa St., not Iowa."""
+        teams = {"Iowa", "Iowa St."}
+        assert _fuzzy_match_team("Iowa State Cyclones", teams) == "Iowa St."
+        assert _fuzzy_match_team("Iowa State", teams) == "Iowa St."
+
+    def test_fuzzy_iowa_alone(self):
+        """Plain 'Iowa' should match 'Iowa', not 'Iowa St.'."""
+        teams = {"Iowa", "Iowa St."}
+        assert _fuzzy_match_team("Iowa Hawkeyes", teams) == "Iowa"
+        assert _fuzzy_match_team("Iowa", teams) == "Iowa"
+
+    def test_fuzzy_illinois_vs_illinois_state(self):
+        teams = {"Illinois", "Illinois St."}
+        assert _fuzzy_match_team("Illinois Fighting Illini", teams) == "Illinois"
+        assert _fuzzy_match_team("Illinois State Redbirds", teams) == "Illinois St."
+        assert _fuzzy_match_team("Illinois St", teams) == "Illinois St."
+
+    def test_fuzzy_ohio_state_vs_ohio(self):
+        teams = {"Ohio", "Ohio St."}
+        assert _fuzzy_match_team("Ohio State Buckeyes", teams) == "Ohio St."
+        assert _fuzzy_match_team("Ohio Bobcats", teams) == "Ohio"
+
+    def test_fuzzy_utah_state_vs_utah(self):
+        teams = {"Utah", "Utah St."}
+        assert _fuzzy_match_team("Utah State Aggies", teams) == "Utah St."
+        assert _fuzzy_match_team("Utah Utes", teams) == "Utah"
+
+    def test_substring_iowa_state_vs_iowa(self):
+        """_substring_match should also pick the right team."""
+        teams = {"Iowa", "Iowa St."}
+        assert _substring_match("Iowa State Cyclones", teams) == "Iowa St."
+
+    def test_substring_illinois_vs_illinois_state(self):
+        teams = {"Illinois", "Illinois St."}
+        assert _substring_match("Illinois Fighting Illini", teams) == "Illinois"
+
+    def test_full_event_iowa_state_not_iowa(self):
+        """End-to-end: Iowa State must not match Iowa in predictions."""
+        preds = [
+            _pred("Iowa St.", "Lipscomb"),
+            _pred("Iowa", "Vermont"),
+        ]
+        event = {
+            "home_team": "Iowa State Cyclones",
+            "away_team": "Lipscomb Bisons",
+        }
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["home_team"] == "Iowa St."
+
+    def test_full_event_iowa_not_iowa_state(self):
+        preds = [
+            _pred("Iowa St.", "Lipscomb"),
+            _pred("Iowa", "Vermont"),
+        ]
+        event = {
+            "home_team": "Iowa Hawkeyes",
+            "away_team": "Vermont Catamounts",
+        }
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["home_team"] == "Iowa"
+
+    def test_full_event_utah_state_at_villanova(self):
+        preds = [
+            _pred("Villanova", "Utah St."),
+            _pred("Utah", "Yale"),
+        ]
+        event = {
+            "home_team": "Villanova Wildcats",
+            "away_team": "Utah State Aggies",
+        }
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["away_team"] == "Utah St."
+
+    def test_full_event_tcu_at_ohio_state(self):
+        preds = [
+            _pred("Ohio St.", "TCU"),
+            _pred("Ohio", "Drake"),
+        ]
+        event = {
+            "home_team": "Ohio State Buckeyes",
+            "away_team": "TCU Horned Frogs",
+        }
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["home_team"] == "Ohio St."
+        assert result["away_team"] == "TCU"
