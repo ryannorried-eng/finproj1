@@ -831,6 +831,8 @@ def build_daily_slate(
     settings = settings or {}
     th = thresholds or STANDARD_THRESHOLDS
     max_per_event: int = filters.get("max_per_event", 1)
+    if model_predictions:
+        max_per_event = max(max_per_event, 3)
 
     show_debug = (
         os.environ.get("LINE_TRACKER_DEBUG", "").lower() in ("1", "true", "yes")
@@ -970,6 +972,7 @@ def build_daily_slate(
                         )
                         entry["ev_roi"] = round(_mp * _dec - 1.0, 6)
                         entry["ev_100"] = entry["edge_pct"]
+                        entry["edge_ev_shrunk"] = entry["ev_roi"]
 
             # Classify — runs for EVERY rec, no pre-filtering
             classification = classify_rec(
