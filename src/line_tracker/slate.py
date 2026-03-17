@@ -934,6 +934,7 @@ def build_daily_slate(
                     _mp = _model_prob_for_market(
                         _pred, rec.market, rec.selection,
                         sample_line.home_team, sample_line.away_team,
+                        line_value=rec.line,
                     )
                     if _mp is not None:
                         entry["model_prob"] = _mp
@@ -1233,10 +1234,34 @@ def _match_prediction(
     substring).  Accepts individual team names from the BettingLine rather
     than parsing the event display string.
     """
+    from line_tracker.core.logging import get_logger
     from line_tracker.model.matching import match_event_to_prediction
 
+    log = get_logger(__name__)
+
     odds_event = {"home_team": home_team, "away_team": away_team}
-    return match_event_to_prediction(odds_event, predictions)
+    result = match_event_to_prediction(odds_event, predictions)
+
+    if result is not None:
+        log.info(
+            "Model match: odds=%s/%s → pred=%s/%s margin=%.1f",
+            home_team,
+            away_team,
+            result.get("home_team"),
+            result.get("away_team"),
+            result.get("predicted_margin", 0),
+        )
+    else:
+        pred_pairs = [
+            f"{p['home_team']} vs {p['away_team']}" for p in predictions[:5]
+        ]
+        log.warning(
+            "No model match: odds home=%r away=%r | first predictions: %s",
+            home_team,
+            away_team,
+            pred_pairs,
+        )
+    return result
 
 
 def _model_prob_for_market(
@@ -1245,39 +1270,90 @@ def _model_prob_for_market(
     selection: str,
     home_team: str,
     away_team: str,
+    line_value: float | None = None,
 ) -> float | None:
-    """Extract the model probability for a specific market/side.
+    """Extract or compute the model probability for a specific market/side.
 
     ``market`` is the bet type value (``"moneyline"``, ``"spread"``,
     ``"total"``).  ``selection`` identifies the side (team name, ``"Over"``,
-    ``"Under"``).
+    ``"Under"``).  ``line_value`` is the spread or total line from the rec,
+    used to compute spread/total probabilities on the fly when the prediction
+    only contains moneyline probs and a predicted margin.
     """
+    from line_tracker.model.predict import margin_to_spread_prob, margin_to_total_prob
+
     home_name = home_team
     away_name = away_team
+    # Determine which team in the prediction corresponds to each Odds API
+    # team.  Normally they align, but for neutral-site games the home/away
+    # may be swapped between the Odds API and the model.
+    pred_home = pred.get("home_team", "")
+    odds_home_is_pred_home = _sel_matches_team(
+        home_name.lower(), pred_home,
+    )
 
     mkt = market.lower()
     sel = selection.strip().lower()
 
     if mkt == "moneyline":
-        # Determine if selection matches home or away team
         if _sel_matches_team(sel, home_name):
-            return pred.get("home_ml_prob")
+            key = "home_ml_prob" if odds_home_is_pred_home else "away_ml_prob"
+            return pred.get(key)
         if _sel_matches_team(sel, away_name):
-            return pred.get("away_ml_prob")
+            key = "away_ml_prob" if odds_home_is_pred_home else "home_ml_prob"
+            return pred.get(key)
         return None
 
     if mkt in ("spread", "spreads"):
+        # Try pre-computed spread probs first
         if _sel_matches_team(sel, home_name):
-            return pred.get("home_spread_prob")
-        if _sel_matches_team(sel, away_name):
-            return pred.get("away_spread_prob")
+            pre = pred.get("home_spread_prob") if odds_home_is_pred_home else pred.get("away_spread_prob")
+            if pre is not None:
+                return pre
+        elif _sel_matches_team(sel, away_name):
+            pre = pred.get("away_spread_prob") if odds_home_is_pred_home else pred.get("home_spread_prob")
+            if pre is not None:
+                return pre
+
+        # Compute on the fly from predicted_margin + line_value
+        margin = pred.get("predicted_margin")
+        if margin is not None and line_value is not None:
+            if _sel_matches_team(sel, home_name):
+                # line_value is the spread for the selection (home).
+                # margin_to_spread_prob expects the *home* predicted margin
+                # and the *home* market spread.
+                if odds_home_is_pred_home:
+                    return margin_to_spread_prob(margin, line_value)
+                else:
+                    # odds home = pred away.  Flip margin sign.
+                    return margin_to_spread_prob(-margin, line_value)
+            if _sel_matches_team(sel, away_name):
+                if odds_home_is_pred_home:
+                    # Away covers = 1 - P(home covers)
+                    return 1.0 - margin_to_spread_prob(margin, -line_value)
+                else:
+                    return 1.0 - margin_to_spread_prob(-margin, -line_value)
         return None
 
     if mkt in ("total", "totals"):
+        # Try pre-computed total probs first
         if sel.startswith("over"):
-            return pred.get("over_prob")
-        if sel.startswith("under"):
-            return pred.get("under_prob")
+            pre = pred.get("over_prob")
+            if pre is not None:
+                return pre
+        elif sel.startswith("under"):
+            pre = pred.get("under_prob")
+            if pre is not None:
+                return pre
+
+        # Compute on the fly – we need a predicted total.
+        # Use predicted_total if available; otherwise we can't compute.
+        predicted_total = pred.get("predicted_total")
+        if predicted_total is not None and line_value is not None:
+            if sel.startswith("over"):
+                return margin_to_total_prob(predicted_total, line_value)
+            if sel.startswith("under"):
+                return 1.0 - margin_to_total_prob(predicted_total, line_value)
         return None
 
     return None
