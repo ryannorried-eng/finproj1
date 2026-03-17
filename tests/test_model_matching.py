@@ -482,3 +482,56 @@ class TestStateStDotDisambiguation:
         assert result is not None
         assert result["home_team"] == "Ohio St."
         assert result["away_team"] == "TCU"
+
+
+# ---------------------------------------------------------------------------
+# Previously-unresolved teams (must exist in TEAM_NAME_MAP)
+# ---------------------------------------------------------------------------
+
+class TestNewlyAddedTeams:
+    """Teams that were previously unresolved — now in TEAM_NAME_MAP."""
+
+    @pytest.mark.parametrize(
+        "odds_name, expected_torvik",
+        [
+            ("NC State Wolfpack", "N.C. State"),
+            ("North Carolina State Wolfpack", "N.C. State"),
+            ("McNeese Cowboys", "McNeese St."),
+            ("McNeese State Cowboys", "McNeese St."),
+            ("Kennesaw State Owls", "Kennesaw St."),
+            ("Long Island University Sharks", "LIU"),
+            ("LIU Sharks", "LIU"),
+            ("Wright State Raiders", "Wright St."),
+            ("Tennessee State Tigers", "Tennessee St."),
+            ("Tennessee St Tigers", "Tennessee St."),
+            ("North Dakota State Bison", "North Dakota St."),
+            ("North Dakota St Bison", "North Dakota St."),
+        ],
+    )
+    def test_map_lookup(self, odds_name, expected_torvik):
+        result = TEAM_NAME_MAP.get(odds_name.lower())
+        assert result == expected_torvik, (
+            f"TEAM_NAME_MAP[{odds_name.lower()!r}] = {result!r}, "
+            f"expected {expected_torvik!r}"
+        )
+
+    def test_match_kennesaw_state(self):
+        preds = [_pred("Duke", "Kennesaw St.")]
+        event = {"home_team": "Duke Blue Devils", "away_team": "Kennesaw State Owls"}
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["away_team"] == "Kennesaw St."
+
+    def test_match_long_island_university(self):
+        preds = [_pred("Duke", "LIU")]
+        event = {"home_team": "Duke Blue Devils", "away_team": "Long Island University Sharks"}
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["away_team"] == "LIU"
+
+    def test_match_wright_state(self):
+        preds = [_pred("Duke", "Wright St.")]
+        event = {"home_team": "Duke Blue Devils", "away_team": "Wright State Raiders"}
+        result = match_event_to_prediction(event, preds)
+        assert result is not None
+        assert result["away_team"] == "Wright St."

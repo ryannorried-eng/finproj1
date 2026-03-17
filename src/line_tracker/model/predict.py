@@ -14,6 +14,7 @@ from scipy.stats import norm
 
 from line_tracker.core.logging import get_logger
 from line_tracker.model import data, features, train
+from line_tracker.model.matching import TEAM_NAME_MAP
 
 log = get_logger(__name__)
 
@@ -83,8 +84,9 @@ def _build_name_index(torvik_names: list[str]) -> dict[str, str]:
     """Build a lookup mapping normalised display names → Torvik names.
 
     ESPN uses full names like ``"Duke Blue Devils"`` while Torvik uses
-    ``"Duke"``.  We build a case-insensitive prefix index so that if the
-    ESPN name *starts with* a Torvik name it resolves correctly.
+    ``"Duke"``.  We first consult ``TEAM_NAME_MAP`` from the matching
+    module (which has 130+ curated entries), then build a prefix index
+    from the Torvik names as a fallback.
     """
     index: dict[str, str] = {}
     # Exact (lowered) match first
@@ -101,30 +103,13 @@ def _build_name_index(torvik_names: list[str]) -> dict[str, str]:
             variant = low.replace(" state", " st.")
             index.setdefault(variant, name)
 
-    # Common ESPN→Torvik overrides where prefix matching fails
-    _OVERRIDES = {
-        "uconn huskies": "Connecticut",
-        "hawai'i rainbow warriors": "Hawaii",
-        "miami hurricanes": "Miami FL",
-        "miami (oh) redhawks": "Miami OH",
-        "lsu tigers": "LSU",
-        "vcu rams": "VCU",
-        "smu mustangs": "SMU",
-        "tcu horned frogs": "TCU",
-        "byu cougars": "BYU",
-        "ucf knights": "UCF",
-        "usc trojans": "USC",
-        "ole miss rebels": "Ole Miss",
-        "umbc retrievers": "UMBC",
-        "unc asheville bulldogs": "UNC Asheville",
-        "unc greensboro spartans": "UNC Greensboro",
-        "unc wilmington seahawks": "UNC Wilmington",
-        "utep miners": "UTEP",
-        "utsa roadrunners": "UTSA",
-        "unlv rebels": "UNLV",
-    }
-    for espn_lower, torvik in _OVERRIDES.items():
-        if torvik in torvik_names or torvik.lower() in index:
+    # Import all curated overrides from the matching module.  Only add
+    # entries whose Torvik name actually exists in the ratings data so
+    # we never point at a phantom team.
+    torvik_set = set(torvik_names)
+    torvik_lower_map = {n.lower(): n for n in torvik_names}
+    for espn_lower, torvik in TEAM_NAME_MAP.items():
+        if torvik in torvik_set or torvik.lower() in torvik_lower_map:
             index[espn_lower] = torvik
 
     return index
@@ -132,16 +117,18 @@ def _build_name_index(torvik_names: list[str]) -> dict[str, str]:
 
 def _resolve_team(name: str, name_index: dict[str, str]) -> str | None:
     """Resolve an ESPN display name to a Torvik team name."""
-    low = name.lower()
+    low = name.lower().strip()
 
-    # Exact match
+    # Exact match (covers TEAM_NAME_MAP entries like "ohio state buckeyes")
     if low in name_index:
+        log.debug("Team %r → %r (exact)", name, name_index[low])
         return name_index[low]
 
     # Try comparison-normalised exact match (handles "State" vs "St.")
     low_cmp = _normalize_for_cmp(low)
     for key, torvik in name_index.items():
         if _normalize_for_cmp(key) == low_cmp:
+            log.debug("Team %r → %r (normalized)", name, torvik)
             return torvik
 
     # Try prefix: longest Torvik name that the ESPN name starts with,
@@ -156,6 +143,11 @@ def _resolve_team(name: str, name_index: dict[str, str]) -> str | None:
             if len(low_cmp) == len(key_cmp) or low_cmp[len(key_cmp)] == " ":
                 best = torvik
                 best_len = len(key_cmp)
+
+    if best is not None:
+        log.debug("Team %r → %r (prefix, len=%d)", name, best, best_len)
+    else:
+        log.warning("Team %r could not be resolved to any Torvik name", name)
     return best
 
 
@@ -197,6 +189,11 @@ def predict_games(
 
         home_name = _resolve_team(home_raw, name_index)
         away_name = _resolve_team(away_raw, name_index)
+
+        log.info(
+            "Resolving: %r → %r, %r → %r",
+            home_raw, home_name, away_raw, away_name,
+        )
 
         if home_name is None or home_name not in ratings_idx.index:
             log.warning("Team not found in ratings: %s – skipping", home_raw)
