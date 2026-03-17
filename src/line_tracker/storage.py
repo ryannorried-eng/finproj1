@@ -26,6 +26,7 @@ from line_tracker.db.repos import (
     EventsRepo,
     LinesRepo,
     OutcomesRepo,
+    PredictionsRepo,
     RecSnapshotsRepo,
     SlatePicksRepo,
     SlatesRepo,
@@ -82,6 +83,7 @@ class LineStore:
         self.outcomes_repo = OutcomesRepo(self._conn)
         self.clv_model_repo = ClvModelRepo(self._conn)
         self.cycle_runs_repo = CycleRunsRepo(self._conn)
+        self.predictions_repo = PredictionsRepo(self._conn)
 
     def _maybe_migrate(self) -> None:
         """Run schema migrations at most once per process per DB path.

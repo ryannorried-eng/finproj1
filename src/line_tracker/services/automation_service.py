@@ -243,6 +243,7 @@ def run_cycle(
     use_clv_filter: bool = True,
     dry_run: bool = False,
     closing_batch_size: int = 200,
+    model_predictions: list[dict] | None = None,
 ) -> dict:
     """Execute one analysis cycle: slate → prune → rank → snapshot.
 
@@ -319,6 +320,7 @@ def run_cycle(
         filters=filters,
         mode=mode,
         store=store,
+        model_predictions=model_predictions,
     )
 
     # Collect all non-stay-away entries

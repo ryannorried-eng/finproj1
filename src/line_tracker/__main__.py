@@ -119,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         "--top-n", type=int, default=3, help="Max top picks",
     )
     cycle_p.add_argument("--dry-run", action="store_true")
+    cycle_p.add_argument(
+        "--use-model", action="store_true",
+        help="Load NCAAB model predictions and use them for edge calculation",
+    )
 
     # --- import-outcomes ---
     import_p = sub.add_parser(
@@ -141,9 +145,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- train-model ---
     train_p = sub.add_parser(
-        "train-model", help="Train/refresh CLV prediction model",
+        "train-model", help="Train NCAAB margin prediction model",
     )
     train_p.add_argument("--db", default="lines.db", help="DB path")
+    train_p.add_argument(
+        "--type", default="ridge", choices=["ridge", "xgboost"],
+        help="Model type (default: ridge)",
+    )
+
+    # --- predict ---
+    predict_p = sub.add_parser(
+        "predict", help="Generate NCAAB predictions for today's games",
+    )
+    predict_p.add_argument("--db", default="lines.db", help="DB path")
 
     args = parser.parse_args(argv)
 
@@ -177,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_roi_report(args)
     if args.command == "train-model":
         return _cmd_train_model(args)
+    if args.command == "predict":
+        return _cmd_predict(args)
     return 0
 
 
@@ -401,6 +417,11 @@ def _cmd_cycle(args) -> int:
     from line_tracker.services.ranking_service import format_picks_report
 
     sport_key = SPORTS[args.sport]
+
+    model_predictions = None
+    if getattr(args, "use_model", False):
+        model_predictions = _load_model_predictions(args.db, sport_key)
+
     with LineStore(args.db) as store:
         result = run_cycle(
             store,
@@ -408,6 +429,7 @@ def _cmd_cycle(args) -> int:
             mode=args.mode,
             top_n=args.top_n,
             dry_run=args.dry_run,
+            model_predictions=model_predictions,
         )
 
     print(f"Cycle completed at {result['cycle_ts']}")
@@ -415,9 +437,25 @@ def _cmd_cycle(args) -> int:
     print(f"  Passed pruning: {result['pruned_count']}")
     print(f"  Snapshots logged: {result['snapshot_count']}")
     print(f"  Snapshots closed: {result['closed_count']}")
+    if model_predictions:
+        print(f"  Model predictions loaded: {len(model_predictions)}")
     print()
     print(format_picks_report(result["top_picks"]))
     return 0
+
+
+def _load_model_predictions(db_path: str, sport_key: str) -> list[dict]:
+    """Load model predictions from DB for today's games."""
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with LineStore(db_path) as store:
+        preds = store.predictions_repo.get_predictions_for_date(today)
+    if preds:
+        print(f"Loaded {len(preds)} model predictions for {today}")
+    else:
+        print(f"No model predictions found for {today}. Run 'predict' first.")
+    return preds
 
 
 def _cmd_kpi(args) -> int:
@@ -493,16 +531,63 @@ def _cmd_roi_report(args) -> int:
 
 
 def _cmd_train_model(args) -> int:
-    from line_tracker.services.clv_model_service import refresh_model
+    from line_tracker.model.train import train_margin_model
 
+    result = train_margin_model(model_type=getattr(args, "type", "ridge"))
+    print(f"\nModel saved to: {result['model_path']}")
+    print(f"  RMSE: {result['val_rmse']:.3f}")
+    print(f"  MAE:  {result['val_mae']:.3f}")
+    ats = result.get("val_ats_accuracy")
+    if ats is not None:
+        print(f"  ATS accuracy: {ats:.1%}")
+    return 0
+
+
+def _cmd_predict(args) -> int:
+    from datetime import datetime, timezone
+
+    from line_tracker.model.data import fetch_schedule
+    from line_tracker.model.predict import predict_games
+
+    print("Fetching today's NCAAB schedule...")
+    schedule = fetch_schedule()
+    if schedule.empty:
+        print("No upcoming NCAAB games found.")
+        return 0
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    games = []
+    for _, row in schedule.iterrows():
+        games.append({
+            "home_team": row["home_team"],
+            "away_team": row["away_team"],
+            "neutral_site": row.get("neutral_site", False),
+            "game_date": today_str,
+        })
+
+    print(f"Generating predictions for {len(games)} games...")
+    predictions = predict_games(games)
+
+    if not predictions:
+        print("No predictions generated (team matching issues?).")
+        return 0
+
+    # Save to DB
     with LineStore(args.db) as store:
-        result = refresh_model(store)
+        for p in predictions:
+            p["sport"] = "basketball_ncaab"
+        with store.transaction():
+            count = store.predictions_repo.save_predictions(predictions)
 
-    print(f"Model training: {result['status']}")
-    if result.get("groups"):
-        print(f"  Groups trained: {result['groups']}")
-    if result.get("total_samples"):
-        print(f"  Total samples: {result['total_samples']}")
+    print(f"\nSaved {count} predictions to DB.\n")
+    print(f"{'Home':<22} {'Away':<22} {'Margin':>7} {'Home ML':>8} {'Away ML':>8}")
+    print("-" * 72)
+    for p in predictions:
+        print(
+            f"{p['home_team']:<22} {p['away_team']:<22} "
+            f"{p['predicted_margin']:>+7.1f} "
+            f"{p['home_ml_prob']:>8.1%} {p['away_ml_prob']:>8.1%}"
+        )
     return 0
 
 

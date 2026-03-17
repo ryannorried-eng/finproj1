@@ -308,6 +308,26 @@ def get_slate_max_per_event() -> int:
     return int(raw) if raw else 1
 
 
+# ── NCAAB model configuration ─────────────────────────────────────
+
+
+def get_model_enabled() -> bool:
+    """True when MODEL_ENABLED is set (default off)."""
+    raw = _read_secret("MODEL_ENABLED", "0")
+    return str(raw).strip() in ("1", "true", "True", "yes")
+
+
+def get_model_min_edge() -> float:
+    """Minimum model edge (EV/$100) to surface a bet (default 2.0)."""
+    raw = _read_secret("MODEL_MIN_EDGE", "2.0")
+    return float(raw) if raw else 2.0
+
+
+def get_model_sport() -> str:
+    """Sport that uses model predictions (default basketball_ncaab)."""
+    return _read_secret("MODEL_SPORT", "basketball_ncaab") or "basketball_ncaab"
+
+
 def get_debug_prune_profile() -> dict:
     """Return effective pruning thresholds for debug mode.
 
