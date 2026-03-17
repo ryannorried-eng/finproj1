@@ -1,7 +1,7 @@
 """Step 2 – Pick pruning with quality gates.
 
 Entries that survive all gates are promoted to candidates for ranking.
-edge_z is NOT a hard gate — it is used as a ranking signal instead.
+edge_z is a hard gate — entries below the threshold are pruned.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def prune_picks(
     6. market_hold_median <= max_market_hold
     7. CLV filter (if profile provided)
 
-    Note: edge_z is NOT a hard gate — it is used for ranking only.
+    3. edge_z >= min_edge_z
     """
     survivors, _ = prune_picks_with_reasons(
         entries,
@@ -172,7 +172,9 @@ def prune_picks_with_reasons(
         if alpha not in allowed_alpha:
             reasons["alpha"] += 1
             continue
-        # edge_z is no longer a hard gate — used for ranking only.
+        if (entry.get("edge_z") or 0) < min_edge_z:
+            reasons["edge_z"] += 1
+            continue
         if (entry.get("edge_ev_shrunk") or 0) <= min_ev_shrunk:
             reasons["ev_shrunk"] += 1
             continue
