@@ -32,11 +32,11 @@ def _make_entry(**overrides) -> dict:
 class TestConfigDrivenDefaults:
     """Thresholds pulled from env/secrets when no explicit kwarg given."""
 
-    def test_env_min_edge_z_no_longer_filters(self, monkeypatch):
-        """edge_z is used for ranking only, not as a hard gate."""
+    def test_env_min_edge_z_filters(self, monkeypatch):
+        """edge_z is a hard gate — entries below the env threshold are pruned."""
         monkeypatch.setenv("PRUNE_MIN_EDGE_Z", "3.0")
         result = prune_picks([_make_entry(edge_z=0.5)])
-        assert len(result) == 1
+        assert len(result) == 0
 
     def test_env_min_ev_shrunk(self, monkeypatch):
         monkeypatch.setenv("PRUNE_MIN_EV_SHRUNK", "0.05")
@@ -99,28 +99,28 @@ class TestConfigDrivenDefaults:
         assert len(result) == 1
 
 
-class TestEdgeZNoLongerHardGate:
-    """edge_z is used for ranking only, not as a hard pruning gate."""
+class TestEdgeZHardGate:
+    """edge_z is a hard pruning gate — entries below min_edge_z are pruned."""
 
-    def test_low_edge_z_passes(self, monkeypatch):
+    def test_low_edge_z_filtered(self, monkeypatch):
         monkeypatch.delenv("PRUNE_MIN_EDGE_Z", raising=False)
         result = prune_picks([_make_entry(edge_z=0.10)])
-        assert len(result) == 1
+        assert len(result) == 0
 
-    def test_zero_edge_z_passes(self, monkeypatch):
+    def test_zero_edge_z_filtered(self, monkeypatch):
         monkeypatch.delenv("PRUNE_MIN_EDGE_Z", raising=False)
         result = prune_picks([_make_entry(edge_z=0.0)])
-        assert len(result) == 1
+        assert len(result) == 0
 
 
 class TestExplicitKwargsOverrideConfig:
     """Explicit keyword arguments take precedence over env config."""
 
-    def test_explicit_min_edge_z_no_longer_filters(self, monkeypatch):
-        """min_edge_z kwarg is accepted but no longer filters."""
+    def test_explicit_min_edge_z_filters(self, monkeypatch):
+        """min_edge_z kwarg filters entries below the explicit threshold."""
         monkeypatch.setenv("PRUNE_MIN_EDGE_Z", "3.0")
         result = prune_picks([_make_entry(edge_z=0.5)], min_edge_z=5.0)
-        assert len(result) == 1
+        assert len(result) == 0
 
     def test_explicit_allowed_tiers_overrides_env(self, monkeypatch):
         monkeypatch.setenv("PRUNE_ALLOWED_TIERS", "tier1a")

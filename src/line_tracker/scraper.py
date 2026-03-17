@@ -22,7 +22,7 @@ class OddsClient:
     """Fetches live odds from The Odds API and returns BettingLine objects."""
 
     def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.environ.get("ODDS_API_KEY", "")
+        self.api_key = api_key if api_key is not None else os.environ.get("ODDS_API_KEY", "")
         if not self.api_key:
             raise ValueError(
                 "API key required. Pass api_key= or set ODDS_API_KEY env var. "

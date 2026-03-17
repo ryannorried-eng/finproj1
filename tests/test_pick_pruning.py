@@ -56,10 +56,10 @@ class TestPrunePicks:
         result = prune_picks([_make_entry(alpha_label="")])
         assert len(result) == 0
 
-    def test_low_edge_z_not_filtered(self):
-        """edge_z is no longer a hard gate — used for ranking only."""
+    def test_low_edge_z_filtered(self):
+        """edge_z is a hard gate — entries below min_edge_z are pruned."""
         result = prune_picks([_make_entry(edge_z=0.10)])
-        assert len(result) == 1
+        assert len(result) == 0
 
     def test_negative_ev_shrunk_filtered(self):
         result = prune_picks([_make_entry(edge_ev_shrunk=-0.01)])
@@ -103,12 +103,12 @@ class TestPrunePicks:
         entries = [
             _make_entry(event_id="e1"),
             _make_entry(event_id="e2", tier="avoid"),
-            _make_entry(event_id="e3", edge_z=0.10),  # low edge_z still passes
+            _make_entry(event_id="e3", edge_z=0.10),  # low edge_z is pruned
             _make_entry(event_id="e4"),
         ]
         result = prune_picks(entries)
-        assert len(result) == 3
-        assert {e["event_id"] for e in result} == {"e1", "e3", "e4"}
+        assert len(result) == 2
+        assert {e["event_id"] for e in result} == {"e1", "e4"}
 
     def test_tier1a_tier2_tier3_allowed(self):
         entries = [
@@ -124,12 +124,12 @@ class TestPrunePicks:
         assert len(result) == 1
 
     def test_custom_thresholds(self):
-        """min_edge_z kwarg is accepted but no longer filters."""
+        """min_edge_z kwarg filters entries below the threshold."""
         result = prune_picks(
             [_make_entry(edge_z=0.5)],
             min_edge_z=1.0,
         )
-        assert len(result) == 1
+        assert len(result) == 0
 
 
 class TestAlphaLabelNormalization:
