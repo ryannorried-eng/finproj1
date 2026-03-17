@@ -189,6 +189,28 @@ TEAM_NAME_MAP: dict[str, str] = {
     # ── Additional team mappings ───────────────────────────────────────
     "pennsylvania quakers": "Penn",
     "california baptist lancers": "Cal Baptist",
+    # ── Additional teams for matching coverage ────────────────────────
+    "george mason patriots": "George Mason",
+    "old dominion monarchs": "Old Dominion",
+    "james madison dukes": "James Madison",
+    "loyola chicago ramblers": "Loyola Chicago",
+    "loyola-chicago ramblers": "Loyola Chicago",
+    "george washington colonials": "George Washington",
+    "william & mary tribe": "William & Mary",
+    "northern iowa panthers": "Northern Iowa",
+    "middle tennessee blue raiders": "Middle Tennessee",
+    "western kentucky hilltoppers": "Western Kentucky",
+    "east tennessee state buccaneers": "East Tennessee St.",
+    "eastern washington eagles": "Eastern Washington",
+    "northern kentucky norse": "Northern Kentucky",
+    "southern illinois salukis": "Southern Illinois",
+    "western michigan broncos": "Western Michigan",
+    "central michigan chippewas": "Central Michigan",
+    "eastern michigan eagles": "Eastern Michigan",
+    "northern illinois huskies": "Northern Illinois",
+    "bowling green falcons": "Bowling Green",
+    "cleveland state vikings": "Cleveland St.",
+    "youngstown state penguins": "Youngstown St.",
 }
 
 # ---------------------------------------------------------------------------
@@ -282,6 +304,24 @@ _MASCOT_SUFFIXES: list[str] = [
     "fighting hawks",
     "badgers",
     "wolfpack",
+    "patriots",
+    "leathernecks",
+    "monarchs",
+    "raiders",
+    "sharks",
+    "warriors",
+    "rainbow warriors",
+    "dolphins",
+    "colonials",
+    "explorers",
+    "jaspers",
+    "peacocks",
+    "stags",
+    "toreros",
+    "zags",
+    "bisons",
+    "sea gulls",
+    "seahawks",
 ]
 
 # Build a single regex that strips the longest mascot suffix.
@@ -324,9 +364,22 @@ def _find_prediction_by_teams(
     away_torvik: str,
     predictions: list[dict],
 ) -> dict | None:
-    """Find the prediction that matches the given Torvik home/away names."""
+    """Find the prediction that matches the given Torvik home/away names.
+
+    Checks both home/away orderings because the Odds API and ESPN often
+    swap designations for neutral-site games (e.g. NCAA tournament).
+    """
     for pred in predictions:
         if pred["home_team"] == home_torvik and pred["away_team"] == away_torvik:
+            return pred
+    # Reversed order – common for neutral-site tournament games
+    for pred in predictions:
+        if pred["home_team"] == away_torvik and pred["away_team"] == home_torvik:
+            log.info(
+                "Matched with swapped home/away: odds=%s/%s pred=%s/%s",
+                home_torvik, away_torvik,
+                pred["home_team"], pred["away_team"],
+            )
             return pred
     return None
 
