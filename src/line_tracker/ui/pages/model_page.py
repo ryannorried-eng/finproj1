@@ -313,6 +313,25 @@ def _build_predictions_df(
 # Top Picks card
 # ---------------------------------------------------------------------------
 
+def _compute_ev(model_prob: float, american_odds: float | None) -> float:
+    """Compute expected value ROI: model_prob * decimal_odds - 1.
+
+    Returns EV as a fraction (e.g. 0.05 = 5% ROI).
+    """
+    if american_odds is None:
+        return 0.0
+    dec = _american_to_decimal(american_odds)
+    return model_prob * dec - 1.0
+
+
+# Moneyline odds threshold: lines worse than -200 get penalized
+_ML_JUICE_THRESHOLD = -200
+# Penalty applied to EV for heavy-juice moneylines (absolute reduction)
+_ML_JUICE_PENALTY = 0.03  # 3% EV penalty
+# When spread EV is within this tolerance of ML EV, prefer the spread
+_SPREAD_PREFERENCE_TOLERANCE = 0.01  # 1%
+
+
 def _render_top_picks(
     predictions: list[dict],
     market_spreads: dict[str, dict],
@@ -355,8 +374,7 @@ def _render_top_picks(
                     market_prob = 0.5
 
                 edge_pct = (model_prob - market_prob) * 100.0
-                confidence = pred.get("model_confidence") or 0.5
-                quality = abs_edge * confidence
+                ev = _compute_ev(model_prob, best_price)
 
                 picks.append({
                     "matchup": f"{away} @ {home}",
@@ -369,8 +387,8 @@ def _render_top_picks(
                     "market_prob": market_prob,
                     "edge_pts": abs_edge,
                     "edge_display": f"{abs_edge:.1f} pts",
-                    "quality": quality,
-                    "_sort_key": abs_edge,
+                    "ev": ev,
+                    "ev_display": f"{ev * 100:+.1f}%",
                 })
 
         # --- Moneyline picks ---
@@ -382,6 +400,10 @@ def _render_top_picks(
             implied_home = 1.0 / _american_to_decimal(ml_home_odds)
             ml_edge_home = (home_ml - implied_home) * 100.0
             if ml_edge_home >= MODEL_MIN_EDGE:
+                ev = _compute_ev(home_ml, ml_home_odds)
+                # Penalize heavy juice moneylines (odds worse than -200)
+                if ml_home_odds < _ML_JUICE_THRESHOLD:
+                    ev -= _ML_JUICE_PENALTY
                 picks.append({
                     "matchup": f"{away} @ {home}",
                     "market": "moneyline",
@@ -393,8 +415,8 @@ def _render_top_picks(
                     "market_prob": implied_home,
                     "edge_pts": ml_edge_home,
                     "edge_display": f"+{ml_edge_home:.1f}%",
-                    "quality": ml_edge_home * (pred.get("model_confidence") or 0.5),
-                    "_sort_key": ml_edge_home,
+                    "ev": ev,
+                    "ev_display": f"{ev * 100:+.1f}%",
                 })
 
         # Check away ML edge
@@ -402,6 +424,10 @@ def _render_top_picks(
             implied_away = 1.0 / _american_to_decimal(ml_away_odds)
             ml_edge_away = (away_ml - implied_away) * 100.0
             if ml_edge_away >= MODEL_MIN_EDGE:
+                ev = _compute_ev(away_ml, ml_away_odds)
+                # Penalize heavy juice moneylines (odds worse than -200)
+                if ml_away_odds < _ML_JUICE_THRESHOLD:
+                    ev -= _ML_JUICE_PENALTY
                 picks.append({
                     "matchup": f"{away} @ {home}",
                     "market": "moneyline",
@@ -413,12 +439,20 @@ def _render_top_picks(
                     "market_prob": implied_away,
                     "edge_pts": ml_edge_away,
                     "edge_display": f"+{ml_edge_away:.1f}%",
-                    "quality": ml_edge_away * (pred.get("model_confidence") or 0.5),
-                    "_sort_key": ml_edge_away,
+                    "ev": ev,
+                    "ev_display": f"{ev * 100:+.1f}%",
                 })
 
-    # Sort by edge descending
-    picks.sort(key=lambda p: p["_sort_key"], reverse=True)
+    # Sort by EV descending.
+    # Tie-break: prefer spreads over moneylines when EV is within tolerance.
+    def _pick_sort_key(p):
+        ev = p["ev"]
+        # Spread preference: when two picks have similar EV, boost spreads
+        # slightly so they sort above moneylines.
+        spread_bonus = _SPREAD_PREFERENCE_TOLERANCE if p["market"] == "spread" else 0.0
+        return ev + spread_bonus
+
+    picks.sort(key=_pick_sort_key, reverse=True)
 
     if not picks:
         st.info("No picks meet the minimum edge threshold today.")
@@ -433,7 +467,7 @@ def _render_top_picks(
                 st.markdown(f"**{pick['matchup']}**")
                 st.caption(f"{pick['market'].upper()} | {pick['selection']}")
             with c2:
-                st.metric("Model Edge", pick["edge_display"])
+                st.metric("EV", pick["ev_display"])
             with c3:
                 st.metric(
                     "Model vs Market",
