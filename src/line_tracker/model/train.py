@@ -345,7 +345,11 @@ def load_model(
                 _PROJECT_MODELS_DIR.glob("ncaab_margin_*.joblib"),
             )
         if not candidates:
-            msg = f"No trained models found in {_MODELS_DIR}"
+            candidates = sorted(
+                Path("/mount/src/finproj1/models").glob("ncaab_margin_*.joblib"),
+            )
+        if not candidates:
+            msg = f"No trained models found in {_MODELS_DIR} or {_PROJECT_MODELS_DIR} or /mount/src/finproj1/models"
             raise FileNotFoundError(msg)
         model_path = str(candidates[-1])
 
