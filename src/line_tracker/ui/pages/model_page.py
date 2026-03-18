@@ -69,16 +69,18 @@ def _load_latest_spreads(store: LineStore, sport: str) -> dict[str, dict]:
 
 
 def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
-    """Load best available spread odds per event.
+    """Load best available spread and moneyline odds per event.
 
-    Returns dict keyed by ``"home|away"`` with ``best_home_price``,
-    ``best_away_price``, ``best_home_book``, ``best_away_book``.
+    Returns dict keyed by ``"home|away"`` with spread fields
+    ``best_home_price``, ``best_away_price``, ``best_home_book``,
+    ``best_away_book`` and moneyline fields ``ml_home_price``,
+    ``ml_away_price``, ``ml_home_book``, ``ml_away_book``.
     """
     all_lines = store.get_latest_for_sport(sport=sport)
-    lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
+    spread_lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
+    ml_lines = [ln for ln in all_lines if ln.bet_type == BetType.MONEYLINE]
     best: dict[str, dict] = {}
-    for line in lines:
-        # Index by Torvik canonical names so predictions can look up by key.
+    for line in spread_lines:
         home_torvik = _resolve_to_torvik(line.home_team)
         away_torvik = _resolve_to_torvik(line.away_team)
         key = f"{home_torvik}|{away_torvik}"
@@ -87,6 +89,10 @@ def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
             "best_away_price": None,
             "best_home_book": "",
             "best_away_book": "",
+            "ml_home_price": None,
+            "ml_away_price": None,
+            "ml_home_book": "",
+            "ml_away_book": "",
         })
         hp = line.home_price
         ap = line.away_price
@@ -100,6 +106,33 @@ def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
         ):
             entry["best_away_price"] = ap
             entry["best_away_book"] = line.sportsbook
+    for line in ml_lines:
+        home_torvik = _resolve_to_torvik(line.home_team)
+        away_torvik = _resolve_to_torvik(line.away_team)
+        key = f"{home_torvik}|{away_torvik}"
+        entry = best.setdefault(key, {
+            "best_home_price": None,
+            "best_away_price": None,
+            "best_home_book": "",
+            "best_away_book": "",
+            "ml_home_price": None,
+            "ml_away_price": None,
+            "ml_home_book": "",
+            "ml_away_book": "",
+        })
+        # For moneyline, home_value/away_value are the odds
+        h_odds = line.home_value
+        a_odds = line.away_value
+        if h_odds is not None and (
+            entry["ml_home_price"] is None or h_odds > entry["ml_home_price"]
+        ):
+            entry["ml_home_price"] = h_odds
+            entry["ml_home_book"] = line.sportsbook
+        if a_odds is not None and (
+            entry["ml_away_price"] is None or a_odds > entry["ml_away_price"]
+        ):
+            entry["ml_away_price"] = a_odds
+            entry["ml_away_book"] = line.sportsbook
     return best
 
 
@@ -166,9 +199,38 @@ def _build_predictions_df(
         # likes home cover).  We report absolute edge since the table shows
         # which side to take.
         if market_spread is not None:
-            model_edge = margin + market_spread
+            spread_edge = margin + market_spread
         else:
-            model_edge = None
+            spread_edge = None
+
+        # Moneyline edge: model_ml_prob - implied_prob from best ML odds
+        ml_home_odds = odds_info.get("ml_home_price")
+        ml_away_odds = odds_info.get("ml_away_price")
+        if ml_home_odds is not None and home_ml > 0:
+            implied_home = 1.0 / _american_to_decimal(ml_home_odds)
+            ml_edge_home = (home_ml - implied_home) * 100.0
+        else:
+            ml_edge_home = None
+        if ml_away_odds is not None and away_ml > 0:
+            implied_away = 1.0 / _american_to_decimal(ml_away_odds)
+            ml_edge_away = (away_ml - implied_away) * 100.0
+        else:
+            ml_edge_away = None
+
+        # Best ML edge (absolute) across both sides
+        if ml_edge_home is not None and ml_edge_away is not None:
+            if abs(ml_edge_home) >= abs(ml_edge_away):
+                ml_edge = ml_edge_home
+            else:
+                ml_edge = ml_edge_away
+        elif ml_edge_home is not None:
+            ml_edge = ml_edge_home
+        elif ml_edge_away is not None:
+            ml_edge = ml_edge_away
+        else:
+            ml_edge = None
+
+        model_edge = spread_edge
 
         # Model probability that favoured side covers
         if market_spread is not None:
@@ -210,13 +272,23 @@ def _build_predictions_df(
             best_price = best_home_price
             best_book = best_home_book
 
+        # Format spread edge as points, ML edge as percentage
+        if model_edge is not None:
+            spread_edge_str = f"{abs(model_edge):.1f} pts"
+        else:
+            spread_edge_str = "-"
+
+        if ml_edge is not None:
+            ml_edge_str = f"{ml_edge:+.1f}%"
+        else:
+            ml_edge_str = "-"
+
         rows.append({
             "Matchup": f"{away} @ {home}",
             "Model Predicted Margin": predicted_label,
             "Market Spread": mkt_label,
-            "Model Edge (pts)": (
-                round(abs(model_edge), 1) if model_edge is not None else None
-            ),
+            "Spread Edge": spread_edge_str,
+            "ML Edge": ml_edge_str,
             "Edge Side": (
                 home if (model_edge or 0) > 0 else away
             ) if model_edge is not None else "-",
@@ -252,60 +324,101 @@ def _render_top_picks(
         home = pred["home_team"]
         away = pred["away_team"]
         margin = pred.get("predicted_margin", 0.0)
+        home_ml = pred.get("home_ml_prob", 0.0)
+        away_ml = pred.get("away_ml_prob", 0.0)
         key = f"{home}|{away}"
         spread_info = market_spreads.get(key, {})
         odds_info = best_odds.get(key, {})
 
+        # --- Spread picks ---
         market_spread = spread_info.get("spread")
-        if market_spread is None:
-            continue
+        if market_spread is not None:
+            edge = margin + market_spread
+            abs_edge = abs(edge)
 
-        edge = margin + market_spread
-        abs_edge = abs(edge)
+            if abs_edge >= MODEL_MIN_EDGE:
+                if edge > 0:
+                    selection = f"{home} (cover)"
+                    model_prob = margin_to_spread_prob(margin, market_spread)
+                    best_price = odds_info.get("best_home_price")
+                    best_book = odds_info.get("best_home_book", "")
+                else:
+                    selection = f"{away} (cover)"
+                    model_prob = 1.0 - margin_to_spread_prob(margin, market_spread)
+                    best_price = odds_info.get("best_away_price")
+                    best_book = odds_info.get("best_away_book", "")
 
-        if abs_edge < MODEL_MIN_EDGE:
-            continue
+                if best_price is not None:
+                    dec = _american_to_decimal(best_price)
+                    market_prob = 1.0 / dec if dec > 0 else 0.5
+                else:
+                    market_prob = 0.5
 
-        # Determine side
-        if edge > 0:
-            selection = f"{home} (cover)"
-            model_prob = margin_to_spread_prob(margin, market_spread)
-            best_price = odds_info.get("best_home_price")
-            best_book = odds_info.get("best_home_book", "")
-        else:
-            selection = f"{away} (cover)"
-            model_prob = 1.0 - margin_to_spread_prob(margin, market_spread)
-            best_price = odds_info.get("best_away_price")
-            best_book = odds_info.get("best_away_book", "")
+                edge_pct = (model_prob - market_prob) * 100.0
+                confidence = pred.get("model_confidence") or 0.5
+                quality = abs_edge * confidence
 
-        # Market implied probability from best odds
-        if best_price is not None:
-            dec = _american_to_decimal(best_price)
-            market_prob = 1.0 / dec if dec > 0 else 0.5
-        else:
-            market_prob = 0.5
+                picks.append({
+                    "matchup": f"{away} @ {home}",
+                    "market": "spread",
+                    "selection": selection,
+                    "odds": _format_american(best_price),
+                    "book": best_book,
+                    "model_edge_pct": edge_pct,
+                    "model_prob": model_prob,
+                    "market_prob": market_prob,
+                    "edge_pts": abs_edge,
+                    "edge_display": f"{abs_edge:.1f} pts",
+                    "quality": quality,
+                    "_sort_key": abs_edge,
+                })
 
-        edge_pct = (model_prob - market_prob) * 100.0
+        # --- Moneyline picks ---
+        ml_home_odds = odds_info.get("ml_home_price")
+        ml_away_odds = odds_info.get("ml_away_price")
 
-        # Simple quality score: edge * confidence
-        confidence = pred.get("model_confidence") or 0.5
-        quality = abs_edge * confidence
+        # Check home ML edge
+        if ml_home_odds is not None and home_ml > 0:
+            implied_home = 1.0 / _american_to_decimal(ml_home_odds)
+            ml_edge_home = (home_ml - implied_home) * 100.0
+            if ml_edge_home >= MODEL_MIN_EDGE:
+                picks.append({
+                    "matchup": f"{away} @ {home}",
+                    "market": "moneyline",
+                    "selection": f"{home} (ML)",
+                    "odds": _format_american(ml_home_odds),
+                    "book": odds_info.get("ml_home_book", ""),
+                    "model_edge_pct": ml_edge_home,
+                    "model_prob": home_ml,
+                    "market_prob": implied_home,
+                    "edge_pts": ml_edge_home,
+                    "edge_display": f"+{ml_edge_home:.1f}%",
+                    "quality": ml_edge_home * (pred.get("model_confidence") or 0.5),
+                    "_sort_key": ml_edge_home,
+                })
 
-        picks.append({
-            "matchup": f"{away} @ {home}",
-            "market": "spread",
-            "selection": selection,
-            "odds": _format_american(best_price),
-            "book": best_book,
-            "model_edge_pct": edge_pct,
-            "model_prob": model_prob,
-            "market_prob": market_prob,
-            "edge_pts": abs_edge,
-            "quality": quality,
-        })
+        # Check away ML edge
+        if ml_away_odds is not None and away_ml > 0:
+            implied_away = 1.0 / _american_to_decimal(ml_away_odds)
+            ml_edge_away = (away_ml - implied_away) * 100.0
+            if ml_edge_away >= MODEL_MIN_EDGE:
+                picks.append({
+                    "matchup": f"{away} @ {home}",
+                    "market": "moneyline",
+                    "selection": f"{away} (ML)",
+                    "odds": _format_american(ml_away_odds),
+                    "book": odds_info.get("ml_away_book", ""),
+                    "model_edge_pct": ml_edge_away,
+                    "model_prob": away_ml,
+                    "market_prob": implied_away,
+                    "edge_pts": ml_edge_away,
+                    "edge_display": f"+{ml_edge_away:.1f}%",
+                    "quality": ml_edge_away * (pred.get("model_confidence") or 0.5),
+                    "_sort_key": ml_edge_away,
+                })
 
     # Sort by edge descending
-    picks.sort(key=lambda p: p["edge_pts"], reverse=True)
+    picks.sort(key=lambda p: p["_sort_key"], reverse=True)
 
     if not picks:
         st.info("No picks meet the minimum edge threshold today.")
@@ -320,7 +433,7 @@ def _render_top_picks(
                 st.markdown(f"**{pick['matchup']}**")
                 st.caption(f"{pick['market'].upper()} | {pick['selection']}")
             with c2:
-                st.metric("Model Edge", f"{pick['edge_pts']:.1f} pts")
+                st.metric("Model Edge", pick["edge_display"])
             with c3:
                 st.metric(
                     "Model vs Market",
@@ -495,15 +608,29 @@ def render_model_picks_page(db_path: str, sport_key: str, api_key: str | None) -
             c1.metric("Games with Predictions", len(predictions))
             c2.metric("Games with Market Lines", len(market_spreads))
 
-            # Count picks above threshold
+            # Count picks above threshold (spread + moneyline)
             above_threshold = 0
             for pred in predictions:
                 key = f"{pred['home_team']}|{pred['away_team']}"
                 spread_info = market_spreads.get(key, {})
+                odds_info = best_odds.get(key, {})
                 ms = spread_info.get("spread")
                 if ms is not None:
                     edge = abs(pred.get("predicted_margin", 0) + ms)
                     if edge >= MODEL_MIN_EDGE:
+                        above_threshold += 1
+                # Count ML picks
+                ml_home_odds = odds_info.get("ml_home_price")
+                ml_away_odds = odds_info.get("ml_away_price")
+                home_ml = pred.get("home_ml_prob", 0.0)
+                away_ml = pred.get("away_ml_prob", 0.0)
+                if ml_home_odds is not None and home_ml > 0:
+                    implied = 1.0 / _american_to_decimal(ml_home_odds)
+                    if (home_ml - implied) * 100.0 >= MODEL_MIN_EDGE:
+                        above_threshold += 1
+                if ml_away_odds is not None and away_ml > 0:
+                    implied = 1.0 / _american_to_decimal(ml_away_odds)
+                    if (away_ml - implied) * 100.0 >= MODEL_MIN_EDGE:
                         above_threshold += 1
             c3.metric(
                 f"Picks (edge >= {MODEL_MIN_EDGE})",
