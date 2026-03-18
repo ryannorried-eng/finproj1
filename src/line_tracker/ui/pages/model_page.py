@@ -42,49 +42,77 @@ def _load_predictions(store: LineStore, game_date: str) -> list[dict]:
     return store.predictions_repo.get_predictions_for_date(game_date)
 
 
-def _load_latest_spreads(store: LineStore, sport: str) -> dict[str, dict]:
-    """Load latest spread lines keyed by (home_team, away_team).
+def _load_spread_and_best_odds(
+    store: LineStore, sport: str,
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Load consensus spreads and best odds, ensuring spread integrity.
 
-    Returns a dict mapping ``"home|away"`` to a dict with keys:
-    ``spread``, ``home_price``, ``away_price``, ``sportsbook``.
+    For each game:
+    1. Determines the most common (consensus) spread number across books.
+    2. Finds the best home/away spread prices only among books offering that
+       exact spread number.
+    3. Finds the best moneyline prices across all books (no spread constraint).
+
+    Returns a ``(market_spreads, best_odds)`` tuple.
+
+    ``market_spreads`` maps ``"home|away"`` to ``{spread, home_price,
+    away_price, sportsbook}`` (the book with home_price closest to even among
+    consensus-spread books).
+
+    ``best_odds`` maps ``"home|away"`` to ``{best_home_price,
+    best_away_price, best_home_book, best_away_book, ml_home_price,
+    ml_away_price, ml_home_book, ml_away_book}``.
     """
-    all_lines = store.get_latest_for_sport(sport=sport)
-    lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
-    best: dict[str, dict] = {}
-    for line in lines:
-        # Index by Torvik canonical names so predictions can look up by key.
-        home_torvik = _resolve_to_torvik(line.home_team)
-        away_torvik = _resolve_to_torvik(line.away_team)
-        key = f"{home_torvik}|{away_torvik}"
-        existing = best.get(key)
-        hp = line.home_price if line.home_price is not None else -110
-        if existing is None or abs(hp) < abs(existing.get("home_price", -110) or -110):
-            best[key] = {
-                "spread": line.home_value,
-                "home_price": line.home_price,
-                "away_price": line.away_price,
-                "sportsbook": line.sportsbook,
-            }
-    return best
+    from collections import Counter
 
-
-def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
-    """Load best available spread and moneyline odds per event.
-
-    Returns dict keyed by ``"home|away"`` with spread fields
-    ``best_home_price``, ``best_away_price``, ``best_home_book``,
-    ``best_away_book`` and moneyline fields ``ml_home_price``,
-    ``ml_away_price``, ``ml_home_book``, ``ml_away_book``.
-    """
     all_lines = store.get_latest_for_sport(sport=sport)
     spread_lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
     ml_lines = [ln for ln in all_lines if ln.bet_type == BetType.MONEYLINE]
-    best: dict[str, dict] = {}
+
+    # Group spread lines by game key.
+    game_spread_lines: dict[str, list] = {}
     for line in spread_lines:
         home_torvik = _resolve_to_torvik(line.home_team)
         away_torvik = _resolve_to_torvik(line.away_team)
         key = f"{home_torvik}|{away_torvik}"
-        entry = best.setdefault(key, {
+        game_spread_lines.setdefault(key, []).append(line)
+
+    market_spreads: dict[str, dict] = {}
+    best_odds: dict[str, dict] = {}
+
+    for key, lines in game_spread_lines.items():
+        # Step 1: Find the consensus (most common) spread number.
+        spread_counts: Counter = Counter()
+        for ln in lines:
+            if ln.home_value is not None:
+                spread_counts[ln.home_value] += 1
+        if not spread_counts:
+            continue
+        consensus_spread = spread_counts.most_common(1)[0][0]
+
+        # Step 2: Filter to only books offering the consensus spread.
+        consensus_lines = [
+            ln for ln in lines if ln.home_value == consensus_spread
+        ]
+
+        # Step 3: Pick the "reference" book (home_price closest to even) for
+        # market_spreads — same logic as the old _load_latest_spreads.
+        best_ref = None
+        for ln in consensus_lines:
+            hp = ln.home_price if ln.home_price is not None else -110
+            if best_ref is None or abs(hp) < abs(
+                best_ref.get("home_price", -110) or -110
+            ):
+                best_ref = {
+                    "spread": consensus_spread,
+                    "home_price": ln.home_price,
+                    "away_price": ln.away_price,
+                    "sportsbook": ln.sportsbook,
+                }
+        market_spreads[key] = best_ref  # type: ignore[assignment]
+
+        # Step 4: Best spread prices — only among consensus-spread books.
+        entry = best_odds.setdefault(key, {
             "best_home_price": None,
             "best_away_price": None,
             "best_home_book": "",
@@ -94,23 +122,26 @@ def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
             "ml_home_book": "",
             "ml_away_book": "",
         })
-        hp = line.home_price
-        ap = line.away_price
-        if hp is not None and (
-            entry["best_home_price"] is None or hp > entry["best_home_price"]
-        ):
-            entry["best_home_price"] = hp
-            entry["best_home_book"] = line.sportsbook
-        if ap is not None and (
-            entry["best_away_price"] is None or ap > entry["best_away_price"]
-        ):
-            entry["best_away_price"] = ap
-            entry["best_away_book"] = line.sportsbook
+        for ln in consensus_lines:
+            hp = ln.home_price
+            ap = ln.away_price
+            if hp is not None and (
+                entry["best_home_price"] is None or hp > entry["best_home_price"]
+            ):
+                entry["best_home_price"] = hp
+                entry["best_home_book"] = ln.sportsbook
+            if ap is not None and (
+                entry["best_away_price"] is None or ap > entry["best_away_price"]
+            ):
+                entry["best_away_price"] = ap
+                entry["best_away_book"] = ln.sportsbook
+
+    # Step 5: Moneyline best odds (no spread constraint).
     for line in ml_lines:
         home_torvik = _resolve_to_torvik(line.home_team)
         away_torvik = _resolve_to_torvik(line.away_team)
         key = f"{home_torvik}|{away_torvik}"
-        entry = best.setdefault(key, {
+        entry = best_odds.setdefault(key, {
             "best_home_price": None,
             "best_away_price": None,
             "best_home_book": "",
@@ -120,7 +151,6 @@ def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
             "ml_home_book": "",
             "ml_away_book": "",
         })
-        # For moneyline, home_value/away_value are the odds
         h_odds = line.home_value
         a_odds = line.away_value
         if h_odds is not None and (
@@ -133,7 +163,8 @@ def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
         ):
             entry["ml_away_price"] = a_odds
             entry["ml_away_book"] = line.sportsbook
-    return best
+
+    return market_spreads, best_odds
 
 
 def _load_model_metadata() -> dict | None:
@@ -622,6 +653,10 @@ def render_model_picks_page(db_path: str, sport_key: str, api_key: str | None) -
     """Render the full Model Picks page."""
     st.header("Model Picks")
 
+    if sport_key != "basketball_ncaab":
+        st.info("Model Picks is currently only available for NCAAB.")
+        return
+
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # Sidebar model info
@@ -634,8 +669,7 @@ def render_model_picks_page(db_path: str, sport_key: str, api_key: str | None) -
     try:
         with LineStore(db_path) as store:
             predictions = _load_predictions(store, today)
-            market_spreads = _load_latest_spreads(store, sport_key)
-            best_odds = _load_best_odds(store, sport_key)
+            market_spreads, best_odds = _load_spread_and_best_odds(store, sport_key)
 
             # Summary metrics
             c1, c2, c3 = st.columns(3)
