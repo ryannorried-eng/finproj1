@@ -169,10 +169,16 @@ def _load_spread_and_best_odds(
 
 def _load_model_metadata() -> dict | None:
     """Load metadata from the most recent trained model file."""
-    models_dir = Path.home() / ".line_tracker" / "models"
-    if not models_dir.exists():
-        return None
-    candidates = sorted(models_dir.glob("ncaab_margin_*.joblib"))
+    _dirs = [
+        Path.home() / ".line_tracker" / "models",
+        Path(__file__).resolve().parent.parent.parent.parent / "models",
+        Path("/mount/src/finproj1/models"),
+    ]
+    candidates: list[Path] = []
+    for d in _dirs:
+        candidates = sorted(d.glob("ncaab_margin_*.joblib"))
+        if candidates:
+            break
     if not candidates:
         return None
     try:
