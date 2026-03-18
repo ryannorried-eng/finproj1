@@ -1221,13 +1221,26 @@ def _detail_best_bet_section(game_lines):
                 f"on {top.best_sportsbook}**"
             )
             _top_ev = fmt_money(top.ev_per_100, sign=True).replace("$", r"\$")
-            st.markdown(
-                f"EV: **{_top_ev} per \\$100** | "
-                f"Edge Z: **{top.edge_z:+.2f}** | "
-                f"Consensus (weighted): "
-                f"**{top.consensus_prob_weighted * 100:.1f}%** | "
-                f"Breakeven: **{top.breakeven_prob * 100:.1f}%**"
-            )
+            _is_model = top_e.get("edge_source") == "model"
+            if _is_model:
+                _mp = top_e.get("model_prob")
+                _mktp = top_e.get("market_prob")
+                _mp_s = f"{_mp * 100:.1f}%" if _mp is not None else "N/A"
+                _mktp_s = f"{_mktp * 100:.1f}%" if _mktp is not None else "N/A"
+                st.markdown(
+                    f"EV: **{_top_ev} per \\$100** | "
+                    f"Edge: **{top_e.get('edge_pct', 0):+.1f}%** | "
+                    f"Model: **{_mp_s}** vs Market: **{_mktp_s}** | "
+                    f"Breakeven: **{top.breakeven_prob * 100:.1f}%**"
+                )
+            else:
+                st.markdown(
+                    f"EV: **{_top_ev} per \\$100** | "
+                    f"Edge Z: **{top.edge_z:+.2f}** | "
+                    f"Consensus (weighted): "
+                    f"**{top.consensus_prob_weighted * 100:.1f}%** | "
+                    f"Breakeven: **{top.breakeven_prob * 100:.1f}%**"
+                )
             # Confidence-label badge
             _cl = top_e.get("confidence_label", "")
             _cl_colors = {"High": "green", "Medium": "orange", "Low": "gray"}
@@ -1272,12 +1285,17 @@ def _detail_best_bet_section(game_lines):
                 r = oe["_rec"]
                 ml = _best_bet_market_label(r)
                 ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
+                _oe_model = oe.get("edge_source") == "model"
+                if _oe_model:
+                    _edge_part = f"Edge: {oe.get('edge_pct', 0):+.1f}%"
+                else:
+                    _edge_part = f"Z: {r.edge_z:+.2f}"
                 st.markdown(
                     f"- {r.selection} ({ml}) at "
                     f"{format_american(r.best_odds)} "
                     f"on {r.best_sportsbook} — "
                     f"EV: {ev_str} per \\$100, "
-                    f"Z: {r.edge_z:+.2f} — "
+                    f"{_edge_part} — "
                     f"Quality: {r.quality_score} ({r.quality_tier}) — "
                     f"Alpha: {oe.get('alpha_score', '—')} "
                     f"({oe.get('alpha_label', '—')}), "
@@ -1293,12 +1311,17 @@ def _detail_best_bet_section(game_lines):
             r = e["_rec"]
             ml = _best_bet_market_label(r)
             ev_str = fmt_money(r.ev_per_100, sign=True).replace("$", "\\$")
+            _fb_model = e.get("edge_source") == "model"
+            if _fb_model:
+                _edge_part = f"Edge: {e.get('edge_pct', 0):+.1f}%"
+            else:
+                _edge_part = f"Z: {r.edge_z:+.2f}"
             st.markdown(
                 f"- {r.selection} ({ml}) at "
                 f"{format_american(r.best_odds)} "
                 f"on {r.best_sportsbook} — "
                 f"EV: {ev_str} per \\$100, "
-                f"Z: {r.edge_z:+.2f} — "
+                f"{_edge_part} — "
                 f"Quality: {r.quality_score} ({r.quality_tier})"
             )
 

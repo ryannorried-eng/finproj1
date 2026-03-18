@@ -890,6 +890,14 @@ def build_daily_slate(
         event_name = sample_line.event
         commence_time = sample_line.commence_time
 
+        # ── Model prediction lookup (once per event) ──────────────
+        _event_pred: dict | None = None
+        if model_predictions:
+            _event_pred = _match_prediction(
+                sample_line.home_team, sample_line.away_team,
+                model_predictions,
+            )
+
         for rec in top_recs:
             score = _slate_score(rec.quality_score, rec.edge_pct)
 
@@ -949,44 +957,41 @@ def build_daily_slate(
             entry["model_confidence"] = None
             entry["edge_source"] = "consensus"
 
-            if model_predictions:
-                _pred = _match_prediction(
+            if _event_pred is not None:
+                _mp = _model_prob_for_market(
+                    _event_pred, rec.market, rec.selection,
                     sample_line.home_team, sample_line.away_team,
-                    model_predictions,
+                    line_value=rec.line,
                 )
-                if _pred is not None:
-                    _mp = _model_prob_for_market(
-                        _pred, rec.market, rec.selection,
-                        sample_line.home_team, sample_line.away_team,
-                        line_value=rec.line,
+                if _mp is not None:
+                    entry["model_prob"] = _mp
+                    entry["model_margin"] = _event_pred.get("predicted_margin")
+                    entry["model_confidence"] = _event_pred.get(
+                        "model_confidence"
                     )
-                    if _mp is not None:
-                        entry["model_prob"] = _mp
-                        entry["model_margin"] = _pred.get("predicted_margin")
-                        entry["model_confidence"] = _pred.get(
-                            "model_confidence"
-                        )
-                        entry["edge_source"] = "model"
-                        # Recompute edge from model probability
-                        from line_tracker.core.math import american_to_decimal
-                        _dec = american_to_decimal(entry["best_odds"])
-                        entry["edge_pct"] = round(
-                            100.0 * (_mp * _dec - 1.0), 2,
-                        )
-                        entry["ev_roi"] = round(_mp * _dec - 1.0, 6)
-                        entry["ev_100"] = entry["edge_pct"]
-                        entry["edge_ev_shrunk"] = entry["ev_roi"]
-                        # Recompute quality subscores from model-derived edge
-                        model_edge_score = round(
-                            _edge_score(entry["edge_pct"]), 1,
-                        )
-                        entry["edge_score"] = model_edge_score
-                        entry["quality_score"] = _quality_score(
-                            model_edge_score,
-                            entry.get("agreement_score", 50.0),
-                            entry.get("coverage_score", 50.0),
-                            entry.get("freshness_score", 50.0),
-                        )
+                    entry["edge_source"] = "model"
+                    # Recompute edge from model probability
+                    from line_tracker.core.math import american_to_decimal
+                    _dec = american_to_decimal(entry["best_odds"])
+                    _implied = 1.0 / _dec if _dec else 0.0
+                    entry["edge_pct"] = round(
+                        100.0 * (_mp * _dec - 1.0), 2,
+                    )
+                    entry["ev_roi"] = round(_mp * _dec - 1.0, 6)
+                    entry["ev_100"] = entry["edge_pct"]
+                    entry["edge_ev_shrunk"] = entry["ev_roi"]
+                    entry["market_prob"] = round(_implied, 4)
+                    # Recompute quality subscores from model-derived edge
+                    model_edge_score = round(
+                        _edge_score(entry["edge_pct"]), 1,
+                    )
+                    entry["edge_score"] = model_edge_score
+                    entry["quality_score"] = _quality_score(
+                        model_edge_score,
+                        entry.get("agreement_score", 50.0),
+                        entry.get("coverage_score", 50.0),
+                        entry.get("freshness_score", 50.0),
+                    )
 
             # Classify — runs for EVERY rec, no pre-filtering
             classification = classify_rec(
@@ -1021,6 +1026,26 @@ def build_daily_slate(
             entry["confidence_label"] = _compute_confidence_label(entry)
 
             all_entries.append(entry)
+
+    # ── Dedup candidates (keep best slate_score per key) ──────────
+    _seen_keys: dict[tuple, int] = {}
+    _deduped: list[dict] = []
+    for _i, _e in enumerate(all_entries):
+        _dk = (
+            _e.get("event_id"),
+            _e.get("market"),
+            _e.get("selection"),
+            _e.get("line"),
+        )
+        if _dk in _seen_keys:
+            # Keep the one with higher slate_score
+            _prev_idx = _seen_keys[_dk]
+            if _e["slate_score"] > _deduped[_prev_idx]["slate_score"]:
+                _deduped[_prev_idx] = _e
+            continue
+        _seen_keys[_dk] = len(_deduped)
+        _deduped.append(_e)
+    all_entries = _deduped
 
     # Sort by slate_score descending
     all_entries.sort(key=lambda e: e["slate_score"], reverse=True)
