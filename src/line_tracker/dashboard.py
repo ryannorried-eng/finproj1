@@ -89,6 +89,7 @@ from line_tracker.ui.components.diagnostics import (
     get_latest_timestamps,
 )
 from line_tracker.ui.components.explainability import render_pick_explanation
+from line_tracker.ui.pages.model_page import render_model_picks_page
 
 # Toggle to show EV Math Debug expander on slate / shopping pages.
 SHOW_EV_DEBUG = False
@@ -498,7 +499,10 @@ def _sidebar():
 
         st.radio(
             "Page",
-            ["Dashboard", "Best Lines to Shop", "Daily Slate", "Performance"],
+            [
+                "Dashboard", "Best Lines to Shop",
+                "Daily Slate", "Performance", "Model Picks",
+            ],
             key="nav_page",
             horizontal=True,
         )
@@ -3984,6 +3988,11 @@ def main():
             _page_daily_slate()
         elif nav == "Performance":
             _page_performance()
+        elif nav == "Model Picks":
+            sport_name = st.session_state.get("sport_name", "NCAAB")
+            sport_key = SPORTS.get(sport_name, "basketball_ncaab")
+            api_key = st.session_state.get("api_key", "") or None
+            render_model_picks_page(DB_PATH, sport_key, api_key)
         else:
             _page_dashboard()
 
