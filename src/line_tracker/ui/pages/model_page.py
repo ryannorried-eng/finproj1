@@ -96,7 +96,7 @@ def _load_spread_and_best_odds(
         ]
 
         # Step 3: Pick the "reference" book (home_price closest to even) for
-        # market_spreads — same logic as the old _load_latest_spreads.
+        # the market_spreads entry.
         best_ref = None
         for ln in consensus_lines:
             hp = ln.home_price if ln.home_price is not None else -110
