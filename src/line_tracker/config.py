@@ -59,12 +59,15 @@ def get_display_timezone() -> str:
 
 
 def has_persistent_db() -> bool:
-    """True when a persistent SQLite file is accessible."""
-    configured = get_db_path()
-    if configured:
-        from pathlib import Path
+    """True when a persistent SQLite database is configured or exists.
 
-        return Path(configured).exists()
+    If ``DB_PATH`` is explicitly set (e.g. via Streamlit secrets), return
+    ``True`` even when the file does not yet exist — ``LineStore`` will
+    create it on first connect.
+    """
+    configured = get_db_path()
+    if configured is not None:
+        return True
     from line_tracker.storage import DEFAULT_DB_PATH
 
     return DEFAULT_DB_PATH.exists()
