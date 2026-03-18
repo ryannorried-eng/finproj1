@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from line_tracker.config import data_mode
+from line_tracker.model.matching import TEAM_NAME_MAP
 from line_tracker.model.predict import margin_to_spread_prob
 from line_tracker.models import BetType
 from line_tracker.storage import LineStore
@@ -26,6 +27,15 @@ MODEL_MIN_EDGE = 1.5
 # ---------------------------------------------------------------------------
 # Data loading helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_to_torvik(odds_api_name: str) -> str:
+    """Resolve an Odds API team name to its Torvik canonical name.
+
+    Uses the curated TEAM_NAME_MAP.  Falls back to the original name if no
+    mapping exists.
+    """
+    return TEAM_NAME_MAP.get(odds_api_name.lower(), odds_api_name)
+
 
 def _load_predictions(store: LineStore, game_date: str) -> list[dict]:
     """Load cached predictions for a date from the DB."""
@@ -42,7 +52,10 @@ def _load_latest_spreads(store: LineStore, sport: str) -> dict[str, dict]:
     lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
     best: dict[str, dict] = {}
     for line in lines:
-        key = f"{line.home_team}|{line.away_team}"
+        # Index by Torvik canonical names so predictions can look up by key.
+        home_torvik = _resolve_to_torvik(line.home_team)
+        away_torvik = _resolve_to_torvik(line.away_team)
+        key = f"{home_torvik}|{away_torvik}"
         existing = best.get(key)
         hp = line.home_price if line.home_price is not None else -110
         if existing is None or abs(hp) < abs(existing.get("home_price", -110) or -110):
@@ -65,7 +78,10 @@ def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
     lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
     best: dict[str, dict] = {}
     for line in lines:
-        key = f"{line.home_team}|{line.away_team}"
+        # Index by Torvik canonical names so predictions can look up by key.
+        home_torvik = _resolve_to_torvik(line.home_team)
+        away_torvik = _resolve_to_torvik(line.away_team)
+        key = f"{home_torvik}|{away_torvik}"
         entry = best.setdefault(key, {
             "best_home_price": None,
             "best_away_price": None,
