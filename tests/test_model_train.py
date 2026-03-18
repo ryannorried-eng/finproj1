@@ -248,6 +248,7 @@ class TestLoadModel:
     def test_load_no_models(self, tmp_path):
         with (
             patch.object(mod, "_MODELS_DIR", tmp_path),
+            patch.object(mod, "_PROJECT_MODELS_DIR", tmp_path),
             pytest.raises(FileNotFoundError, match="No trained models"),
         ):
             mod.load_model()

@@ -23,6 +23,7 @@ from line_tracker.model.features import FEATURE_COLUMNS, build_training_dataset
 log = get_logger(__name__)
 
 _MODELS_DIR = Path.home() / ".line_tracker" / "models"
+_PROJECT_MODELS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "models"
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +337,13 @@ def load_model(
     """
     if model_path is None:
         candidates = sorted(_MODELS_DIR.glob("ncaab_margin_*.joblib"))
+        if not candidates:
+            # Fallback: check models/ directory in the project root so that
+            # deployed environments (e.g. Streamlit Cloud) can find a model
+            # committed to the repo.
+            candidates = sorted(
+                _PROJECT_MODELS_DIR.glob("ncaab_margin_*.joblib"),
+            )
         if not candidates:
             msg = f"No trained models found in {_MODELS_DIR}"
             raise FileNotFoundError(msg)
