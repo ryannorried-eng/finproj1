@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from line_tracker.config import data_mode
+from line_tracker.model.matching import TEAM_NAME_MAP, normalize_team_name
 from line_tracker.model.predict import margin_to_spread_prob
 from line_tracker.models import BetType
 from line_tracker.storage import LineStore
@@ -32,59 +33,81 @@ def _load_predictions(store: LineStore, game_date: str) -> list[dict]:
     return store.predictions_repo.get_predictions_for_date(game_date)
 
 
-def _load_latest_spreads(store: LineStore, sport: str) -> dict[str, dict]:
-    """Load latest spread lines keyed by (home_team, away_team).
+def _resolve_to_torvik(odds_name: str, pred_teams: set[str]) -> str:
+    """Resolve an Odds API team name to its Torvik equivalent.
 
-    Returns a dict mapping ``"home|away"`` to a dict with keys:
-    ``spread``, ``home_price``, ``away_price``, ``sportsbook``.
+    Uses TEAM_NAME_MAP first, then falls back to mascot-stripped
+    normalized matching against known prediction team names.
+    Returns the original name unchanged if no match is found.
+    """
+    # Tier 1: curated map
+    torvik = TEAM_NAME_MAP.get(odds_name.lower().strip())
+    if torvik:
+        return torvik
+
+    # Tier 2: normalize (strip mascot) and match against pred teams
+    norm = normalize_team_name(odds_name)
+    for t in pred_teams:
+        if norm == t.lower() or norm == normalize_team_name(t):
+            return t
+
+    return odds_name
+
+
+def _load_spread_data(
+    store: LineStore, sport: str, pred_teams: set[str],
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Load latest spreads and best odds, keyed by Torvik team names.
+
+    Returns ``(market_spreads, best_odds)`` dicts both keyed by
+    ``"torvik_home|torvik_away"``.
     """
     all_lines = store.get_latest_for_sport(sport=sport)
     lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
+
+    spreads: dict[str, dict] = {}
     best: dict[str, dict] = {}
+
     for line in lines:
-        key = f"{line.home_team}|{line.away_team}"
-        existing = best.get(key)
+        home = _resolve_to_torvik(line.home_team, pred_teams)
+        away = _resolve_to_torvik(line.away_team, pred_teams)
+        key = f"{home}|{away}"
+
+        # --- best spread (lowest vig) ---
+        existing = spreads.get(key)
         hp = line.home_price if line.home_price is not None else -110
-        if existing is None or abs(hp) < abs(existing.get("home_price", -110) or -110):
-            best[key] = {
+        if (
+            existing is None
+            or abs(hp) < abs(existing.get("home_price", -110) or -110)
+        ):
+            spreads[key] = {
                 "spread": line.home_value,
                 "home_price": line.home_price,
                 "away_price": line.away_price,
                 "sportsbook": line.sportsbook,
             }
-    return best
 
-
-def _load_best_odds(store: LineStore, sport: str) -> dict[str, dict]:
-    """Load best available spread odds per event.
-
-    Returns dict keyed by ``"home|away"`` with ``best_home_price``,
-    ``best_away_price``, ``best_home_book``, ``best_away_book``.
-    """
-    all_lines = store.get_latest_for_sport(sport=sport)
-    lines = [ln for ln in all_lines if ln.bet_type == BetType.SPREAD]
-    best: dict[str, dict] = {}
-    for line in lines:
-        key = f"{line.home_team}|{line.away_team}"
+        # --- best available odds per side ---
         entry = best.setdefault(key, {
             "best_home_price": None,
             "best_away_price": None,
             "best_home_book": "",
             "best_away_book": "",
         })
-        hp = line.home_price
-        ap = line.away_price
-        if hp is not None and (
-            entry["best_home_price"] is None or hp > entry["best_home_price"]
+        if line.home_price is not None and (
+            entry["best_home_price"] is None
+            or line.home_price > entry["best_home_price"]
         ):
-            entry["best_home_price"] = hp
+            entry["best_home_price"] = line.home_price
             entry["best_home_book"] = line.sportsbook
-        if ap is not None and (
-            entry["best_away_price"] is None or ap > entry["best_away_price"]
+        if line.away_price is not None and (
+            entry["best_away_price"] is None
+            or line.away_price > entry["best_away_price"]
         ):
-            entry["best_away_price"] = ap
+            entry["best_away_price"] = line.away_price
             entry["best_away_book"] = line.sportsbook
-    return best
+
+    return spreads, best
 
 
 def _load_model_metadata() -> dict | None:
@@ -471,8 +494,17 @@ def render_model_picks_page(db_path: str, sport_key: str, api_key: str | None) -
     try:
         with LineStore(db_path) as store:
             predictions = _load_predictions(store, today)
-            market_spreads = _load_latest_spreads(store, sport_key)
-            best_odds = _load_best_odds(store, sport_key)
+
+            # Collect Torvik team names from predictions so the
+            # market-data loader can resolve Odds API names.
+            pred_teams: set[str] = set()
+            for p in predictions:
+                pred_teams.add(p["home_team"])
+                pred_teams.add(p["away_team"])
+
+            market_spreads, best_odds = _load_spread_data(
+                store, sport_key, pred_teams,
+            )
 
             # Summary metrics
             c1, c2, c3 = st.columns(3)
