@@ -22,11 +22,18 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
+# Abbreviations as accepted by pybaseball.schedule_and_record()
 MLB_TEAMS = [
-    "ATL", "ARI", "BAL", "BOS", "CHC", "CHW", "CIN", "CLE", "COL", "DET",
-    "HOU", "KCR", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "OAK",
-    "PHI", "PIT", "SDP", "SEA", "SFG", "STL", "TBR", "TEX", "TOR", "WSN",
+    "ATL", "ARI", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
+    "HOU", "KC",  "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "OAK",
+    "PHI", "PIT", "SD",  "SEA", "SF",  "STL", "TB",  "TEX", "TOR", "WSH",
 ]
+# Map pybaseball schedule abbrev → Baseball Reference team abbrev (used elsewhere)
+PYBB_TO_BR = {
+    "CWS": "CHW", "KC": "KCR", "SD": "SDP", "SF": "SFG",
+    "TB": "TBR", "WSH": "WSN",
+}
+BR_TO_PYBB = {v: k for k, v in PYBB_TO_BR.items()}
 
 
 def _parse_game_date(date_str: str, season: int) -> pd.Timestamp:
@@ -199,6 +206,11 @@ def fetch_schedule_and_results(
         "_away_score": "away_score",
     })
 
+    # Normalize pybaseball abbreviations → Baseball Reference abbreviations
+    for col in ["home_team", "away_team"]:
+        if col in df.columns:
+            df[col] = df[col].map(lambda x: PYBB_TO_BR.get(x, x))
+
     # Compute derived columns
     df["winner"] = df.apply(
         lambda r: "home" if r["home_score"] > r["away_score"] else "away", axis=1
@@ -243,9 +255,10 @@ def fetch_team_game_logs(
     pitching_records: list[pd.DataFrame] = []
 
     for team in MLB_TEAMS:
+        pybb_team = BR_TO_PYBB.get(team, team)
         # --- Batting log ---
         try:
-            bat = pybaseball.team_game_logs(season, team, log_type="batting")
+            bat = pybaseball.team_game_logs(season, pybb_team, log_type="batting")
         except Exception as exc:
             logger.warning("Batting log failed for %s %d: %s", team, season, exc)
             bat = None
@@ -253,20 +266,21 @@ def fetch_team_game_logs(
 
         # --- Pitching log ---
         try:
-            pit = pybaseball.team_game_logs(season, team, log_type="pitching")
+            pit = pybaseball.team_game_logs(season, pybb_team, log_type="pitching")
         except Exception as exc:
             logger.warning("Pitching log failed for %s %d: %s", team, season, exc)
             pit = None
         time.sleep(0.5)
 
+        br_team = PYBB_TO_BR.get(team, team)
         if bat is not None and not bat.empty:
             bat = bat.copy()
-            bat["_team"] = team
+            bat["_team"] = br_team
             batting_records.append(bat)
 
         if pit is not None and not pit.empty:
             pit = pit.copy()
-            pit["_team"] = team
+            pit["_team"] = br_team
             pitching_records.append(pit)
 
     if not batting_records:
