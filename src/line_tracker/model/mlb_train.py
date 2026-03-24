@@ -73,46 +73,17 @@ def train_mlb_models(
         raise RuntimeError(msg)
 
     # ------------------------------------------------------------------
-    # Validate and clean feature matrix
+    # Defensive numeric cleanup
     # ------------------------------------------------------------------
-    print("\n--- Feature matrix validation ---")
-    print("Column dtypes:")
-    print(X.dtypes)
-
-    object_cols = [c for c in X.columns if X[c].dtype == object]
-    if object_cols:
-        print(f"Non-numeric (object) columns found: {object_cols}")
-
-    sequence_cols = [
-        c for c in X.columns
-        if X[c].apply(lambda v: isinstance(v, (list, dict, tuple))).any()
-    ]
-    if sequence_cols:
-        print(f"Columns with sequence values found: {sequence_cols}")
-
-    # Drop non-numeric columns
-    X = X.select_dtypes(include=[np.number])
-
-    # Drop any columns still containing sequences
-    cols_to_drop = [
-        c for c in X.columns
-        if X[c].apply(lambda v: isinstance(v, (list, dict, tuple))).any()
-    ]
-    if cols_to_drop:
-        print(f"Dropping sequence-valued columns: {cols_to_drop}")
-        X = X.drop(columns=cols_to_drop)
-
-    # Replace inf and fill NaNs
+    X = X.astype(float)
     X = X.replace([np.inf, -np.inf], np.nan)
     X = X.fillna(0)
 
     assert all(np.isscalar(v) for v in X.iloc[0]), "Non-scalar values in feature matrix"
 
-    print(f"Final X shape: {X.shape}")
     print(f"Number of features: {X.shape[1]}")
     print("Sample X.head():")
     print(X.head())
-    print("--- End validation ---\n")
 
     n_games = len(X)
     feature_names = list(X.columns)

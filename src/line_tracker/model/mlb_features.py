@@ -73,34 +73,35 @@ def compute_team_rolling_stats(game_logs: pd.DataFrame) -> pd.DataFrame:
     runs_scored_r15, runs_allowed_r15, run_diff_r15,
     k_rate_r15, bb_rate_r15, run_diff_r10.
     """
-    df = game_logs.sort_values(["team", "date"]).copy()
+    result_parts = []
 
-    def _rolling_for_group(group: pd.DataFrame) -> pd.DataFrame:
-        # shift(1) excludes current game from rolling window (no leakage)
-        s = group.shift(1)
+    for _team, group in game_logs.groupby("team"):
+        group = group.sort_values("date").copy()
 
-        run_diff = s["runs_scored"] - s["runs_allowed"]
+        # Apply pd.to_numeric on plain Series before shift — guarantees float output
+        s_scored = pd.to_numeric(group["runs_scored"], errors="coerce").shift(1)
+        s_allowed = pd.to_numeric(group["runs_allowed"], errors="coerce").shift(1)
+        s_hits = pd.to_numeric(group["hits"], errors="coerce").shift(1)
+        s_walks = pd.to_numeric(group["walks"], errors="coerce").shift(1)
+        s_strikeouts = pd.to_numeric(group["strikeouts"], errors="coerce").shift(1)
 
-        group["runs_scored_r15"] = s["runs_scored"].rolling(15, min_periods=15).mean()
-        group["runs_allowed_r15"] = s["runs_allowed"].rolling(15, min_periods=15).mean()
+        run_diff = s_scored - s_allowed
+
+        group["runs_scored_r15"] = s_scored.rolling(15, min_periods=15).mean()
+        group["runs_allowed_r15"] = s_allowed.rolling(15, min_periods=15).mean()
         group["run_diff_r15"] = run_diff.rolling(15, min_periods=15).mean()
 
         # K% and BB% proxies using H+BB+SO as denominator
-        denom = s["hits"] + s["walks"] + s["strikeouts"]
-        # Replace 0 denom with NaN to avoid division by zero
+        denom = s_hits + s_walks + s_strikeouts
         safe_denom = denom.replace(0, np.nan)
-        group["k_rate_r15"] = (s["strikeouts"] / safe_denom).rolling(
-            15, min_periods=15
-        ).mean()
-        group["bb_rate_r15"] = (s["walks"] / safe_denom).rolling(
-            15, min_periods=15
-        ).mean()
+        group["k_rate_r15"] = (s_strikeouts / safe_denom).rolling(15, min_periods=15).mean()
+        group["bb_rate_r15"] = (s_walks / safe_denom).rolling(15, min_periods=15).mean()
 
         group["run_diff_r10"] = run_diff.rolling(10, min_periods=10).mean()
 
-        return group
+        result_parts.append(group)
 
-    return df.groupby("team", group_keys=False).apply(_rolling_for_group)
+    return pd.concat(result_parts, ignore_index=True)
 
 
 def build_feature_matrix(
@@ -157,6 +158,12 @@ def build_feature_matrix(
     rolling = compute_team_rolling_stats(game_logs)
 
     # Build a lookup: (team, date) → rolling stats
+    # Deduplicate so .loc always returns a Series (scalar per column), not a DataFrame.
+    # For doubleheaders with the same (team, date), keep first entry — rolling stats
+    # computed before any games that day, which is appropriate for all games on that date.
+    rolling = rolling.sort_values(["team", "date"]).drop_duplicates(
+        subset=["team", "date"], keep="first"
+    )
     rolling_index = rolling.set_index(["team", "date"])
 
     stat_cols = [
