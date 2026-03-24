@@ -159,6 +159,44 @@ def main(argv: list[str] | None = None) -> int:
     )
     predict_p.add_argument("--db", default="lines.db", help="DB path")
 
+    # --- train-mlb-model ---
+    train_mlb_p = sub.add_parser(
+        "train-mlb-model",
+        help="Train MLB moneyline, margin, and totals models using pybaseball data",
+    )
+    train_mlb_p.add_argument(
+        "--seasons",
+        default="2022,2023,2024,2025",
+        help="Comma-separated seasons (default: 2022,2023,2024,2025)",
+    )
+    train_mlb_p.add_argument(
+        "--models-dir", default=None,
+        help="Directory to save model artifacts",
+    )
+    train_mlb_p.add_argument(
+        "--force-refresh", action="store_true",
+        help="Re-download pybaseball data even if cached",
+    )
+
+    # --- predict-mlb ---
+    predict_mlb_p = sub.add_parser(
+        "predict-mlb",
+        help="Generate MLB model predictions for a given date",
+    )
+    predict_mlb_p.add_argument(
+        "--date", default=None,
+        help="Date to predict YYYY-MM-DD (default: today)",
+    )
+    predict_mlb_p.add_argument(
+        "--save", action="store_true",
+        help="Save predictions to DB",
+    )
+    predict_mlb_p.add_argument(
+        "--min-edge", type=float, default=0.03,
+        help="Min |ml_edge| to display (default: 0.03)",
+    )
+    predict_mlb_p.add_argument("--db", default="lines.db", help="DB path")
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -193,6 +231,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_train_model(args)
     if args.command == "predict":
         return _cmd_predict(args)
+    if args.command == "train-mlb-model":
+        return _cmd_train_mlb_model(args)
+    if args.command == "predict-mlb":
+        return _cmd_predict_mlb(args)
     return 0
 
 
@@ -587,6 +629,59 @@ def _cmd_predict(args) -> int:
             f"{p['home_team']:<22} {p['away_team']:<22} "
             f"{p['predicted_margin']:>+7.1f} "
             f"{p['home_ml_prob']:>8.1%} {p['away_ml_prob']:>8.1%}"
+        )
+    return 0
+
+
+def _cmd_train_mlb_model(args) -> int:
+    from pathlib import Path
+
+    from line_tracker.model.mlb_train import train_mlb_models
+
+    season_list = [int(s.strip()) for s in args.seasons.split(",")]
+    models_path = Path(args.models_dir) if args.models_dir else None
+    train_mlb_models(
+        seasons=season_list,
+        models_dir=models_path,
+        force_refresh=args.force_refresh,
+    )
+    return 0
+
+
+def _cmd_predict_mlb(args) -> int:
+    from datetime import date as date_type
+
+    from line_tracker.model.mlb_predict import predict_mlb_games
+
+    target = date_type.fromisoformat(args.date) if args.date else date_type.today()
+    preds = predict_mlb_games(target_date=target)
+
+    if args.save:
+        from line_tracker.db.repos.mlb_predictions_repo import upsert_prediction
+        from line_tracker.storage import LineStore
+
+        with LineStore(args.db) as store:
+            for p in preds:
+                upsert_prediction(store._conn, p)
+        print(f"Saved {len(preds)} predictions to DB.")
+
+    filtered = [p for p in preds if abs(p.get("ml_edge") or 0) >= args.min_edge]
+    filtered.sort(key=lambda x: abs(x.get("ml_edge") or 0), reverse=True)
+
+    if not filtered:
+        print(f"No predictions with |ml_edge| >= {args.min_edge}")
+        return 0
+
+    print(f"\n⚾ MLB Predictions for {target} ({len(filtered)} games):\n")
+    for p in filtered:
+        market_total = p.get("market_total") or "N/A"
+        print(
+            f"  {p['away_team']} @ {p['home_team']} | "
+            f"Win%: {p['model_home_win_prob']:.1%} | "
+            f"Margin: {p['model_run_diff']:+.1f} | "
+            f"Total: {p['model_total_runs']:.1f} vs mkt {market_total} | "
+            f"ML Edge: {p['ml_edge']:+.1%} | "
+            f"{p['confidence']}"
         )
     return 0
 
