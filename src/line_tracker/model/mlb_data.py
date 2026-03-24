@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 MLB_STATS_API = "https://statsapi.mlb.com/api/v1"
 
-# Canonical team abbreviation map — normalises all known variants to a single form.
-# Source: Baseball Reference abbreviations used throughout mlb_features.py.
+# Canonical team abbreviation map — normalises all known MLB Stats API variants
+# to the single abbreviation form expected by mlb_features.py.
 CANONICAL_TEAM_MAP: dict[str, str] = {
     # Arizona
     "AZ":  "ARI", "ARI": "ARI",
