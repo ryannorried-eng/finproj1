@@ -72,6 +72,19 @@ def train_mlb_models(
         msg = "Feature matrix is empty. Check data quality."
         raise RuntimeError(msg)
 
+    # ------------------------------------------------------------------
+    # Defensive numeric cleanup
+    # ------------------------------------------------------------------
+    X = X.astype(float)
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(0)
+
+    assert all(np.isscalar(v) for v in X.iloc[0]), "Non-scalar values in feature matrix"
+
+    print(f"Number of features: {X.shape[1]}")
+    print("Sample X.head():")
+    print(X.head())
+
     n_games = len(X)
     feature_names = list(X.columns)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
