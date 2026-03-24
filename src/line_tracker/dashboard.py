@@ -90,6 +90,7 @@ from line_tracker.ui.components.diagnostics import (
 )
 from line_tracker.ui.components.explainability import render_pick_explanation
 from line_tracker.ui.pages.model_page import render_model_picks_page
+from line_tracker.ui.pages.mlb_model_page import render_mlb_model_page
 
 # Toggle to show EV Math Debug expander on slate / shopping pages.
 SHOW_EV_DEBUG = False
@@ -501,7 +502,7 @@ def _sidebar():
             "Page",
             [
                 "Dashboard", "Best Lines to Shop",
-                "Daily Slate", "Performance", "Model Picks",
+                "Daily Slate", "Performance", "Model Picks", "⚾ MLB Model",
             ],
             key="nav_page",
             horizontal=True,
@@ -3993,6 +3994,9 @@ def main():
             sport_key = SPORTS.get(sport_name, "basketball_ncaab")
             api_key = st.session_state.get("api_key", "") or None
             render_model_picks_page(DB_PATH, sport_key, api_key)
+        elif nav == "⚾ MLB Model":
+            with LineStore(DB_PATH) as _mlb_store:
+                render_mlb_model_page(_mlb_store._conn)
         else:
             _page_dashboard()
 

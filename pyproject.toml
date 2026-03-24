@@ -12,6 +12,7 @@ dependencies = [
     "scikit-learn>=1.4",
     "scipy>=1.10",
     "streamlit==1.54.0",
+    "pybaseball>=2.2",
 ]
 
 [project.optional-dependencies]
