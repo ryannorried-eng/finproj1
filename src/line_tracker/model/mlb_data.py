@@ -64,15 +64,15 @@ def _game_number(date_str: str) -> int:
 
 
 def _find_ha_column(df: pd.DataFrame) -> str | None:
-    """Find the home/away indicator column (contains '@' for away, '' for home)."""
-    for name in ["H/A", "home_away", "homeAway", "HA"]:
+    """Find the home/away indicator column (contains '@' for away, '' or 'Home' for home)."""
+    for name in ["Home_Away", "H/A", "Home/Away", "home_away", "homeAway", "HA"]:
         if name in df.columns:
             return name
-    # Look for any column that only has '@', '', or NaN values and has '@' present
+    # Generic scan: column whose values are a subset of {"@", "", "Home", "nan"} with "@" present
     for col in df.columns:
         vals = df[col].fillna("").astype(str).str.strip()
         unique = set(vals.unique())
-        if unique <= {"@", "", "nan"} and "@" in unique:
+        if "@" in unique and unique <= {"@", "", "Home", "nan"}:
             return col
     return None
 
@@ -100,7 +100,8 @@ def fetch_schedule_and_results(
         return pd.read_parquet(cache_path)
 
     logger.info("Fetching schedule for season %d ...", season)
-    home_records: list[pd.DataFrame] = []
+    all_records: list[pd.DataFrame] = []
+    columns_printed = False
 
     for team in MLB_TEAMS:
         try:
@@ -114,102 +115,122 @@ def fetch_schedule_and_results(
             time.sleep(0.5)
             continue
 
-        # Parse date
         raw = raw.copy()
-        raw["_season"] = season
-        raw["_team"] = team
 
-        date_col = "Date" if "Date" in raw.columns else raw.columns[1]
-        raw["date"] = raw[date_col].apply(lambda d: _parse_game_date(d, season))
-        raw["_game_num"] = raw[date_col].apply(_game_number)
+        # Print actual columns on first successful fetch (aids debugging)
+        if not columns_printed:
+            print(f"schedule_and_record columns for {team} {season}: {list(raw.columns)}")
+            columns_printed = True
 
-        # Find team/opponent columns
+        # Find date column
+        date_col = "Date" if "Date" in raw.columns else raw.columns[0]
+
+        # Find team/opponent/score columns
         tm_col = next((c for c in ["Tm", "Team"] if c in raw.columns), None)
         opp_col = next((c for c in ["Opp", "Opponent"] if c in raw.columns), None)
         r_col = "R" if "R" in raw.columns else None
         ra_col = "RA" if "RA" in raw.columns else None
 
         if tm_col is None or opp_col is None:
-            logger.warning("Cannot find Tm/Opp columns for %s %d", team, season)
-            time.sleep(0.5)
-            continue
-
-        # Find home/away column
-        ha_col = _find_ha_column(raw)
-
-        if ha_col is not None:
-            is_home = raw[ha_col].fillna("").astype(str).str.strip() != "@"
-        else:
-            # Fallback: check if Tm matches our team (home = team's own venue)
-            is_home = pd.Series([True] * len(raw), index=raw.index)
-            logger.debug("No H/A column found for %s %d; using all rows as home", team, season)
-
-        home_games = raw[is_home].copy()
-
-        if home_games.empty:
-            time.sleep(0.5)
-            continue
-
-        # Keep only played games (has scores)
-        if r_col and ra_col:
-            has_score = (
-                pd.to_numeric(home_games[r_col], errors="coerce").notna()
-                & pd.to_numeric(home_games[ra_col], errors="coerce").notna()
+            logger.warning(
+                "Cannot find Tm/Opp columns for %s %d; detected: %s",
+                team, season, list(raw.columns),
             )
-            home_games = home_games[has_score].copy()
-            home_games["_home_score"] = pd.to_numeric(home_games[r_col], errors="coerce")
-            home_games["_away_score"] = pd.to_numeric(home_games[ra_col], errors="coerce")
-        else:
+            time.sleep(0.5)
+            continue
+
+        if r_col is None or ra_col is None:
             logger.warning("Cannot find R/RA columns for %s %d", team, season)
             time.sleep(0.5)
             continue
 
-        home_games["_home_team"] = team
-        home_games["_away_team"] = home_games[opp_col].astype(str).str.strip()
+        # Find home/away indicator column
+        ha_col = _find_ha_column(raw)
 
-        home_records.append(home_games[[
-            "date", "_season", "_home_team", "_away_team",
-            "_home_score", "_away_score", "_game_num",
-        ]])
+        # Parse date and game number
+        raw["_date"] = raw[date_col].apply(lambda d: _parse_game_date(d, season))
+        raw["_game_num"] = raw[date_col].apply(_game_number)
 
+        # Keep only played games (both R and RA are numeric)
+        r_num = pd.to_numeric(raw[r_col], errors="coerce")
+        ra_num = pd.to_numeric(raw[ra_col], errors="coerce")
+        played = r_num.notna() & ra_num.notna()
+        raw = raw[played].copy()
+        r_num = r_num[played]
+        ra_num = ra_num[played]
+
+        if raw.empty:
+            time.sleep(0.5)
+            continue
+
+        # Determine is_away: Home_Away == "@" means this team is the away team
+        if ha_col is not None:
+            is_away = raw[ha_col].fillna("").astype(str).str.strip() == "@"
+        else:
+            logger.debug("No H/A column for %s %d; treating all rows as home games", team, season)
+            is_away = pd.Series(False, index=raw.index)
+
+        tm_vals = raw[tm_col].astype(str).str.strip()
+        opp_vals = raw[opp_col].astype(str).str.strip()
+
+        # If away: Opp is home team, Tm is away team; scores are swapped
+        # If home: Tm is home team, Opp is away team
+        records = pd.DataFrame({
+            "_date": raw["_date"],
+            "_game_num": raw["_game_num"],
+            "_home_team": opp_vals.where(is_away, tm_vals),
+            "_away_team": tm_vals.where(is_away, opp_vals),
+            "_home_score": ra_num.where(is_away, r_num),
+            "_away_score": r_num.where(is_away, ra_num),
+        }, index=raw.index)
+
+        all_records.append(records)
         time.sleep(0.5)
 
-    if not home_records:
+    if not all_records:
         logger.warning("No schedule data retrieved for season %d", season)
         return pd.DataFrame()
 
-    df = pd.concat(home_records, ignore_index=True)
+    df = pd.concat(all_records, ignore_index=True)
 
     # Drop rows with bad dates
-    df = df[df["date"].notna()].copy()
+    df = df[df["_date"].notna()].copy()
 
     # Drop spring training (before April 1)
-    df = df[df["date"] >= pd.Timestamp(f"{season}-04-01")].copy()
+    df = df[df["_date"] >= pd.Timestamp(f"{season}-04-01")].copy()
 
-    # Build game_id: date_home_away[_gamenum]
-    df["game_id"] = (
-        df["date"].dt.strftime("%Y-%m-%d")
-        + "_" + df["_home_team"]
-        + "_" + df["_away_team"]
-        + df["_game_num"].apply(lambda n: f"_{n}" if n > 1 else "")
-    )
-
-    # Deduplicate (shouldn't happen since we only kept home games)
-    df = df.drop_duplicates("game_id").copy()
+    # Normalize pybaseball abbreviations → Baseball Reference abbreviations
+    df["_home_team"] = df["_home_team"].map(lambda x: PYBB_TO_BR.get(x, x))
+    df["_away_team"] = df["_away_team"].map(lambda x: PYBB_TO_BR.get(x, x))
 
     # Rename
     df = df.rename(columns={
-        "_season": "season",
+        "_date": "date",
         "_home_team": "home_team",
         "_away_team": "away_team",
         "_home_score": "home_score",
         "_away_score": "away_score",
     })
 
-    # Normalize pybaseball abbreviations → Baseball Reference abbreviations
-    for col in ["home_team", "away_team"]:
-        if col in df.columns:
-            df[col] = df[col].map(lambda x: PYBB_TO_BR.get(x, x))
+    # Deduplicate: each game appears once (collected from both teams' schedules)
+    df["team_pair"] = df.apply(
+        lambda r: "|".join(sorted([str(r["home_team"]), str(r["away_team"])])),
+        axis=1,
+    )
+    df = df.sort_values(["date", "home_team", "away_team"]).drop_duplicates(
+        subset=["date", "team_pair"], keep="first"
+    )
+
+    # Build game_id
+    df["game_id"] = (
+        df["date"].dt.strftime("%Y-%m-%d")
+        + "_"
+        + df["home_team"].astype(str)
+        + "_"
+        + df["away_team"].astype(str)
+    )
+
+    df["season"] = season
 
     # Compute derived columns
     df["winner"] = df.apply(
