@@ -21,32 +21,33 @@ logger = logging.getLogger(__name__)
 
 MLB_STATS_API = "https://statsapi.mlb.com/api/v1"
 
-# Legacy abbreviation lists kept for backward compatibility (may be imported elsewhere)
-MLB_TEAMS = [
-    "ATL", "ARI", "BAL", "BOS", "CHC", "CWS", "CIN", "CLE", "COL", "DET",
-    "HOU", "KC",  "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "OAK",
-    "PHI", "PIT", "SD",  "SEA", "SF",  "STL", "TB",  "TEX", "TOR", "WSH",
-]
-PYBB_TO_BR = {
-    "CWS": "CHW", "KC": "KCR", "SD": "SDP", "SF": "SFG",
-    "TB": "TBR", "WSH": "WSN",
+# Canonical team abbreviation map — normalises all known variants to a single form.
+# Source: Baseball Reference abbreviations used throughout mlb_features.py.
+CANONICAL_TEAM_MAP: dict[str, str] = {
+    # Arizona
+    "AZ":  "ARI", "ARI": "ARI",
+    # San Francisco
+    "SF":  "SFG", "SFG": "SFG",
+    # San Diego
+    "SD":  "SDP", "SDP": "SDP",
+    # Tampa Bay
+    "TB":  "TBR", "TBR": "TBR",
+    # Kansas City
+    "KC":  "KCR", "KCR": "KCR",
+    # Washington
+    "WSH": "WSN", "WSN": "WSN",
+    # Chicago White Sox
+    "CWS": "CHW", "CHW": "CHW",
+    # Oakland / Athletics
+    "ATH": "OAK", "OAK": "OAK",
 }
-BR_TO_PYBB = {v: k for k, v in PYBB_TO_BR.items()}
-
-# Map MLB Stats API abbreviations → Baseball Reference abbreviations
-_MLB_API_TO_BR: dict[str, str] = {
-    "CWS": "CHW",
-    "KC":  "KCR",
-    "SD":  "SDP",
-    "SF":  "SFG",
-    "TB":  "TBR",
-    "WSH": "WSN",
-}
 
 
-def _to_br(abbrev: str) -> str:
-    """Convert an MLB Stats API team abbreviation to Baseball Reference format."""
-    return _MLB_API_TO_BR.get(abbrev, abbrev)
+def _to_canonical(team: object) -> object:
+    """Return canonical team abbreviation, or pass through NaN unchanged."""
+    if pd.isna(team):
+        return team
+    return CANONICAL_TEAM_MAP.get(str(team), str(team))
 
 
 def _get_mlb_teams() -> list[dict]:
@@ -71,8 +72,9 @@ def fetch_schedule_and_results(
 
     Returns
     -------
-    DataFrame with columns: game_id, date, season, home_team, away_team,
-    home_score, away_score, winner, run_diff, total_runs.
+    DataFrame with columns:
+        game_id, date, home_team, away_team, home_score, away_score,
+        winner, run_diff, total_runs.
     """
     cache_path = CACHE_DIR / f"schedule_{season}.parquet"
     if not force_refresh and cache_path.exists():
@@ -109,12 +111,8 @@ def fetch_schedule_and_results(
                 if home_score is None or away_score is None:
                     continue
 
-                home_abbrev = (
-                    home_info.get("team", {}).get("abbreviation", "")
-                )
-                away_abbrev = (
-                    away_info.get("team", {}).get("abbreviation", "")
-                )
+                home_abbrev = home_info.get("team", {}).get("abbreviation", "")
+                away_abbrev = away_info.get("team", {}).get("abbreviation", "")
 
                 date = pd.to_datetime(date_str, errors="coerce")
                 if pd.isna(date):
@@ -122,8 +120,8 @@ def fetch_schedule_and_results(
 
                 records.append({
                     "date": date,
-                    "home_team": _to_br(home_abbrev),
-                    "away_team": _to_br(away_abbrev),
+                    "home_team": _to_canonical(home_abbrev),
+                    "away_team": _to_canonical(away_abbrev),
                     "home_score": int(home_score),
                     "away_score": int(away_score),
                 })
@@ -146,9 +144,6 @@ def fetch_schedule_and_results(
         + df["away_team"].astype(str)
     )
 
-    df["season"] = season
-
-    # Derived columns
     df["winner"] = df.apply(
         lambda r: "home" if r["home_score"] > r["away_score"] else "away", axis=1
     )
@@ -156,7 +151,7 @@ def fetch_schedule_and_results(
     df["total_runs"] = df["home_score"] + df["away_score"]
 
     df = df[[
-        "game_id", "date", "season", "home_team", "away_team",
+        "game_id", "date", "home_team", "away_team",
         "home_score", "away_score", "winner", "run_diff", "total_runs",
     ]].copy()
     df = df.sort_values("date").reset_index(drop=True)
@@ -180,8 +175,9 @@ def fetch_team_game_logs(
 
     Returns
     -------
-    DataFrame with columns: team, date, home_away, opponent,
-    runs_scored, runs_allowed, hits, walks, strikeouts, innings_pitched.
+    DataFrame with columns:
+        team, date, home_away, opponent,
+        runs_scored, runs_allowed, hits, walks, strikeouts, innings_pitched.
     """
     cache_path = CACHE_DIR / f"team_logs_{season}.parquet"
     if not force_refresh and cache_path.exists():
@@ -201,7 +197,6 @@ def fetch_team_game_logs(
     for team in teams:
         team_id = team.get("id")
         abbrev = team.get("abbreviation", "")
-        br_abbrev = _to_br(abbrev)
 
         if not team_id:
             continue
@@ -245,10 +240,9 @@ def fetch_team_game_logs(
         # Build pitching lookup keyed by (date, gameNumber) for doubleheaders
         pit_by_key: dict[tuple, dict] = {}
         for split in pitching_splits:
-            date_str = split.get("date", "")
-            game_num = split.get("gameNumber", 1)
+            key = (split.get("date", ""), split.get("gameNumber", 1))
             stat = split.get("stat", {})
-            pit_by_key[(date_str, game_num)] = {
+            pit_by_key[key] = {
                 "runs_allowed": stat.get("runs"),
                 "innings_pitched": stat.get("inningsPitched"),
             }
@@ -266,7 +260,7 @@ def fetch_team_game_logs(
                 continue
 
             if is_home is True:
-                home_away = "H"
+                home_away: object = "H"
             elif is_home is False:
                 home_away = "A"
             else:
@@ -275,10 +269,10 @@ def fetch_team_game_logs(
             pit = pit_by_key.get((date_str, game_num), {})
 
             all_rows.append({
-                "team": br_abbrev,
+                "team": _to_canonical(abbrev),
                 "date": date,
                 "home_away": home_away,
-                "opponent": _to_br(opponent_abbrev) if opponent_abbrev else np.nan,
+                "opponent": _to_canonical(opponent_abbrev) if opponent_abbrev else np.nan,
                 "runs_scored": stat.get("runs"),
                 "runs_allowed": pit.get("runs_allowed"),
                 "hits": stat.get("hits"),
@@ -294,7 +288,6 @@ def fetch_team_game_logs(
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df[df["date"].notna()].copy()
 
-    # Coerce all numeric columns — keep NaN rather than dropping columns
     for col in ["runs_scored", "runs_allowed", "hits", "walks", "strikeouts",
                 "innings_pitched"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -355,12 +348,32 @@ def load_mlb_training_data(
             all_seasons.append(schedule)
             continue
 
-        # Build lookup: (team, date, game_num) → stats
-        # For home team stats: look up the game where team=home_team and home_away='H'
-        # For away team stats: look up where team=away_team and home_away='A'
+        schedule["date_str"] = schedule["date"].dt.strftime("%Y-%m-%d")
         logs["date_str"] = logs["date"].dt.strftime("%Y-%m-%d")
 
-        # Aggregate to handle doubleheaders (average if two games same day)
+        # ── Derive opponent and home_away from schedule ───────────────────
+        # The API game-log endpoint does not reliably populate opponent; use
+        # the schedule as the authoritative source.
+        home_sched = schedule[["date_str", "home_team", "away_team"]].copy()
+        home_sched = home_sched.rename(columns={
+            "home_team": "team", "away_team": "sched_opponent"
+        })
+        home_sched["sched_home_away"] = "H"
+
+        away_sched = schedule[["date_str", "away_team", "home_team"]].copy()
+        away_sched = away_sched.rename(columns={
+            "away_team": "team", "home_team": "sched_opponent"
+        })
+        away_sched["sched_home_away"] = "A"
+
+        sched_lookup = pd.concat([home_sched, away_sched], ignore_index=True)
+
+        logs = logs.merge(sched_lookup, on=["team", "date_str"], how="left")
+        logs["home_away"] = logs["sched_home_away"].fillna(logs["home_away"])
+        logs["opponent"] = logs["sched_opponent"].fillna(logs["opponent"])
+        logs = logs.drop(columns=["sched_home_away", "sched_opponent"])
+
+        # ── Aggregate (handles doubleheaders → average stats per game day) ─
         logs_agg = logs.groupby(["team", "date_str"]).agg({
             "runs_scored": "mean",
             "runs_allowed": "mean",
@@ -372,9 +385,7 @@ def load_mlb_training_data(
             "opponent": "first",
         }).reset_index()
 
-        schedule["date_str"] = schedule["date"].dt.strftime("%Y-%m-%d")
-
-        # Join home team logs
+        # ── Join home team stats ──────────────────────────────────────────
         home_logs = logs_agg.rename(columns={
             "team": "home_team",
             "runs_scored": "home_runs_scored",
@@ -385,13 +396,15 @@ def load_mlb_training_data(
             "innings_pitched": "home_innings_pitched",
         })
         merged = schedule.merge(
-            home_logs[["home_team", "date_str", "home_runs_scored", "home_runs_allowed_log",
-                        "home_hits", "home_walks", "home_strikeouts", "home_innings_pitched"]],
+            home_logs[[
+                "home_team", "date_str", "home_runs_scored", "home_runs_allowed_log",
+                "home_hits", "home_walks", "home_strikeouts", "home_innings_pitched",
+            ]],
             on=["home_team", "date_str"],
             how="left",
         )
 
-        # Join away team logs
+        # ── Join away team stats ──────────────────────────────────────────
         away_logs = logs_agg.rename(columns={
             "team": "away_team",
             "runs_scored": "away_runs_scored",
@@ -402,11 +415,26 @@ def load_mlb_training_data(
             "innings_pitched": "away_innings_pitched",
         })
         merged = merged.merge(
-            away_logs[["away_team", "date_str", "away_runs_scored", "away_runs_allowed_log",
-                        "away_hits", "away_walks", "away_strikeouts", "away_innings_pitched"]],
+            away_logs[[
+                "away_team", "date_str", "away_runs_scored", "away_runs_allowed_log",
+                "away_hits", "away_walks", "away_strikeouts", "away_innings_pitched",
+            ]],
             on=["away_team", "date_str"],
             how="left",
         )
+
+        # ── Join validation ───────────────────────────────────────────────
+        missing_home = int(merged["home_runs_scored"].isna().sum())
+        missing_away = int(merged["away_runs_scored"].isna().sum())
+        print(f"Schedule rows: {len(schedule)}")
+        print(f"Team logs rows: {len(logs)}")
+        print(f"Missing home team matches: {missing_home}")
+        print(f"Missing away team matches: {missing_away}")
+
+        if missing_home == len(merged) and missing_away == len(merged):
+            raise RuntimeError(
+                f"Team log join failed for season {year} — check abbreviations"
+            )
 
         merged["season"] = year
         all_seasons.append(merged)
