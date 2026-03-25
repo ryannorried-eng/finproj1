@@ -503,27 +503,76 @@ def fetch_pitcher_season_stats(
 
     logger.info("Fetching pitcher season stats for %d ...", season)
 
-    url = (
-        f"{MLB_STATS_API}/stats"
-        f"?stats=season&group=pitching&gameType=R"
-        f"&season={season}&sportId=1&limit=1000"
-    )
+    # Build team_id -> abbreviation map for team name resolution.
+    # The /stats splits often omit the abbreviation field, so fall back to this.
     try:
-        resp = requests.get(url, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+        teams = _get_mlb_teams()
+        team_id_to_abbrev: dict[int, str] = {
+            int(t["id"]): t.get("abbreviation", "")
+            for t in teams
+            if t.get("id")
+        }
     except Exception as exc:
-        logger.error("Failed to fetch pitcher stats for season %d: %s", season, exc)
-        raise
+        logger.warning("Failed to build team abbrev map: %s", exc)
+        team_id_to_abbrev = {}
 
-    stat_groups = data.get("stats", [])
-    if not stat_groups:
+    # Paginate through all pitchers (the API caps each page at ~50-100 rows
+    # regardless of the limit parameter).
+    limit = 500
+    offset = 0
+    all_splits: list[dict] = []
+    _debug_printed = False
+
+    while True:
+        url = (
+            f"{MLB_STATS_API}/stats"
+            f"?stats=season&group=pitching&gameType=R"
+            f"&season={season}&sportId=1&playerPool=All"
+            f"&limit={limit}&offset={offset}"
+        )
+        try:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch pitcher stats (offset=%d) for season %d: %s",
+                offset, season, exc,
+            )
+            raise
+
+        stat_groups = data.get("stats", [])
+        if not stat_groups:
+            break
+
+        splits = stat_groups[0].get("splits", [])
+        if not splits:
+            break
+
+        if not _debug_printed:
+            logger.debug("First split sample: %s", splits[0])
+            _debug_printed = True
+
+        all_splits.extend(splits)
+        logger.debug(
+            "Fetched %d splits at offset=%d (total so far: %d)",
+            len(splits), offset, len(all_splits),
+        )
+
+        if len(splits) < limit:
+            break
+
+        offset += limit
+        time.sleep(0.1)
+
+    if not all_splits:
         raise ValueError(f"No pitcher stats returned for season {season}")
 
-    splits = stat_groups[0].get("splits", [])
+    logger.info("Total raw splits fetched: %d", len(all_splits))
+
     records: list[dict] = []
 
-    for split in splits:
+    for split in all_splits:
         try:
             player = split.get("player", {})
             team_info = split.get("team", {})
@@ -533,6 +582,13 @@ def fetch_pitcher_season_stats(
             if pitcher_id is None:
                 continue
 
+            # Prefer abbreviation if present; fall back to team-id lookup.
+            team_abbrev = team_info.get("abbreviation", "")
+            if not team_abbrev:
+                team_id = team_info.get("id")
+                if team_id:
+                    team_abbrev = team_id_to_abbrev.get(int(team_id), "")
+
             games_started = int(stat.get("gamesStarted", 0))
             if games_started < 1:
                 continue
@@ -540,7 +596,7 @@ def fetch_pitcher_season_stats(
             records.append({
                 "pitcher_id": int(pitcher_id),
                 "pitcher_name": player.get("fullName", ""),
-                "team": _to_canonical(team_info.get("abbreviation", "")),
+                "team": _to_canonical(team_abbrev) if team_abbrev else np.nan,
                 "era": _safe_float(stat.get("era")),
                 "whip": _safe_float(stat.get("whip")),
                 "k9": _safe_float(stat.get("strikeoutsPer9Inn")),
