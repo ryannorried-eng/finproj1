@@ -15,7 +15,10 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from line_tracker.model.mlb_features import FEATURE_COLUMNS, PARK_FACTORS, _ROT_DEFAULTS, _BP_DEFAULT_ERA
+from line_tracker.model.mlb_features import (
+    FEATURE_COLUMNS, PARK_FACTORS, _ROT_DEFAULTS, _BP_DEFAULT_ERA,
+    LEAGUE_AVG_ERA, LEAGUE_AVG_WHIP, LEAGUE_AVG_K9,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +289,28 @@ def build_prediction_features(
         temp_f = 72.0
         precip_prob = 0.0
 
+    # v3 — per-game SP stats: use pitcher_stats if available, else rotation avg,
+    # else league average
+    if home_pitcher_stats is not None:
+        home_sp_era  = float(home_pitcher_stats.get("era")  or home_rotation_era or LEAGUE_AVG_ERA)
+        home_sp_whip = float(home_pitcher_stats.get("whip") or home_rotation_whip or LEAGUE_AVG_WHIP)
+        home_sp_k9   = float(home_pitcher_stats.get("k9")   or home_rotation_k9  or LEAGUE_AVG_K9)
+    else:
+        home_sp_era  = home_rotation_era  if home_rotation_era  else LEAGUE_AVG_ERA
+        home_sp_whip = home_rotation_whip if home_rotation_whip else LEAGUE_AVG_WHIP
+        home_sp_k9   = home_rotation_k9   if home_rotation_k9   else LEAGUE_AVG_K9
+
+    if away_pitcher_stats is not None:
+        away_sp_era  = float(away_pitcher_stats.get("era")  or away_rotation_era or LEAGUE_AVG_ERA)
+        away_sp_whip = float(away_pitcher_stats.get("whip") or away_rotation_whip or LEAGUE_AVG_WHIP)
+        away_sp_k9   = float(away_pitcher_stats.get("k9")   or away_rotation_k9  or LEAGUE_AVG_K9)
+    else:
+        away_sp_era  = away_rotation_era  if away_rotation_era  else LEAGUE_AVG_ERA
+        away_sp_whip = away_rotation_whip if away_rotation_whip else LEAGUE_AVG_WHIP
+        away_sp_k9   = away_rotation_k9   if away_rotation_k9   else LEAGUE_AVG_K9
+
+    sp_era_diff_v3 = away_sp_era - home_sp_era
+
     feat = {
         # v1
         "home_runs_scored_r15": home_stats["runs_scored_r15"],
@@ -309,14 +334,14 @@ def build_prediction_features(
         "rest_advantage": float(home_rest - away_rest),
         "park_factor_runs": pf["runs"] / 100.0,
         "park_factor_hr": pf["hr"] / 100.0,
-        # v2 — rotation
-        "home_rotation_era": home_rotation_era,
-        "away_rotation_era": away_rotation_era,
-        "home_rotation_k9": home_rotation_k9,
-        "away_rotation_k9": away_rotation_k9,
-        "home_rotation_whip": home_rotation_whip,
-        "away_rotation_whip": away_rotation_whip,
-        "sp_era_diff": sp_era_diff,
+        # v3 — per-game starting pitcher stats
+        "home_sp_era": home_sp_era,
+        "away_sp_era": away_sp_era,
+        "home_sp_whip": home_sp_whip,
+        "away_sp_whip": away_sp_whip,
+        "home_sp_k9": home_sp_k9,
+        "away_sp_k9": away_sp_k9,
+        "sp_era_diff": sp_era_diff_v3,
         # v2 — bullpen
         "home_bullpen_era_r7": h_bp_era,
         "away_bullpen_era_r7": a_bp_era,
@@ -642,17 +667,17 @@ def predict_mlb_games(
 
         # --- Moneyline ---
         ml_art = artifacts["moneyline"]
-        X_ml = ml_art["scaler"].transform(X)
+        X_ml = np.nan_to_num(ml_art["scaler"].transform(X), nan=0.0)
         home_win_prob = float(ml_art["model"].predict_proba(X_ml)[0][1])
 
         # --- Margin ---
         mg_art = artifacts["margin"]
-        X_mg = mg_art["scaler"].transform(X)
+        X_mg = np.nan_to_num(mg_art["scaler"].transform(X), nan=0.0)
         run_diff = float(mg_art["model"].predict(X_mg)[0])
 
         # --- Totals ---
         tot_art = artifacts["totals"]
-        X_tot = tot_art["scaler"].transform(X)
+        X_tot = np.nan_to_num(tot_art["scaler"].transform(X), nan=0.0)
         total_runs = float(tot_art["model"].predict(X_tot)[0])
 
         # Derived odds
