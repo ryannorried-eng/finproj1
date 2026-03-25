@@ -192,8 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Save predictions to DB",
     )
     predict_mlb_p.add_argument(
-        "--min-edge", type=float, default=0.03,
-        help="Min |ml_edge| to display (default: 0.03)",
+        "--min-edge", type=float, default=0.0,
+        help="Min |ml_edge| to display (default: 0.0)",
     )
     predict_mlb_p.add_argument("--db", default="lines.db", help="DB path")
 
@@ -665,7 +665,11 @@ def _cmd_predict_mlb(args) -> int:
                 upsert_prediction(store._conn, p)
         print(f"Saved {len(preds)} predictions to DB.")
 
-    filtered = [p for p in preds if abs(p.get("ml_edge") or 0) >= args.min_edge]
+    filtered = [
+        p for p in preds
+        if abs(p.get("ml_edge") or 0) >= args.min_edge
+        or abs(p.get("total_edge") or 0) >= 0.5
+    ]
     filtered.sort(key=lambda x: abs(x.get("ml_edge") or 0), reverse=True)
 
     if not filtered:
@@ -674,12 +678,12 @@ def _cmd_predict_mlb(args) -> int:
 
     print(f"\n⚾ MLB Predictions for {target} ({len(filtered)} games):\n")
     for p in filtered:
-        market_total = p.get("market_total") or "N/A"
         print(
             f"  {p['away_team']} @ {p['home_team']} | "
             f"Win%: {p['model_home_win_prob']:.1%} | "
             f"Margin: {p['model_run_diff']:+.1f} | "
-            f"Total: {p['model_total_runs']:.1f} vs mkt {market_total} | "
+            f"Total: {p['model_total_runs']:.1f} vs mkt {p.get('market_total', '—')} "
+            f"(edge: {p.get('total_edge', 0):+.1f}) | "
             f"ML Edge: {p['ml_edge']:+.1%} | "
             f"{p['confidence']}"
         )
