@@ -13,9 +13,11 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-LEAGUE_AVG_ERA  = 4.20
-LEAGUE_AVG_WHIP = 1.30
-LEAGUE_AVG_K9   = 8.50
+LEAGUE_AVG_ERA       = 4.20
+LEAGUE_AVG_WHIP      = 1.30
+LEAGUE_AVG_K9        = 8.50
+LEAGUE_AVG_OPS       = 0.720
+LEAGUE_AVG_WRC_PLUS  = 100.0
 
 # Hardcoded 2025 park factors (index 100 = neutral)
 PARK_FACTORS: dict[str, dict[str, int]] = {
@@ -82,6 +84,17 @@ FEATURE_COLUMNS = [
     "wind_out_factor",
     "temp_f",
     "precip_prob",
+    # v4 — lineup strength (6 features)
+    "home_lineup_wrc",
+    "away_lineup_wrc",
+    "home_lineup_top3_ops",
+    "away_lineup_top3_ops",
+    "lineup_wrc_diff",
+    "home_lineup_depth_ops",
+    # v4 — SP workload (3 features)
+    "home_sp_rest_days",
+    "away_sp_rest_days",
+    "home_sp_avg_ip",
 ]
 
 
@@ -270,6 +283,179 @@ def _lookup_sp_to_date_stats(pitcher_id, game_date, pitcher_to_date_df):
     return era, whip, k9
 
 
+ORDER_WEIGHTS = {
+    1: 1.1, 2: 1.1, 3: 1.2, 4: 1.2, 5: 1.0,
+    6: 0.9, 7: 0.8, 8: 0.8, 9: 0.7,
+}
+
+
+def _build_batter_to_date_stats(batter_logs: pd.DataFrame) -> pd.DataFrame:
+    """Build leakage-safe cumulative OPS proxy per batter by date.
+
+    Same shift(1) pattern as _build_pitcher_to_date_stats().
+    Returns: batter_id, date, ops_to_date, wrc_proxy_to_date
+    """
+    if batter_logs.empty:
+        return pd.DataFrame(
+            columns=["batter_id", "date", "ops_to_date", "wrc_proxy_to_date"]
+        )
+
+    rows = []
+    for bid, group in batter_logs.groupby("batter_id"):
+        group = group.sort_values("date").copy()
+
+        ab  = pd.to_numeric(group["at_bats"],   errors="coerce").fillna(0)
+        h   = pd.to_numeric(group["hits"],      errors="coerce").fillna(0)
+        bb  = pd.to_numeric(group["walks"],     errors="coerce").fillna(0)
+        hr  = pd.to_numeric(group["home_runs"], errors="coerce").fillna(0)
+
+        # Cumulative PRIOR stats — shift(1) excludes current game
+        prior_ab = ab.shift(1).cumsum()
+        prior_h  = h.shift(1).cumsum()
+        prior_bb = bb.shift(1).cumsum()
+        prior_hr = hr.shift(1).cumsum()  # noqa: F841 (kept for potential extension)
+
+        # OPS proxy: (H+BB)/(AB) as simplified OBP+SLG proxy
+        ops_td = ((prior_h + prior_bb) / prior_ab).where(prior_ab > 10)
+        wrc_td = (ops_td / LEAGUE_AVG_OPS * 100).where(prior_ab > 10)
+
+        for i, (_idx, row) in enumerate(group.iterrows()):
+            rows.append({
+                "batter_id":         bid,
+                "date":              row["date"],
+                "ops_to_date":       float(ops_td.iloc[i]) if pd.notna(ops_td.iloc[i]) else None,
+                "wrc_proxy_to_date": float(wrc_td.iloc[i])  if pd.notna(wrc_td.iloc[i])  else None,
+            })
+
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result["date"] = pd.to_datetime(result["date"])
+    return result
+
+
+def _compute_lineup_strength(
+    lineup_json,
+    game_date,
+    batter_to_date_df: pd.DataFrame,
+    batter_season_stats: pd.DataFrame,
+) -> dict:
+    """Compute lineup strength metrics from a game batting lineup.
+
+    Returns dict with:
+      lineup_wrc_weighted:  wRC+ proxy weighted by batting order position
+      lineup_top3_ops:      average OPS of top 3 hitters (positions 1-3)
+      lineup_depth_ops:     average OPS of hitters 4-9
+    """
+    import json as _json
+
+    DEFAULTS = {
+        "lineup_wrc_weighted": LEAGUE_AVG_WRC_PLUS,
+        "lineup_top3_ops":     LEAGUE_AVG_OPS,
+        "lineup_depth_ops":    LEAGUE_AVG_OPS,
+    }
+
+    if not lineup_json:
+        return DEFAULTS
+    try:
+        lineup = _json.loads(lineup_json)
+    except Exception:
+        return DEFAULTS
+    if not lineup:
+        return DEFAULTS
+
+    wrc_values = []
+    ops_values = []
+    weights    = []
+
+    for batter in lineup:
+        bid   = batter.get("id")
+        order = batter.get("batting_order", 9)
+        weight = ORDER_WEIGHTS.get(order, 0.8)
+
+        # Try leakage-safe to-date stats first
+        ops = None
+        wrc = None
+        if bid and not batter_to_date_df.empty:
+            subset = batter_to_date_df[
+                (batter_to_date_df["batter_id"] == bid) &
+                (batter_to_date_df["date"] < pd.Timestamp(game_date))
+            ]
+            if not subset.empty:
+                last = subset.sort_values("date").iloc[-1]
+                ops = last.get("ops_to_date")
+                wrc = last.get("wrc_proxy_to_date")
+
+        # Fall back to season stats
+        if (ops is None or pd.isna(ops)) and not batter_season_stats.empty:
+            if bid in batter_season_stats.index:
+                row = batter_season_stats.loc[bid]
+                ops = row.get("ops")
+                wrc = row.get("wrc_plus_proxy")
+
+        # Fall back to league average
+        if ops is None or pd.isna(ops):
+            ops = LEAGUE_AVG_OPS
+        if wrc is None or pd.isna(wrc):
+            wrc = LEAGUE_AVG_WRC_PLUS
+
+        wrc_values.append(wrc * weight)
+        ops_values.append((order, ops))
+        weights.append(weight)
+
+    if not weights:
+        return DEFAULTS
+
+    lineup_wrc_weighted = sum(wrc_values) / sum(weights)
+    top3_ops = float(np.mean([ops for order, ops in ops_values if order <= 3])) \
+               if any(order <= 3 for order, _ in ops_values) else LEAGUE_AVG_OPS
+    depth_ops = float(np.mean([ops for order, ops in ops_values if order >= 4])) \
+                if any(order >= 4 for order, _ in ops_values) else LEAGUE_AVG_OPS
+
+    return {
+        "lineup_wrc_weighted": float(lineup_wrc_weighted),
+        "lineup_top3_ops":     float(top3_ops),
+        "lineup_depth_ops":    float(depth_ops),
+    }
+
+
+def _compute_sp_workload(
+    pitcher_id,
+    game_date,
+    pitcher_logs: pd.DataFrame,
+) -> dict:
+    """Compute pitcher workload metrics as of game_date.
+
+    Uses only games strictly before game_date (leakage-safe).
+    Returns:
+      sp_rest_days: days since last appearance (cap at 10, default 5)
+      sp_avg_ip:    avg innings pitched per start, last 5 starts (default 5.5)
+    """
+    DEFAULTS = {"sp_rest_days": 5.0, "sp_avg_ip": 5.5}
+
+    if pitcher_id is None or pd.isna(pitcher_id) or pitcher_logs.empty:
+        return DEFAULTS
+
+    pid = int(pitcher_id)
+    prior = pitcher_logs[
+        (pitcher_logs["pitcher_id"] == pid) &
+        (pitcher_logs["date"] < pd.Timestamp(game_date))
+    ].sort_values("date")
+
+    if prior.empty:
+        return DEFAULTS
+
+    last_date = prior.iloc[-1]["date"]
+    rest_days = min((pd.Timestamp(game_date) - last_date).days, 10)
+
+    last5  = prior.tail(5)
+    avg_ip = pd.to_numeric(last5["innings_pitched"], errors="coerce").mean()
+
+    return {
+        "sp_rest_days": float(rest_days),
+        "sp_avg_ip":    float(avg_ip) if pd.notna(avg_ip) else 5.5,
+    }
+
+
 def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
     """Build (team_str, pd.Timestamp) → home/away rolling split stats lookup.
 
@@ -456,7 +642,11 @@ def build_feature_matrix(
     # ---------------------------------------------------------------------------
     # Step 4b: v3 — load pitcher game logs and build leakage-safe to-date stats
     # ---------------------------------------------------------------------------
-    from line_tracker.model.mlb_data import fetch_pitcher_game_logs
+    from line_tracker.model.mlb_data import (
+        fetch_pitcher_game_logs,
+        fetch_batter_game_logs,
+        fetch_batter_season_stats,
+    )
 
     pitcher_to_date_by_season: dict = {}
     for season_val in df["season"].dropna().unique():
@@ -468,6 +658,27 @@ def build_feature_matrix(
             pitcher_to_date_by_season[s] = pd.DataFrame(
                 columns=["pitcher_id", "date", "era_to_date", "whip_to_date", "k9_to_date"]
             )
+
+    # ---------------------------------------------------------------------------
+    # Step 4c: v4 — load batter game logs and season stats for lineup strength
+    # ---------------------------------------------------------------------------
+    batter_to_date_by_season: dict = {}
+    batter_season_stats_by_season: dict = {}
+    pitcher_logs_by_season: dict = {}
+
+    for season_val in df["season"].dropna().unique():
+        s = int(season_val)
+        try:
+            b_logs = fetch_batter_game_logs(s)
+            batter_to_date_by_season[s] = _build_batter_to_date_stats(b_logs)
+            batter_season_stats_by_season[s] = fetch_batter_season_stats(s)
+        except Exception:
+            batter_to_date_by_season[s] = pd.DataFrame()
+            batter_season_stats_by_season[s] = pd.DataFrame()
+        try:
+            pitcher_logs_by_season[s] = fetch_pitcher_game_logs(s)
+        except Exception:
+            pitcher_logs_by_season[s] = pd.DataFrame()
 
     # ---------------------------------------------------------------------------
     # Step 5: Assemble matchup feature rows
@@ -518,12 +729,12 @@ def build_feature_matrix(
         park_runs = pf["runs"] / 100.0
         park_hr = pf["hr"] / 100.0
 
-        # v3 — per-game SP stats (leakage-safe)
+        # v3 — per-game SP stats (leakage-safe, all seasons)
         game_date = date
         ptd = pitcher_to_date_by_season.get(season, pd.DataFrame())
 
         home_sp_id = row.get("home_sp_id")
-        if pd.notna(home_sp_id) and season >= 2024:
+        if pd.notna(home_sp_id):
             h_era, h_whip, h_k9 = _lookup_sp_to_date_stats(home_sp_id, game_date, ptd)
         else:
             h_era  = row.get("home_rotation_era",  LEAGUE_AVG_ERA)
@@ -531,12 +742,24 @@ def build_feature_matrix(
             h_k9   = row.get("home_rotation_k9",   LEAGUE_AVG_K9)
 
         away_sp_id = row.get("away_sp_id")
-        if pd.notna(away_sp_id) and season >= 2024:
+        if pd.notna(away_sp_id):
             a_era, a_whip, a_k9 = _lookup_sp_to_date_stats(away_sp_id, game_date, ptd)
         else:
             a_era  = row.get("away_rotation_era",  LEAGUE_AVG_ERA)
             a_whip = row.get("away_rotation_whip", LEAGUE_AVG_WHIP)
             a_k9   = row.get("away_rotation_k9",   LEAGUE_AVG_K9)
+
+        # v4 — lineup strength
+        btd    = batter_to_date_by_season.get(season, pd.DataFrame())
+        bss    = batter_season_stats_by_season.get(season, pd.DataFrame())
+        ptlogs = pitcher_logs_by_season.get(season, pd.DataFrame())
+
+        home_lineup = _compute_lineup_strength(row.get("home_lineup"), date, btd, bss)
+        away_lineup = _compute_lineup_strength(row.get("away_lineup"), date, btd, bss)
+
+        # v4 — SP workload
+        home_workload = _compute_sp_workload(row.get("home_sp_id"), date, ptlogs)
+        away_workload = _compute_sp_workload(row.get("away_sp_id"), date, ptlogs)
 
         # v2 — bullpen ERA
         home_bp = bullpen_index.get((home, date), {})
@@ -597,6 +820,17 @@ def build_feature_matrix(
             "wind_out_factor": 0.0,
             "temp_f": 72.0,
             "precip_prob": 0.0,
+            # v4 — lineup strength
+            "home_lineup_wrc":       home_lineup["lineup_wrc_weighted"],
+            "away_lineup_wrc":       away_lineup["lineup_wrc_weighted"],
+            "home_lineup_top3_ops":  home_lineup["lineup_top3_ops"],
+            "away_lineup_top3_ops":  away_lineup["lineup_top3_ops"],
+            "lineup_wrc_diff":       home_lineup["lineup_wrc_weighted"] - away_lineup["lineup_wrc_weighted"],
+            "home_lineup_depth_ops": home_lineup["lineup_depth_ops"],
+            # v4 — SP workload
+            "home_sp_rest_days": home_workload["sp_rest_days"],
+            "away_sp_rest_days": away_workload["sp_rest_days"],
+            "home_sp_avg_ip":    home_workload["sp_avg_ip"],
         }
         feature_rows.append(feat)
 
@@ -615,15 +849,20 @@ def build_feature_matrix(
     X = X[valid].reset_index(drop=True)
     y = y[valid].reset_index(drop=True)
 
-    # Ensure all SP columns are float64
-    sp_cols = [
+    # Ensure all SP and lineup columns are float64
+    extra_cols = [
         "home_sp_era", "away_sp_era",
         "home_sp_whip", "away_sp_whip",
         "home_sp_k9", "away_sp_k9",
         "sp_era_diff",
+        "home_lineup_wrc", "away_lineup_wrc",
+        "home_lineup_top3_ops", "away_lineup_top3_ops",
+        "lineup_wrc_diff", "home_lineup_depth_ops",
+        "home_sp_rest_days", "away_sp_rest_days", "home_sp_avg_ip",
     ]
-    for col in sp_cols:
-        X[col] = X[col].astype("float64")
+    for col in extra_cols:
+        if col in X.columns:
+            X[col] = X[col].astype("float64")
 
     logger.info(
         "Feature matrix: %d rows, %d features (from %d games, dropped %d NaN rows)",
