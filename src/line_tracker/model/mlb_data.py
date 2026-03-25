@@ -438,6 +438,42 @@ def load_mlb_training_data(
                 f"Team log join failed for season {year} — check abbreviations"
             )
 
+        # ── Join game starters (v3) ───────────────────────────────────────
+        if year >= 2024:
+            try:
+                starters = fetch_game_starters(year, force_refresh=force_refresh)
+                if not starters.empty:
+                    starters["date_str"] = (
+                        pd.to_datetime(starters["date"]).dt.strftime("%Y-%m-%d")
+                    )
+                    merged = merged.merge(
+                        starters[[
+                            "home_team", "away_team", "date_str",
+                            "home_sp_id", "home_sp_name",
+                            "away_sp_id", "away_sp_name",
+                        ]],
+                        on=["home_team", "away_team", "date_str"],
+                        how="left",
+                    )
+                else:
+                    merged["home_sp_id"] = None
+                    merged["home_sp_name"] = None
+                    merged["away_sp_id"] = None
+                    merged["away_sp_name"] = None
+            except Exception as exc:
+                logger.warning(
+                    "Could not join starters for season %d: %s", year, exc
+                )
+                merged["home_sp_id"] = None
+                merged["home_sp_name"] = None
+                merged["away_sp_id"] = None
+                merged["away_sp_name"] = None
+        else:
+            merged["home_sp_id"] = None
+            merged["home_sp_name"] = None
+            merged["away_sp_id"] = None
+            merged["away_sp_name"] = None
+
         merged["season"] = year
         all_seasons.append(merged)
 
@@ -926,6 +962,237 @@ def fetch_bullpen_stats(
     df = df.sort_values(["team", "date"]).reset_index(drop=True)
     df.to_parquet(cache_path, index=False)
     logger.info("Cached bullpen stats: %d rows for season %d", len(df), season)
+    return df
+
+
+def fetch_game_starters(season: int, force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Fetch the actual starting pitcher for every completed regular-season
+    game in a season using the MLB Stats API box score endpoint.
+    Returns DataFrame with columns:
+      game_pk, date, home_team, away_team,
+      home_sp_id, home_sp_name,
+      away_sp_id, away_sp_name
+    Cache: CACHE_DIR / f"game_starters_{season}.parquet"
+    """
+    cache_path = CACHE_DIR / f"game_starters_{season}.parquet"
+    if not force_refresh and cache_path.exists():
+        logger.debug("Loading game starters from cache: %s", cache_path)
+        return pd.read_parquet(cache_path)
+
+    logger.info("Fetching game starters for season %d ...", season)
+    t0 = time.time()
+
+    # Step 1: Get all completed regular-season games from schedule
+    url = (
+        f"{MLB_STATS_API}/schedule"
+        f"?sportId=1&season={season}&gameType=R&hydrate=team"
+        f"&fields=dates,date,games,gamePk,teams,home,away,team,"
+        f"abbreviation,score,status,abstractGameState"
+    )
+    try:
+        resp = requests.get(url, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.error("Failed to fetch schedule for game starters %d: %s", season, exc)
+        raise
+
+    game_pks = []
+    for date_entry in data.get("dates", []):
+        date_str = date_entry.get("date", "")
+        try:
+            game_date = pd.to_datetime(date_str)
+        except Exception:
+            continue
+        # Skip spring training (before April 1)
+        if game_date.month < 4:
+            continue
+        for game in date_entry.get("games", []):
+            try:
+                state = game.get("status", {}).get("abstractGameState", "")
+                if state != "Final":
+                    continue
+                game_pk = game.get("gamePk")
+                if not game_pk:
+                    continue
+                home_abbrev = game["teams"]["home"]["team"]["abbreviation"]
+                away_abbrev = game["teams"]["away"]["team"]["abbreviation"]
+                game_pks.append({
+                    "game_pk": game_pk,
+                    "date": date_str,
+                    "home_team": _to_canonical(home_abbrev),
+                    "away_team": _to_canonical(away_abbrev),
+                })
+            except Exception as exc:
+                logger.debug("Skipping game in starters fetch: %s", exc)
+                continue
+
+    total = len(game_pks)
+    logger.info("Found %d completed games for season %d", total, season)
+
+    # Step 2: Fetch boxscore for each game to get actual starting pitchers
+    rows = []
+    for i, game_info in enumerate(game_pks, 1):
+        if i % 100 == 0:
+            print(f"  Box scores: {i}/{total} games fetched...")
+        game_pk = game_info["game_pk"]
+        try:
+            box_url = f"{MLB_STATS_API}/game/{game_pk}/boxscore"
+            box_resp = requests.get(box_url, timeout=30)
+            box_resp.raise_for_status()
+            box = box_resp.json()
+
+            home_pitchers = box["teams"]["home"]["pitchers"]
+            away_pitchers = box["teams"]["away"]["pitchers"]
+            home_sp_id = home_pitchers[0] if home_pitchers else None
+            away_sp_id = away_pitchers[0] if away_pitchers else None
+
+            players = {}
+            players.update(box["teams"]["home"].get("players", {}))
+            players.update(box["teams"]["away"].get("players", {}))
+
+            home_sp_name = None
+            if home_sp_id:
+                home_sp_name = (
+                    players.get(f"ID{home_sp_id}", {})
+                    .get("person", {})
+                    .get("fullName")
+                )
+
+            away_sp_name = None
+            if away_sp_id:
+                away_sp_name = (
+                    players.get(f"ID{away_sp_id}", {})
+                    .get("person", {})
+                    .get("fullName")
+                )
+
+            rows.append({
+                "game_pk": game_pk,
+                "date": game_info["date"],
+                "home_team": game_info["home_team"],
+                "away_team": game_info["away_team"],
+                "home_sp_id": home_sp_id,
+                "home_sp_name": home_sp_name,
+                "away_sp_id": away_sp_id,
+                "away_sp_name": away_sp_name,
+            })
+        except Exception as exc:
+            logger.debug("Skipping boxscore for game_pk %s: %s", game_pk, exc)
+            continue
+        time.sleep(0.05)
+
+    logger.info(
+        "fetch_game_starters(%d) complete: %d games in %.1fs",
+        season, len(rows), time.time() - t0,
+    )
+
+    if not rows:
+        df = pd.DataFrame(columns=[
+            "game_pk", "date", "home_team", "away_team",
+            "home_sp_id", "home_sp_name", "away_sp_id", "away_sp_name",
+        ])
+    else:
+        df = pd.DataFrame(rows)
+
+    df.to_parquet(cache_path, index=False)
+    return df
+
+
+def fetch_pitcher_game_logs(season: int, force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Fetch game-by-game pitching appearance logs for all pitchers
+    in a season.
+    Returns one row per pitcher appearance:
+      pitcher_id, pitcher_name, date, season,
+      innings_pitched, earned_runs, hits_allowed,
+      walks_allowed, strikeouts, game_pk
+    Cache: CACHE_DIR / f"pitcher_game_logs_{season}.parquet"
+    """
+    cache_path = CACHE_DIR / f"pitcher_game_logs_{season}.parquet"
+    if not force_refresh and cache_path.exists():
+        logger.debug("Loading pitcher game logs from cache: %s", cache_path)
+        return pd.read_parquet(cache_path)
+
+    logger.info("Fetching pitcher game logs for season %d ...", season)
+    t0 = time.time()
+
+    # Get all pitcher IDs for the season via pitcher season stats
+    try:
+        pitcher_stats = fetch_pitcher_season_stats(season, force_refresh=force_refresh)
+    except Exception as exc:
+        logger.error("Failed to fetch pitcher season stats for %d: %s", season, exc)
+        empty_cols = [
+            "pitcher_id", "pitcher_name", "date", "season",
+            "innings_pitched", "earned_runs", "hits_allowed",
+            "walks_allowed", "strikeouts", "game_pk",
+        ]
+        df = pd.DataFrame(columns=empty_cols)
+        df.to_parquet(cache_path, index=False)
+        return df
+
+    pitcher_ids = pitcher_stats.index.tolist()
+    pitcher_names = pitcher_stats["pitcher_name"].tolist()
+    total = len(pitcher_ids)
+
+    all_rows: list[dict] = []
+
+    for i, (pitcher_id, pitcher_name) in enumerate(zip(pitcher_ids, pitcher_names), 1):
+        if i % 50 == 0:
+            print(f"  Pitcher logs: {i}/{total} ({pitcher_name})...")
+        try:
+            url = (
+                f"{MLB_STATS_API}/people/{pitcher_id}/stats"
+                f"?stats=gameLog&group=pitching&season={season}&gameType=R"
+            )
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for stat_group in data.get("stats", []):
+                for split in stat_group.get("splits", []):
+                    try:
+                        stat = split.get("stat", {})
+                        all_rows.append({
+                            "pitcher_id": int(pitcher_id),
+                            "pitcher_name": pitcher_name,
+                            "date": split["date"],
+                            "season": season,
+                            "innings_pitched": _safe_float(stat.get("inningsPitched")),
+                            "earned_runs": _safe_float(stat.get("earnedRuns")),
+                            "hits_allowed": _safe_float(stat.get("hits")),
+                            "walks_allowed": _safe_float(stat.get("baseOnBalls")),
+                            "strikeouts": _safe_float(stat.get("strikeOuts")),
+                            "game_pk": split.get("game", {}).get("gamePk"),
+                        })
+                    except Exception as exc:
+                        logger.debug(
+                            "Skipping split for pitcher %s: %s", pitcher_id, exc
+                        )
+                        continue
+        except Exception as exc:
+            logger.debug("Skipping pitcher %s (%s): %s", pitcher_id, pitcher_name, exc)
+            continue
+        time.sleep(0.05)
+
+    logger.info(
+        "fetch_pitcher_game_logs(%d) complete: %d rows, %d pitchers in %.1fs",
+        season, len(all_rows), total, time.time() - t0,
+    )
+
+    if not all_rows:
+        empty_cols = [
+            "pitcher_id", "pitcher_name", "date", "season",
+            "innings_pitched", "earned_runs", "hits_allowed",
+            "walks_allowed", "strikeouts", "game_pk",
+        ]
+        df = pd.DataFrame(columns=empty_cols)
+    else:
+        df = pd.DataFrame(all_rows)
+        df["date"] = pd.to_datetime(df["date"])
+
+    df.to_parquet(cache_path, index=False)
     return df
 
 

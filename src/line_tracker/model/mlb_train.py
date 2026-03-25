@@ -241,7 +241,7 @@ def _save_artifact(
     metadata = {
         "sport": "baseball_mlb",
         "model_type": model_type,
-        "version": "v2_pitcher_bullpen_weather_splits",
+        "version": "v3_per_game_sp_to_date",
         "seasons_trained": seasons,
         "n_games": n_games,
         "feature_names": feature_names,
