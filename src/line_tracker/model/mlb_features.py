@@ -1,7 +1,7 @@
 """
-MLB feature engineering — v2 pitcher-aware + bullpen + weather + home/away splits.
+MLB feature engineering — v3 per-game SP stats + bullpen + weather + home/away splits.
 All rolling windows are computed from prior games only (no future leakage).
-v1 features are preserved; v2 adds ~17 new columns.
+v1 features are preserved; v3 replaces rotation columns with per-game SP columns.
 """
 
 from __future__ import annotations
@@ -12,6 +12,10 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+LEAGUE_AVG_ERA  = 4.20
+LEAGUE_AVG_WHIP = 1.30
+LEAGUE_AVG_K9   = 8.50
 
 # Hardcoded 2025 park factors (index 100 = neutral)
 PARK_FACTORS: dict[str, dict[str, int]] = {
@@ -33,7 +37,7 @@ PARK_FACTORS: dict[str, dict[str, int]] = {
 }
 
 # Feature columns produced by build_feature_matrix
-# v1 columns (indices 0-20) are unchanged; v2 appends indices 21-37.
+# v1 columns (indices 0-20) are unchanged; v3 replaces indices 21-27 (SP columns).
 FEATURE_COLUMNS = [
     # v1 — team form (21 features)
     "home_runs_scored_r15",
@@ -57,13 +61,13 @@ FEATURE_COLUMNS = [
     "rest_advantage",
     "park_factor_runs",
     "park_factor_hr",
-    # v2 — starting pitcher rotation quality (7 features)
-    "home_rotation_era",
-    "away_rotation_era",
-    "home_rotation_k9",
-    "away_rotation_k9",
-    "home_rotation_whip",
-    "away_rotation_whip",
+    # v3 — per-game starting pitcher stats (7 features)
+    "home_sp_era",
+    "away_sp_era",
+    "home_sp_whip",
+    "away_sp_whip",
+    "home_sp_k9",
+    "away_sp_k9",
     "sp_era_diff",
     # v2 — bullpen ERA proxy (3 features)
     "home_bullpen_era_r7",
@@ -187,6 +191,83 @@ def _compute_bullpen_index(seasons: list) -> dict:
                 "era_r15": float(row.era_r15),
             }
     return result
+
+
+def _build_pitcher_to_date_stats(pitcher_logs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build leakage-safe cumulative pitcher stats by date.
+    For each pitcher and each appearance, compute stats using ONLY
+    prior appearances (shift(1) before cumulative sums).
+    Returns DataFrame with columns:
+      pitcher_id, date, era_to_date, whip_to_date, k9_to_date
+    """
+    if pitcher_logs.empty:
+        return pd.DataFrame(
+            columns=["pitcher_id", "date", "era_to_date", "whip_to_date", "k9_to_date"]
+        )
+
+    rows = []
+    for pid, group in pitcher_logs.groupby("pitcher_id"):
+        group = group.sort_values("date").copy()
+
+        # Numeric conversion
+        ip  = pd.to_numeric(group["innings_pitched"], errors="coerce").fillna(0)
+        er  = pd.to_numeric(group["earned_runs"],     errors="coerce").fillna(0)
+        h   = pd.to_numeric(group["hits_allowed"],    errors="coerce").fillna(0)
+        bb  = pd.to_numeric(group["walks_allowed"],   errors="coerce").fillna(0)
+        so  = pd.to_numeric(group["strikeouts"],      errors="coerce").fillna(0)
+
+        # Cumulative PRIOR stats — shift(1) excludes current appearance
+        prior_ip   = ip.shift(1).cumsum()
+        prior_er   = er.shift(1).cumsum()
+        prior_h    = h.shift(1).cumsum()
+        prior_bb   = bb.shift(1).cumsum()
+        prior_so   = so.shift(1).cumsum()
+
+        # Compute rates (NaN where prior_ip == 0)
+        era_td  = (9 * prior_er  / prior_ip).where(prior_ip > 0)
+        whip_td = ((prior_h + prior_bb) / prior_ip).where(prior_ip > 0)
+        k9_td   = (9 * prior_so  / prior_ip).where(prior_ip > 0)
+
+        for i, (idx, row) in enumerate(group.iterrows()):
+            rows.append({
+                "pitcher_id":   pid,
+                "date":         row["date"],
+                "era_to_date":  float(era_td.iloc[i])  if pd.notna(era_td.iloc[i])  else None,
+                "whip_to_date": float(whip_td.iloc[i]) if pd.notna(whip_td.iloc[i]) else None,
+                "k9_to_date":   float(k9_td.iloc[i])   if pd.notna(k9_td.iloc[i])   else None,
+            })
+
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result["date"] = pd.to_datetime(result["date"])
+    return result
+
+
+def _lookup_sp_to_date_stats(pitcher_id, game_date, pitcher_to_date_df):
+    """
+    Look up leakage-safe ERA/WHIP/K9 for a pitcher as of game_date.
+    Uses the most recent row strictly BEFORE game_date.
+    Returns (era, whip, k9) — falls back to league averages if missing.
+    """
+    if pitcher_to_date_df.empty or pitcher_id is None or pd.isna(pitcher_id):
+        return LEAGUE_AVG_ERA, LEAGUE_AVG_WHIP, LEAGUE_AVG_K9
+
+    pid = int(pitcher_id)
+    subset = pitcher_to_date_df[
+        (pitcher_to_date_df["pitcher_id"] == pid) &
+        (pitcher_to_date_df["date"] < pd.Timestamp(game_date))
+    ]
+
+    if subset.empty:
+        return LEAGUE_AVG_ERA, LEAGUE_AVG_WHIP, LEAGUE_AVG_K9
+
+    row = subset.sort_values("date").iloc[-1]
+    era  = float(row["era_to_date"])  if pd.notna(row["era_to_date"])  else LEAGUE_AVG_ERA
+    whip = float(row["whip_to_date"]) if pd.notna(row["whip_to_date"]) else LEAGUE_AVG_WHIP
+    k9   = float(row["k9_to_date"])   if pd.notna(row["k9_to_date"])   else LEAGUE_AVG_K9
+
+    return era, whip, k9
 
 
 def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
@@ -367,11 +448,26 @@ def build_feature_matrix(
     rest_index = all_dates.set_index(["team", "date"])["days_rest"]
 
     # ---------------------------------------------------------------------------
-    # Step 4: v2 — precompute rotation quality, bullpen ERA, home/away splits
+    # Step 4: v2 — precompute bullpen ERA and home/away splits
     # ---------------------------------------------------------------------------
-    rotation_lookup = _compute_rotation_quality(unique_seasons)
     bullpen_index = _compute_bullpen_index(unique_seasons)
     splits_index = _compute_home_away_splits(game_logs)
+
+    # ---------------------------------------------------------------------------
+    # Step 4b: v3 — load pitcher game logs and build leakage-safe to-date stats
+    # ---------------------------------------------------------------------------
+    from line_tracker.model.mlb_data import fetch_pitcher_game_logs
+
+    pitcher_to_date_by_season: dict = {}
+    for season_val in df["season"].dropna().unique():
+        s = int(season_val)
+        try:
+            logs = fetch_pitcher_game_logs(s)
+            pitcher_to_date_by_season[s] = _build_pitcher_to_date_stats(logs)
+        except Exception:
+            pitcher_to_date_by_season[s] = pd.DataFrame(
+                columns=["pitcher_id", "date", "era_to_date", "whip_to_date", "k9_to_date"]
+            )
 
     # ---------------------------------------------------------------------------
     # Step 5: Assemble matchup feature rows
@@ -422,12 +518,25 @@ def build_feature_matrix(
         park_runs = pf["runs"] / 100.0
         park_hr = pf["hr"] / 100.0
 
-        # v2 — rotation quality
-        home_rot = rotation_lookup.get((home, season), _ROT_DEFAULTS)
-        away_rot = rotation_lookup.get((away, season), _ROT_DEFAULTS)
-        home_rotation_era = home_rot["rotation_era"]
-        away_rotation_era = away_rot["rotation_era"]
-        sp_era_diff = away_rotation_era - home_rotation_era
+        # v3 — per-game SP stats (leakage-safe)
+        game_date = date
+        ptd = pitcher_to_date_by_season.get(season, pd.DataFrame())
+
+        home_sp_id = row.get("home_sp_id")
+        if pd.notna(home_sp_id) and season >= 2024:
+            h_era, h_whip, h_k9 = _lookup_sp_to_date_stats(home_sp_id, game_date, ptd)
+        else:
+            h_era  = row.get("home_rotation_era",  LEAGUE_AVG_ERA)
+            h_whip = row.get("home_rotation_whip", LEAGUE_AVG_WHIP)
+            h_k9   = row.get("home_rotation_k9",   LEAGUE_AVG_K9)
+
+        away_sp_id = row.get("away_sp_id")
+        if pd.notna(away_sp_id) and season >= 2024:
+            a_era, a_whip, a_k9 = _lookup_sp_to_date_stats(away_sp_id, game_date, ptd)
+        else:
+            a_era  = row.get("away_rotation_era",  LEAGUE_AVG_ERA)
+            a_whip = row.get("away_rotation_whip", LEAGUE_AVG_WHIP)
+            a_k9   = row.get("away_rotation_k9",   LEAGUE_AVG_K9)
 
         # v2 — bullpen ERA
         home_bp = bullpen_index.get((home, date), {})
@@ -467,14 +576,14 @@ def build_feature_matrix(
             "rest_advantage": home_rest - away_rest,
             "park_factor_runs": park_runs,
             "park_factor_hr": park_hr,
-            # v2 — rotation
-            "home_rotation_era": home_rotation_era,
-            "away_rotation_era": away_rotation_era,
-            "home_rotation_k9": home_rot["rotation_k9"],
-            "away_rotation_k9": away_rot["rotation_k9"],
-            "home_rotation_whip": home_rot["rotation_whip"],
-            "away_rotation_whip": away_rot["rotation_whip"],
-            "sp_era_diff": sp_era_diff,
+            # v3 — per-game SP
+            "home_sp_era":  float(h_era),
+            "away_sp_era":  float(a_era),
+            "home_sp_whip": float(h_whip),
+            "away_sp_whip": float(a_whip),
+            "home_sp_k9":   float(h_k9),
+            "away_sp_k9":   float(a_k9),
+            "sp_era_diff":  float(a_era) - float(h_era),
             # v2 — bullpen
             "home_bullpen_era_r7": home_bullpen_era_r7,
             "away_bullpen_era_r7": away_bullpen_era_r7,
@@ -501,10 +610,20 @@ def build_feature_matrix(
     X = pd.DataFrame(feature_rows, columns=FEATURE_COLUMNS)
     y = pd.DataFrame(target_rows)
 
-    # Drop rows where any v1 feature is NaN (v2 features have fallbacks so rarely NaN)
+    # Drop rows where any v1 feature is NaN (v2/v3 features have fallbacks so rarely NaN)
     valid = X.notna().all(axis=1)
     X = X[valid].reset_index(drop=True)
     y = y[valid].reset_index(drop=True)
+
+    # Ensure all SP columns are float64
+    sp_cols = [
+        "home_sp_era", "away_sp_era",
+        "home_sp_whip", "away_sp_whip",
+        "home_sp_k9", "away_sp_k9",
+        "sp_era_diff",
+    ]
+    for col in sp_cols:
+        X[col] = X[col].astype("float64")
 
     logger.info(
         "Feature matrix: %d rows, %d features (from %d games, dropped %d NaN rows)",
