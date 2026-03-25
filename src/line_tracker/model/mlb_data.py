@@ -540,24 +540,40 @@ def fetch_pitcher_season_stats(
 
     logger.info("Fetching pitcher season stats for %d ...", season)
 
-    url = (
-        f"{MLB_STATS_API}/stats"
-        f"?stats=season&group=pitching&gameType=R"
-        f"&season={season}&sportId=1&limit=1000"
-    )
-    try:
-        resp = requests.get(url, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.error("Failed to fetch pitcher stats for season %d: %s", season, exc)
-        raise
+    all_splits: list = []
+    limit = 500
+    offset = 0
+    while True:
+        url = (
+            f"{MLB_STATS_API}/stats"
+            f"?stats=season&group=pitching&gameType=R"
+            f"&season={season}&sportId=1"
+            f"&playerPool=All&limit={limit}&offset={offset}"
+        )
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.error("Failed to fetch pitcher stats for season %d: %s", season, exc)
+            raise
 
-    stat_groups = data.get("stats", [])
-    if not stat_groups:
+        splits = data.get("stats", [{}])[0].get("splits", [])
+        if not splits:
+            break
+
+        all_splits.extend(splits)
+
+        if len(splits) < limit:
+            break
+
+        offset += limit
+        time.sleep(0.1)
+
+    if not all_splits:
         raise ValueError(f"No pitcher stats returned for season {season}")
 
-    splits = stat_groups[0].get("splits", [])
+    splits = all_splits
     records: list[dict] = []
 
     for split in splits:
