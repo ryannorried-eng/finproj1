@@ -332,8 +332,17 @@ def load_mlb_training_data(
     final_cache = CACHE_DIR / f"training_data_{min_s}_{max_s}.parquet"
 
     if final_cache.exists() and not force_refresh:
-        logger.debug("Loading training data from cache: %s", final_cache)
-        return pd.read_parquet(final_cache)
+        _cached = pd.read_parquet(final_cache)
+        if "home_lineup" not in _cached.columns:
+            logger.info(
+                "Training data cache %s is missing v4 lineup columns; invalidating.",
+                final_cache,
+            )
+            final_cache.unlink()
+        else:
+            logger.debug("Loading training data from cache: %s", final_cache)
+            return _cached
+        del _cached
 
     all_seasons: list[pd.DataFrame] = []
 
@@ -442,6 +451,13 @@ def load_mlb_training_data(
         # ── Join game starters (v4: all seasons) ─────────────────────────
         try:
             starters = fetch_game_starters(year, force_refresh=force_refresh)
+            # Stale cache guard: if the cached starters lack lineup columns,
+            # the cache pre-dates v4.  Force a fresh fetch so lineup data is available.
+            if not starters.empty and "home_lineup" not in starters.columns:
+                logger.info(
+                    "game_starters_%d cache missing lineup columns; re-fetching.", year
+                )
+                starters = fetch_game_starters(year, force_refresh=True)
             if not starters.empty:
                 starters["date_str"] = (
                     pd.to_datetime(starters["date"]).dt.strftime("%Y-%m-%d")
