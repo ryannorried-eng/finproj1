@@ -532,6 +532,7 @@ def predict_mlb_games(
     except Exception as exc:
         logger.warning("Could not fetch probable pitchers: %s", exc)
 
+
     pitcher_stats_df: pd.DataFrame | None = None
     try:
         pitcher_stats_df = fetch_pitcher_season_stats(2025)
@@ -593,8 +594,12 @@ def predict_mlb_games(
         away_pitcher_era: float | None = None
 
         if probable_row is not None and pitcher_stats_df is not None:
-            h_pid = probable_row.home_pitcher_id
-            a_pid = probable_row.away_pitcher_id
+            # Convert pitcher IDs from float64 (parquet storage) to int,
+            # guarding against NaN (no pitcher announced yet).
+            h_pid_raw = probable_row.home_pitcher_id
+            a_pid_raw = probable_row.away_pitcher_id
+            h_pid = int(h_pid_raw) if h_pid_raw is not None and pd.notna(h_pid_raw) else None
+            a_pid = int(a_pid_raw) if a_pid_raw is not None and pd.notna(a_pid_raw) else None
             home_pitcher_name = probable_row.home_pitcher_name or None
             away_pitcher_name = probable_row.away_pitcher_name or None
 
