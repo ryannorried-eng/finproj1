@@ -227,15 +227,18 @@ def _train_totals(X, y_totals, tscv):
         y_tr  = y_totals.iloc[train_idx].astype(float)
         y_val = y_totals.iloc[val_idx].astype(float)
 
+        y_tr = y_tr.clip(3, 15)
+        y_val = y_val.clip(3, 15)
+
         model = HistGradientBoostingRegressor(
-            max_iter=300,
-            learning_rate=0.05,
-            max_depth=4,
-            min_samples_leaf=20,
+            max_iter=500,
+            learning_rate=0.03,
+            max_depth=6,
+            min_samples_leaf=10,
             random_state=42,
             early_stopping=True,
             validation_fraction=0.1,
-            n_iter_no_change=20,
+            n_iter_no_change=25,
         )
         model.fit(X_tr, y_tr)
         mae = mean_absolute_error(y_val, model.predict(X_val))
@@ -243,13 +246,14 @@ def _train_totals(X, y_totals, tscv):
 
     # Refit on full dataset
     final_model = HistGradientBoostingRegressor(
-        max_iter=300,
-        learning_rate=0.05,
-        max_depth=4,
-        min_samples_leaf=20,
+        max_iter=500,
+        learning_rate=0.03,
+        max_depth=6,
+        min_samples_leaf=10,
         random_state=42,
     )
-    final_model.fit(X.astype(float), y_totals.astype(float))
+    y_totals_clipped = y_totals.astype(float).clip(3, 15)
+    final_model.fit(X.astype(float), y_totals_clipped)
 
     # HistGradientBoosting does not use a scaler — return None
     return final_model, None, float(np.mean(scores))
@@ -265,24 +269,24 @@ def _train_margin(X, y_margin, tscv):
         y_val = y_margin.iloc[val_idx].astype(float)
 
         model = HistGradientBoostingRegressor(
-            max_iter=300,
-            learning_rate=0.05,
-            max_depth=4,
-            min_samples_leaf=20,
+            max_iter=500,
+            learning_rate=0.03,
+            max_depth=6,
+            min_samples_leaf=10,
             random_state=42,
             early_stopping=True,
             validation_fraction=0.1,
-            n_iter_no_change=20,
+            n_iter_no_change=25,
         )
         model.fit(X_tr, y_tr)
         mae = mean_absolute_error(y_val, model.predict(X_val))
         scores.append(mae)
 
     final_model = HistGradientBoostingRegressor(
-        max_iter=300,
-        learning_rate=0.05,
-        max_depth=4,
-        min_samples_leaf=20,
+        max_iter=500,
+        learning_rate=0.03,
+        max_depth=6,
+        min_samples_leaf=10,
         random_state=42,
     )
     final_model.fit(X.astype(float), y_margin.astype(float))
