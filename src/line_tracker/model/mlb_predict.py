@@ -368,14 +368,44 @@ def predict_mlb_games(
         logger.info("No MLB games found in odds feed for %s", date_str)
         return []
 
-    # Filter to target date by commence_time
+    # Filter to target date by commence_time.
+    # The Odds API returns commence_time in UTC. MLB games in the US start in
+    # the afternoon/evening local time (ET), so a game at 8 pm ET = 00:05 UTC
+    # the *next* day. A raw UTC date-string comparison would incorrectly drop
+    # those evening games. Convert to US/Eastern before comparing the date.
+    try:
+        from zoneinfo import ZoneInfo  # Python 3.9+
+        _ET = ZoneInfo("America/New_York")
+    except Exception:
+        _ET = None  # fallback handled below
+
+    def _game_local_date(ct: str) -> date | None:
+        """Return the US/Eastern calendar date for a UTC ISO commence_time string."""
+        if not ct:
+            return None
+        try:
+            dt = datetime.fromisoformat(ct)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if _ET is not None:
+                return dt.astimezone(_ET).date()
+            # Fallback: use UTC-5 (covers EST; EDT games are UTC-4 so off by at
+            # most one hour, which still gives the correct local date for all
+            # realistic MLB start times)
+            from datetime import timedelta
+            return (dt + timedelta(hours=-5)).date()
+        except (ValueError, TypeError):
+            return None
+
     target_games = []
     for g in odds_games:
         ct = g.get("commence_time", "")
-        if ct and date_str in ct:
-            target_games.append(g)
-        elif not ct:
-            # If no commence_time, include (assume today)
+        local_date = _game_local_date(ct)
+        if local_date is not None:
+            if local_date == target_date:
+                target_games.append(g)
+        else:
+            # No commence_time — assume today
             target_games.append(g)
 
     if not target_games:
