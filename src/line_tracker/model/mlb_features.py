@@ -95,6 +95,10 @@ FEATURE_COLUMNS = [
     "home_sp_rest_days",
     "away_sp_rest_days",
     "home_sp_avg_ip",
+    # v5 — bullpen exposure (3 features)
+    "home_bullpen_exposure",
+    "away_bullpen_exposure",
+    "bullpen_exposure_diff",
 ]
 
 
@@ -761,6 +765,11 @@ def build_feature_matrix(
         home_workload = _compute_sp_workload(row.get("home_sp_id"), date, ptlogs)
         away_workload = _compute_sp_workload(row.get("away_sp_id"), date, ptlogs)
 
+        # v5 — bullpen exposure
+        home_bp_exposure = 9.0 - home_workload["sp_avg_ip"]
+        away_bp_exposure = 9.0 - away_workload["sp_avg_ip"]
+        bp_exposure_diff = home_bp_exposure - away_bp_exposure
+
         # v2 — bullpen ERA
         home_bp = bullpen_index.get((home, date), {})
         away_bp = bullpen_index.get((away, date), {})
@@ -831,6 +840,10 @@ def build_feature_matrix(
             "home_sp_rest_days": home_workload["sp_rest_days"],
             "away_sp_rest_days": away_workload["sp_rest_days"],
             "home_sp_avg_ip":    home_workload["sp_avg_ip"],
+            # v5 — bullpen exposure
+            "home_bullpen_exposure": float(home_bp_exposure),
+            "away_bullpen_exposure": float(away_bp_exposure),
+            "bullpen_exposure_diff": float(bp_exposure_diff),
         }
         feature_rows.append(feat)
 
@@ -859,6 +872,7 @@ def build_feature_matrix(
         "home_lineup_top3_ops", "away_lineup_top3_ops",
         "lineup_wrc_diff", "home_lineup_depth_ops",
         "home_sp_rest_days", "away_sp_rest_days", "home_sp_avg_ip",
+        "home_bullpen_exposure", "away_bullpen_exposure", "bullpen_exposure_diff",
     ]
     for col in extra_cols:
         if col in X.columns:
