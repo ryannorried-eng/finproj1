@@ -311,6 +311,8 @@ def build_prediction_features(
 
     sp_era_diff_v3 = away_sp_era - home_sp_era
 
+    from line_tracker.model.mlb_features import LEAGUE_AVG_OPS, LEAGUE_AVG_WRC_PLUS
+
     feat = {
         # v1
         "home_runs_scored_r15": home_stats["runs_scored_r15"],
@@ -355,6 +357,17 @@ def build_prediction_features(
         "wind_out_factor": wind_out_factor,
         "temp_f": temp_f,
         "precip_prob": precip_prob,
+        # v4 — lineup strength (neutral defaults for prediction; real lineups not yet integrated)
+        "home_lineup_wrc":       LEAGUE_AVG_WRC_PLUS,
+        "away_lineup_wrc":       LEAGUE_AVG_WRC_PLUS,
+        "home_lineup_top3_ops":  LEAGUE_AVG_OPS,
+        "away_lineup_top3_ops":  LEAGUE_AVG_OPS,
+        "lineup_wrc_diff":       0.0,
+        "home_lineup_depth_ops": LEAGUE_AVG_OPS,
+        # v4 — SP workload (neutral defaults)
+        "home_sp_rest_days": 5.0,
+        "away_sp_rest_days": 5.0,
+        "home_sp_avg_ip":    5.5,
     }
     return pd.DataFrame([feat], columns=FEATURE_COLUMNS)
 
@@ -667,17 +680,29 @@ def predict_mlb_games(
 
         # --- Moneyline ---
         ml_art = artifacts["moneyline"]
-        X_ml = np.nan_to_num(ml_art["scaler"].transform(X), nan=0.0)
+        ml_scaler = ml_art["scaler"]
+        if ml_scaler is not None:
+            X_ml = np.nan_to_num(ml_scaler.transform(X), nan=0.0)
+        else:
+            X_ml = np.nan_to_num(X.astype(float).values, nan=0.0)
         home_win_prob = float(ml_art["model"].predict_proba(X_ml)[0][1])
 
         # --- Margin ---
         mg_art = artifacts["margin"]
-        X_mg = np.nan_to_num(mg_art["scaler"].transform(X), nan=0.0)
+        mg_scaler = mg_art["scaler"]
+        if mg_scaler is not None:
+            X_mg = np.nan_to_num(mg_scaler.transform(X), nan=0.0)
+        else:
+            X_mg = np.nan_to_num(X.astype(float).values, nan=0.0)
         run_diff = float(mg_art["model"].predict(X_mg)[0])
 
         # --- Totals ---
         tot_art = artifacts["totals"]
-        X_tot = np.nan_to_num(tot_art["scaler"].transform(X), nan=0.0)
+        tot_scaler = tot_art["scaler"]
+        if tot_scaler is not None:
+            X_tot = np.nan_to_num(tot_scaler.transform(X), nan=0.0)
+        else:
+            X_tot = np.nan_to_num(X.astype(float).values, nan=0.0)
         total_runs = float(tot_art["model"].predict(X_tot)[0])
 
         # Derived odds

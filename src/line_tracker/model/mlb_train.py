@@ -17,6 +17,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.metrics import accuracy_score, mean_absolute_error
 from sklearn.model_selection import TimeSeriesSplit
@@ -115,10 +116,7 @@ def train_mlb_models(
     # Train margin model
     # ------------------------------------------------------------------
     print("Training mlb_margin...")
-    mg_model, mg_scaler, mg_cv_score = _train_regression(
-        X, y["run_diff"], tscv,
-        alphas=[0.1, 1.0, 10.0, 100.0],
-    )
+    mg_model, mg_scaler, mg_cv_score = _train_margin(X, y["run_diff"], tscv)
     mg_path = _save_artifact(
         model=mg_model,
         scaler=mg_scaler,
@@ -137,10 +135,7 @@ def train_mlb_models(
     # Train totals model
     # ------------------------------------------------------------------
     print("Training mlb_totals...")
-    tot_model, tot_scaler, tot_cv_score = _train_regression(
-        X, y["total_runs"], tscv,
-        alphas=[0.1, 1.0, 100.0],
-    )
+    tot_model, tot_scaler, tot_cv_score = _train_totals(X, y["total_runs"], tscv)
     tot_path = _save_artifact(
         model=tot_model,
         scaler=tot_scaler,
@@ -194,7 +189,7 @@ def _train_moneyline(X, y_target, tscv):
 
 
 def _train_regression(X, y_target, tscv, alphas):
-    """Train RidgeCV with TimeSeriesSplit CV."""
+    """Train RidgeCV with TimeSeriesSplit CV (kept for moneyline fallback)."""
     X_arr = X.values
     y_arr = y_target.values
 
@@ -223,6 +218,78 @@ def _train_regression(X, y_target, tscv, alphas):
     return model, scaler, cv_score
 
 
+def _train_totals(X, y_totals, tscv):
+    """Train HistGradientBoostingRegressor for total runs with TimeSeriesSplit CV."""
+    scores = []
+    for train_idx, val_idx in tscv.split(X):
+        X_tr  = X.iloc[train_idx].astype(float)
+        X_val = X.iloc[val_idx].astype(float)
+        y_tr  = y_totals.iloc[train_idx].astype(float)
+        y_val = y_totals.iloc[val_idx].astype(float)
+
+        model = HistGradientBoostingRegressor(
+            max_iter=300,
+            learning_rate=0.05,
+            max_depth=4,
+            min_samples_leaf=20,
+            random_state=42,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=20,
+        )
+        model.fit(X_tr, y_tr)
+        mae = mean_absolute_error(y_val, model.predict(X_val))
+        scores.append(mae)
+
+    # Refit on full dataset
+    final_model = HistGradientBoostingRegressor(
+        max_iter=300,
+        learning_rate=0.05,
+        max_depth=4,
+        min_samples_leaf=20,
+        random_state=42,
+    )
+    final_model.fit(X.astype(float), y_totals.astype(float))
+
+    # HistGradientBoosting does not use a scaler — return None
+    return final_model, None, float(np.mean(scores))
+
+
+def _train_margin(X, y_margin, tscv):
+    """Train HistGradientBoostingRegressor for run margin with TimeSeriesSplit CV."""
+    scores = []
+    for train_idx, val_idx in tscv.split(X):
+        X_tr  = X.iloc[train_idx].astype(float)
+        X_val = X.iloc[val_idx].astype(float)
+        y_tr  = y_margin.iloc[train_idx].astype(float)
+        y_val = y_margin.iloc[val_idx].astype(float)
+
+        model = HistGradientBoostingRegressor(
+            max_iter=300,
+            learning_rate=0.05,
+            max_depth=4,
+            min_samples_leaf=20,
+            random_state=42,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=20,
+        )
+        model.fit(X_tr, y_tr)
+        mae = mean_absolute_error(y_val, model.predict(X_val))
+        scores.append(mae)
+
+    final_model = HistGradientBoostingRegressor(
+        max_iter=300,
+        learning_rate=0.05,
+        max_depth=4,
+        min_samples_leaf=20,
+        random_state=42,
+    )
+    final_model.fit(X.astype(float), y_margin.astype(float))
+
+    return final_model, None, float(np.mean(scores))
+
+
 def _save_artifact(
     model,
     scaler: StandardScaler,
@@ -241,7 +308,7 @@ def _save_artifact(
     metadata = {
         "sport": "baseball_mlb",
         "model_type": model_type,
-        "version": "v3_per_game_sp_to_date",
+        "version": "v4_lineup_strength",
         "seasons_trained": seasons,
         "n_games": n_games,
         "feature_names": feature_names,
