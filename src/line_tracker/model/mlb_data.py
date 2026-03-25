@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from pathlib import Path
 
@@ -719,6 +720,19 @@ def fetch_probable_pitchers_rotowire(game_date) -> pd.DataFrame:
                 away_abbr = _to_canonical(away_abbr_raw.get_text(strip=True))
                 home_abbr = _to_canonical(home_abbr_raw.get_text(strip=True))
 
+                # Validate game date from the matchup href (e.g. /baseball/box-score/...-2026-03-26-12345)
+                matchup_link = box.find("a", class_="lineup__matchup")
+                href = matchup_link.get("href", "") if matchup_link else ""
+                href_date_m = re.search(r"(\d{4}-\d{2}-\d{2})", href)
+                if href_date_m:
+                    href_date = href_date_m.group(1)
+                    if href_date != date_str:
+                        logger.debug(
+                            "Skipping Rotowire box %s @ %s for date %s (requested %s)",
+                            away_abbr, home_abbr, href_date, date_str,
+                        )
+                        continue
+
                 # Extract probable pitcher from the highlighted player slot in each list
                 def _get_pitcher(ul_el):
                     if ul_el is None:
@@ -753,7 +767,15 @@ def fetch_probable_pitchers_rotowire(game_date) -> pd.DataFrame:
         logger.warning("Rotowire parse failed for %s: %s", date_str, exc)
         return pd.DataFrame(columns=_PROBABLE_EMPTY_COLS)
 
-    df = pd.DataFrame(records) if records else pd.DataFrame(columns=_PROBABLE_EMPTY_COLS)
+    if not records:
+        logger.info(
+            "Rotowire returned no valid games for %s (wrong-date or no data); "
+            "falling back to MLB Stats API.",
+            date_str,
+        )
+        return _fetch_probable_pitchers_mlb(game_date)
+
+    df = pd.DataFrame(records)
     df.to_parquet(cache_path, index=False)
     logger.info("Probable pitchers (Rotowire) for %s: %d games", date_str, len(df))
     return df
@@ -798,6 +820,21 @@ def fetch_probable_pitchers(
     roto_df = fetch_probable_pitchers_rotowire(game_date)
     if roto_df.empty:
         return mlb_df  # return MLB data even if incomplete
+
+    # Validate Rotowire games against MLB API schedule; drop any that don't match
+    if not mlb_df.empty and not roto_df.empty:
+        mlb_pairs = set(zip(mlb_df["home_team"], mlb_df["away_team"]))
+        valid_mask = roto_df.apply(
+            lambda r: (r["home_team"], r["away_team"]) in mlb_pairs, axis=1
+        )
+        for _, row in roto_df[~valid_mask].iterrows():
+            logger.warning(
+                "Rotowire game %s @ %s not found in MLB schedule — dropping.",
+                row["away_team"], row["home_team"],
+            )
+        roto_df = roto_df[valid_mask].reset_index(drop=True)
+        if roto_df.empty:
+            return mlb_df
 
     # Build name → id lookup from pitcher_season_stats
     try:
