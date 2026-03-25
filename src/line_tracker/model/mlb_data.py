@@ -563,10 +563,30 @@ def fetch_pitcher_season_stats(
     return df
 
 
-def fetch_probable_pitchers(
+ROTOWIRE_TO_BR: dict[str, str] = {
+    "Arizona": "ARI", "Atlanta": "ATL", "Baltimore": "BAL",
+    "Boston": "BOS", "Chicago Cubs": "CHC", "Chicago White Sox": "CHW",
+    "Cincinnati": "CIN", "Cleveland": "CLE", "Colorado": "COL",
+    "Detroit": "DET", "Houston": "HOU", "Kansas City": "KCR",
+    "LA Angels": "LAA", "LA Dodgers": "LAD", "Miami": "MIA",
+    "Milwaukee": "MIL", "Minnesota": "MIN", "NY Mets": "NYM",
+    "NY Yankees": "NYY", "Oakland": "OAK", "Philadelphia": "PHI",
+    "Pittsburgh": "PIT", "San Diego": "SDP", "Seattle": "SEA",
+    "San Francisco": "SFG", "St. Louis": "STL", "Tampa Bay": "TBR",
+    "Texas": "TEX", "Toronto": "TOR", "Washington": "WSN",
+}
+
+_PROBABLE_EMPTY_COLS = [
+    "game_pk", "home_team", "away_team",
+    "home_pitcher_id", "home_pitcher_name",
+    "away_pitcher_id", "away_pitcher_name",
+]
+
+
+def _fetch_probable_pitchers_mlb(
     game_date, force_refresh: bool = False
 ) -> pd.DataFrame:
-    """Fetch probable starters for all games on a given date.
+    """Fetch probable starters from MLB Stats API for all games on a given date.
 
     Cache expires after 6 hours (probable pitchers change day-of).
 
@@ -594,7 +614,7 @@ def fetch_probable_pitchers(
     url = (
         f"{MLB_STATS_API}/schedule"
         f"?sportId=1&date={date_str}&gameType=R"
-        f"&hydrate=probablePitcher(note)"
+        f"&hydrate=probablePitcher(note),team"
     )
     try:
         resp = requests.get(url, timeout=30)
@@ -623,15 +643,201 @@ def fetch_probable_pitchers(
                 logger.debug("Skipping game in probable pitchers fetch: %s", exc)
                 continue
 
-    _EMPTY_COLS = [
-        "game_pk", "home_team", "away_team",
-        "home_pitcher_id", "home_pitcher_name",
-        "away_pitcher_id", "away_pitcher_name",
-    ]
-    df = pd.DataFrame(records) if records else pd.DataFrame(columns=_EMPTY_COLS)
+    df = pd.DataFrame(records) if records else pd.DataFrame(columns=_PROBABLE_EMPTY_COLS)
     df.to_parquet(cache_path, index=False)
-    logger.info("Probable pitchers for %s: %d games", date_str, len(df))
+    logger.info("Probable pitchers (MLB API) for %s: %d games", date_str, len(df))
     return df
+
+
+def fetch_probable_pitchers_rotowire(game_date) -> pd.DataFrame:
+    """Scrape probable starters from Rotowire.
+
+    URL: https://www.rotowire.com/baseball/daily-lineups.php
+
+    Returns same schema as fetch_probable_pitchers():
+        game_pk, home_team, away_team,
+        home_pitcher_id, home_pitcher_name,
+        away_pitcher_id, away_pitcher_name
+
+    pitcher_id will be None (Rotowire doesn't have MLB IDs).
+    pitcher_name will be the full name string.
+
+    Cache path: CACHE_DIR / f"probable_pitchers_rotowire_{game_date}.parquet"
+    Cache expiry: 6 hours (same as MLB Stats API version)
+    """
+    from bs4 import BeautifulSoup
+
+    if hasattr(game_date, "strftime"):
+        date_str = game_date.strftime("%Y-%m-%d")
+    else:
+        date_str = str(game_date)
+
+    cache_path = CACHE_DIR / f"probable_pitchers_rotowire_{date_str}.parquet"
+
+    if cache_path.exists():
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600.0
+        if age_hours < 6:
+            logger.debug("Loading Rotowire probable pitchers from cache: %s", cache_path)
+            return pd.read_parquet(cache_path)
+
+    logger.info("Scraping Rotowire probable pitchers for %s ...", date_str)
+
+    url = f"https://www.rotowire.com/baseball/daily-lineups.php?date={date_str}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+
+    try:
+        time.sleep(1)
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.warning("Rotowire fetch failed for %s: %s", date_str, exc)
+        return pd.DataFrame(columns=_PROBABLE_EMPTY_COLS)
+
+    try:
+        soup = BeautifulSoup(resp.text, "html.parser")
+        game_boxes = soup.find_all("div", class_="lineup__box")
+
+        records: list[dict] = []
+        for box in game_boxes:
+            try:
+                # Team abbreviations are in lineup__abbr divs inside is-visit / is-home
+                visit_team_el = box.find("div", class_="lineup__team is-visit")
+                home_team_el = box.find("div", class_="lineup__team is-home")
+                if not visit_team_el or not home_team_el:
+                    continue
+
+                away_abbr_raw = visit_team_el.find("div", class_="lineup__abbr")
+                home_abbr_raw = home_team_el.find("div", class_="lineup__abbr")
+                if not away_abbr_raw or not home_abbr_raw:
+                    continue
+
+                away_abbr = _to_canonical(away_abbr_raw.get_text(strip=True))
+                home_abbr = _to_canonical(home_abbr_raw.get_text(strip=True))
+
+                # Extract probable pitcher from the highlighted player slot in each list
+                def _get_pitcher(ul_el):
+                    if ul_el is None:
+                        return None
+                    hi = ul_el.find("li", class_="lineup__player-highlight")
+                    if hi is None:
+                        return None
+                    name_div = hi.find("div", class_="lineup__player-highlight-name")
+                    if name_div is None:
+                        return None
+                    a_tag = name_div.find("a")
+                    name = a_tag.get_text(strip=True) if a_tag else name_div.get_text(strip=True)
+                    return name if name and name.lower() not in ("tbd", "") else None
+
+                visit_list = box.find("ul", class_="lineup__list is-visit")
+                home_list = box.find("ul", class_="lineup__list is-home")
+
+                records.append({
+                    "game_pk": None,
+                    "home_team": home_abbr,
+                    "away_team": away_abbr,
+                    "home_pitcher_id": None,
+                    "home_pitcher_name": _get_pitcher(home_list),
+                    "away_pitcher_id": None,
+                    "away_pitcher_name": _get_pitcher(visit_list),
+                })
+            except Exception as exc:
+                logger.debug("Skipping Rotowire game box: %s", exc)
+                continue
+
+    except Exception as exc:
+        logger.warning("Rotowire parse failed for %s: %s", date_str, exc)
+        return pd.DataFrame(columns=_PROBABLE_EMPTY_COLS)
+
+    df = pd.DataFrame(records) if records else pd.DataFrame(columns=_PROBABLE_EMPTY_COLS)
+    df.to_parquet(cache_path, index=False)
+    logger.info("Probable pitchers (Rotowire) for %s: %d games", date_str, len(df))
+    return df
+
+
+def fetch_probable_pitchers(
+    game_date, force_refresh: bool = False
+) -> pd.DataFrame:
+    """Fetch probable starters with fallback chain.
+
+    1. MLB Stats API (primary)
+    2. Rotowire (fallback if MLB API returns empty or incomplete)
+
+    Merges results: MLB API provides pitcher_id, Rotowire provides
+    reliable names. If MLB API has the game but no pitcher_id,
+    tries to match Rotowire name → pitcher_id via pitcher_stats lookup.
+
+    Returns
+    -------
+    DataFrame with columns: game_pk, home_team, away_team,
+        home_pitcher_id, home_pitcher_name, away_pitcher_id, away_pitcher_name.
+    """
+    # Try MLB Stats API first
+    mlb_df = _fetch_probable_pitchers_mlb(game_date, force_refresh)
+
+    # If MLB API returned pitchers for 80%+ of games, use it as-is
+    if not mlb_df.empty:
+        games_with_pitchers = mlb_df[
+            mlb_df["home_pitcher_name"].notna() &
+            mlb_df["away_pitcher_name"].notna()
+        ]
+        if len(games_with_pitchers) >= len(mlb_df) * 0.8:
+            return mlb_df
+
+    missing = len(mlb_df) - (
+        int(mlb_df["home_pitcher_name"].notna().sum()) if not mlb_df.empty else 0
+    )
+    print(
+        f"MLB API missing pitchers for {missing} games, trying Rotowire..."
+    )
+
+    roto_df = fetch_probable_pitchers_rotowire(game_date)
+    if roto_df.empty:
+        return mlb_df  # return MLB data even if incomplete
+
+    # Build name → id lookup from pitcher_season_stats
+    try:
+        from datetime import date as _date
+        game_date_obj = game_date if hasattr(game_date, "year") else _date.fromisoformat(str(game_date))
+        pitcher_stats = fetch_pitcher_season_stats(game_date_obj.year)
+        name_to_id = dict(zip(pitcher_stats["pitcher_name"], pitcher_stats.index))
+    except Exception:
+        name_to_id = {}
+
+    # For each Rotowire row, try to resolve pitcher IDs
+    for idx, row in roto_df.iterrows():
+        for side in ["home", "away"]:
+            name = row.get(f"{side}_pitcher_name")
+            if name and pd.isna(row.get(f"{side}_pitcher_id")):
+                pitcher_id = name_to_id.get(name)
+                roto_df.at[idx, f"{side}_pitcher_id"] = pitcher_id
+
+    if mlb_df.empty:
+        return roto_df[_PROBABLE_EMPTY_COLS]
+
+    # Merge MLB and Rotowire: prefer MLB where available, fill gaps with Rotowire
+    merged = mlb_df.merge(
+        roto_df[["home_team", "away_team",
+                 "home_pitcher_name", "away_pitcher_name",
+                 "home_pitcher_id", "away_pitcher_id"]],
+        on=["home_team", "away_team"],
+        how="left",
+        suffixes=("_mlb", "_roto"),
+    )
+
+    for side in ["home", "away"]:
+        merged[f"{side}_pitcher_name"] = merged[f"{side}_pitcher_name_mlb"].fillna(
+            merged[f"{side}_pitcher_name_roto"]
+        )
+        merged[f"{side}_pitcher_id"] = merged[f"{side}_pitcher_id_mlb"].fillna(
+            merged[f"{side}_pitcher_id_roto"]
+        )
+
+    return merged[_PROBABLE_EMPTY_COLS]
 
 
 def fetch_bullpen_stats(
