@@ -15,7 +15,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from line_tracker.model.mlb_features import FEATURE_COLUMNS, PARK_FACTORS
+from line_tracker.model.mlb_features import FEATURE_COLUMNS, PARK_FACTORS, _ROT_DEFAULTS, _BP_DEFAULT_ERA
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,15 @@ def get_trailing_stats(season: int = 2025) -> dict[str, dict]:
             (last10["runs_scored"] - last10["runs_allowed"]).mean()
         ) if len(last10) > 0 else 0.0
 
+        # v2 — home/away splits from last N home/away games
+        home_games = group[group["home_away"] == "H"].tail(15)
+        away_games = group[group["home_away"] == "A"].tail(15)
+
+        rs_home_r15 = float(home_games["runs_scored"].mean()) if home_games["runs_scored"].notna().any() else rs15
+        ra_home_r15 = float(home_games["runs_allowed"].mean()) if home_games["runs_allowed"].notna().any() else ra15
+        rs_away_r15 = float(away_games["runs_scored"].mean()) if away_games["runs_scored"].notna().any() else rs15
+        ra_away_r15 = float(away_games["runs_allowed"].mean()) if away_games["runs_allowed"].notna().any() else ra15
+
         result[str(team)] = {
             "runs_scored_r15": rs15,
             "runs_allowed_r15": ra15,
@@ -139,6 +148,11 @@ def get_trailing_stats(season: int = 2025) -> dict[str, dict]:
             "k_rate_r15": k15,
             "bb_rate_r15": bb15,
             "run_diff_r10": rd10,
+            # v2 splits
+            "runs_scored_home_r15": rs_home_r15,
+            "runs_allowed_home_r15": ra_home_r15,
+            "runs_scored_away_r15": rs_away_r15,
+            "runs_allowed_away_r15": ra_away_r15,
         }
 
     # Cache as parquet
@@ -173,21 +187,35 @@ def build_prediction_features(
     trailing_stats: dict[str, dict],
     home_days_rest: int = 1,
     away_days_rest: int = 1,
+    rotation_lookup: dict | None = None,
+    season: int = 2025,
+    home_pitcher_stats: dict | None = None,
+    away_pitcher_stats: dict | None = None,
+    home_bullpen_era: float | None = None,
+    away_bullpen_era: float | None = None,
+    weather: dict | None = None,
 ) -> pd.DataFrame:
     """Build a single-row feature DataFrame for a game prediction.
 
     Parameters
     ----------
-    home_team_br:
-        Home team BR abbreviation (e.g. "LAD").
-    away_team_br:
-        Away team BR abbreviation (e.g. "SFG").
+    home_team_br, away_team_br:
+        Team BR abbreviations (e.g. "LAD", "SFG").
     trailing_stats:
-        Dict of {team_abbr: {feature: value}} from get_trailing_stats().
-    home_days_rest:
-        Days since home team's last game (default: 1, capped at 7).
-    away_days_rest:
-        Days since away team's last game (default: 1, capped at 7).
+        Dict from get_trailing_stats().
+    home_days_rest, away_days_rest:
+        Days rest, capped at 7.
+    rotation_lookup:
+        Optional {(team, season): rotation_stats} from _compute_rotation_quality.
+    season:
+        Season year for rotation lookup.
+    home_pitcher_stats, away_pitcher_stats:
+        Optional individual SP stats dict with keys: era, k9, whip.
+        When provided, overrides rotation averages.
+    home_bullpen_era, away_bullpen_era:
+        Optional bullpen ERA_r7 values. Falls back to league average.
+    weather:
+        Optional weather dict with keys: wind_out_factor, temp_f, precip_prob.
 
     Returns
     -------
@@ -197,6 +225,8 @@ def build_prediction_features(
         "runs_scored_r15": 4.5, "runs_allowed_r15": 4.5,
         "run_diff_r15": 0.0, "k_rate_r15": 0.20,
         "bb_rate_r15": 0.09, "run_diff_r10": 0.0,
+        "runs_scored_home_r15": 4.5, "runs_allowed_home_r15": 4.5,
+        "runs_scored_away_r15": 4.5, "runs_allowed_away_r15": 4.5,
     }
     home_stats = trailing_stats.get(home_team_br, avg)
     away_stats = trailing_stats.get(away_team_br, avg)
@@ -206,7 +236,58 @@ def build_prediction_features(
 
     pf = PARK_FACTORS.get(home_team_br, {"runs": 100, "hr": 100})
 
+    # v2 — rotation quality
+    if rotation_lookup is not None:
+        home_rot = rotation_lookup.get((home_team_br, season), _ROT_DEFAULTS)
+        away_rot = rotation_lookup.get((away_team_br, season), _ROT_DEFAULTS)
+    else:
+        home_rot = _ROT_DEFAULTS.copy()
+        away_rot = _ROT_DEFAULTS.copy()
+
+    # Override rotation with actual probable pitcher if available
+    if home_pitcher_stats is not None:
+        home_rotation_era = float(home_pitcher_stats.get("era") or home_rot["rotation_era"])
+        home_rotation_k9 = float(home_pitcher_stats.get("k9") or home_rot["rotation_k9"])
+        home_rotation_whip = float(home_pitcher_stats.get("whip") or home_rot["rotation_whip"])
+    else:
+        home_rotation_era = home_rot["rotation_era"]
+        home_rotation_k9 = home_rot["rotation_k9"]
+        home_rotation_whip = home_rot["rotation_whip"]
+
+    if away_pitcher_stats is not None:
+        away_rotation_era = float(away_pitcher_stats.get("era") or away_rot["rotation_era"])
+        away_rotation_k9 = float(away_pitcher_stats.get("k9") or away_rot["rotation_k9"])
+        away_rotation_whip = float(away_pitcher_stats.get("whip") or away_rot["rotation_whip"])
+    else:
+        away_rotation_era = away_rot["rotation_era"]
+        away_rotation_k9 = away_rot["rotation_k9"]
+        away_rotation_whip = away_rot["rotation_whip"]
+
+    sp_era_diff = away_rotation_era - home_rotation_era
+
+    # v2 — bullpen
+    h_bp_era = float(home_bullpen_era) if home_bullpen_era is not None else _BP_DEFAULT_ERA
+    a_bp_era = float(away_bullpen_era) if away_bullpen_era is not None else _BP_DEFAULT_ERA
+    bullpen_era_diff = a_bp_era - h_bp_era
+
+    # v2 — home/away splits
+    home_rs_home = home_stats.get("runs_scored_home_r15", home_stats["runs_scored_r15"])
+    home_ra_home = home_stats.get("runs_allowed_home_r15", home_stats["runs_allowed_r15"])
+    away_rs_away = away_stats.get("runs_scored_away_r15", away_stats["runs_scored_r15"])
+    away_ra_away = away_stats.get("runs_allowed_away_r15", away_stats["runs_allowed_r15"])
+
+    # v2 — weather (use real values if provided, else neutral)
+    if weather is not None:
+        wind_out_factor = float(weather.get("wind_out_factor", 0.0))
+        temp_f = float(weather.get("temp_f", 72.0))
+        precip_prob = float(weather.get("precip_prob", 0.0))
+    else:
+        wind_out_factor = 0.0
+        temp_f = 72.0
+        precip_prob = 0.0
+
     feat = {
+        # v1
         "home_runs_scored_r15": home_stats["runs_scored_r15"],
         "home_runs_allowed_r15": home_stats["runs_allowed_r15"],
         "home_run_diff_r15": home_stats["run_diff_r15"],
@@ -228,6 +309,27 @@ def build_prediction_features(
         "rest_advantage": float(home_rest - away_rest),
         "park_factor_runs": pf["runs"] / 100.0,
         "park_factor_hr": pf["hr"] / 100.0,
+        # v2 — rotation
+        "home_rotation_era": home_rotation_era,
+        "away_rotation_era": away_rotation_era,
+        "home_rotation_k9": home_rotation_k9,
+        "away_rotation_k9": away_rotation_k9,
+        "home_rotation_whip": home_rotation_whip,
+        "away_rotation_whip": away_rotation_whip,
+        "sp_era_diff": sp_era_diff,
+        # v2 — bullpen
+        "home_bullpen_era_r7": h_bp_era,
+        "away_bullpen_era_r7": a_bp_era,
+        "bullpen_era_diff": bullpen_era_diff,
+        # v2 — splits
+        "home_team_runs_scored_home_r15": home_rs_home,
+        "away_team_runs_scored_away_r15": away_rs_away,
+        "home_team_runs_allowed_home_r15": home_ra_home,
+        "away_team_runs_allowed_away_r15": away_ra_away,
+        # v2 — weather
+        "wind_out_factor": wind_out_factor,
+        "temp_f": temp_f,
+        "precip_prob": precip_prob,
     }
     return pd.DataFrame([feat], columns=FEATURE_COLUMNS)
 
@@ -412,8 +514,58 @@ def predict_mlb_games(
         logger.info("No MLB games for %s after date filter", date_str)
         return []
 
-    # Load trailing stats
+    # Load trailing stats and v2 data
     trailing_stats = get_trailing_stats(season=2025)
+
+    # v2 — fetch probable pitchers and pitcher season stats
+    from line_tracker.model.mlb_data import (
+        fetch_probable_pitchers,
+        fetch_pitcher_season_stats,
+        fetch_bullpen_stats,
+        fetch_weather,
+    )
+    from line_tracker.model.mlb_features import _compute_rotation_quality
+
+    probables_df: pd.DataFrame | None = None
+    try:
+        probables_df = fetch_probable_pitchers(target_date)
+    except Exception as exc:
+        logger.warning("Could not fetch probable pitchers: %s", exc)
+
+    pitcher_stats_df: pd.DataFrame | None = None
+    try:
+        pitcher_stats_df = fetch_pitcher_season_stats(2025)
+    except Exception as exc:
+        logger.warning("Could not fetch pitcher stats: %s", exc)
+
+    rotation_lookup: dict = {}
+    try:
+        rotation_lookup = _compute_rotation_quality([2025])
+    except Exception as exc:
+        logger.warning("Could not compute rotation quality: %s", exc)
+
+    bullpen_lookup: dict = {}  # team → era_r7
+    try:
+        bp_df = fetch_bullpen_stats(2025)
+        # Use the most recent era_r7 per team
+        latest_bp = (
+            bp_df.sort_values("date")
+            .groupby("team")
+            .last()
+            .reset_index()
+        )
+        for row in latest_bp.itertuples(index=False):
+            era = float(row.era_r7) if pd.notna(row.era_r7) else 4.20
+            bullpen_lookup[str(row.team)] = era
+    except Exception as exc:
+        logger.warning("Could not fetch bullpen stats: %s", exc)
+
+    # Build probables index: {(home_team, away_team): row}
+    probables_index: dict = {}
+    if probables_df is not None and not probables_df.empty:
+        for row in probables_df.itertuples(index=False):
+            key = (str(row.home_team), str(row.away_team))
+            probables_index[key] = row
 
     predictions: list[dict] = []
 
@@ -431,8 +583,57 @@ def predict_mlb_games(
             logger.warning("Unknown away team: %r — skipping", away_full)
             continue
 
+        # v2 — look up probable pitchers for this game
+        probable_row = probables_index.get((home_br, away_br))
+        home_pitcher_stats: dict | None = None
+        away_pitcher_stats: dict | None = None
+        home_pitcher_name: str | None = None
+        away_pitcher_name: str | None = None
+        home_pitcher_era: float | None = None
+        away_pitcher_era: float | None = None
+
+        if probable_row is not None and pitcher_stats_df is not None:
+            h_pid = probable_row.home_pitcher_id
+            a_pid = probable_row.away_pitcher_id
+            home_pitcher_name = probable_row.home_pitcher_name or None
+            away_pitcher_name = probable_row.away_pitcher_name or None
+
+            if h_pid is not None and h_pid in pitcher_stats_df.index:
+                row_p = pitcher_stats_df.loc[h_pid]
+                home_pitcher_stats = {
+                    "era": row_p.get("era") if pd.notna(row_p.get("era")) else None,
+                    "k9": row_p.get("k9") if pd.notna(row_p.get("k9")) else None,
+                    "whip": row_p.get("whip") if pd.notna(row_p.get("whip")) else None,
+                }
+                home_pitcher_era = home_pitcher_stats["era"]
+
+            if a_pid is not None and a_pid in pitcher_stats_df.index:
+                row_p = pitcher_stats_df.loc[a_pid]
+                away_pitcher_stats = {
+                    "era": row_p.get("era") if pd.notna(row_p.get("era")) else None,
+                    "k9": row_p.get("k9") if pd.notna(row_p.get("k9")) else None,
+                    "whip": row_p.get("whip") if pd.notna(row_p.get("whip")) else None,
+                }
+                away_pitcher_era = away_pitcher_stats["era"]
+
+        # v2 — fetch weather for home park
+        weather: dict | None = None
+        try:
+            weather = fetch_weather(home_br, target_date)
+        except Exception as exc:
+            logger.debug("Weather fetch failed for %s: %s", home_br, exc)
+
         # Build features
-        X = build_prediction_features(home_br, away_br, trailing_stats)
+        X = build_prediction_features(
+            home_br, away_br, trailing_stats,
+            rotation_lookup=rotation_lookup,
+            season=2025,
+            home_pitcher_stats=home_pitcher_stats,
+            away_pitcher_stats=away_pitcher_stats,
+            home_bullpen_era=bullpen_lookup.get(home_br),
+            away_bullpen_era=bullpen_lookup.get(away_br),
+            weather=weather,
+        )
 
         # --- Moneyline ---
         ml_art = artifacts["moneyline"]
@@ -508,6 +709,14 @@ def predict_mlb_games(
             "model_spread_pick": spread_pick,
             "confidence": confidence,
             "data_source": "2025_trailing",
+            # v2 fields
+            "home_pitcher": home_pitcher_name,
+            "away_pitcher": away_pitcher_name,
+            "home_pitcher_era": round(home_pitcher_era, 2) if home_pitcher_era is not None else None,
+            "away_pitcher_era": round(away_pitcher_era, 2) if away_pitcher_era is not None else None,
+            "temp_f": round(weather["temp_f"], 1) if weather else None,
+            "wind_mph": round(weather["wind_mph"], 1) if weather else None,
+            "wind_out_factor": round(weather["wind_out_factor"], 2) if weather else None,
         })
 
     logger.info("Generated %d MLB predictions for %s", len(predictions), date_str)
