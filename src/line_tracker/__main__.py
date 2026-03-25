@@ -649,6 +649,9 @@ def _cmd_train_mlb_model(args) -> int:
 
 
 def _cmd_predict_mlb(args) -> int:
+    import warnings
+    warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+
     from datetime import date as date_type
 
     from line_tracker.model.mlb_predict import predict_mlb_games
@@ -678,15 +681,30 @@ def _cmd_predict_mlb(args) -> int:
 
     print(f"\n⚾ MLB Predictions for {target} ({len(filtered)} games):\n")
     for p in filtered:
+        print(f"  {p['away_team']} @ {p['home_team']}")
+
+        home_p = p.get('home_pitcher') or 'TBD'
+        away_p = p.get('away_pitcher') or 'TBD'
+        home_era = f"{p['home_pitcher_era']:.2f}" if p.get('home_pitcher_era') else '---'
+        away_era = f"{p['away_pitcher_era']:.2f}" if p.get('away_pitcher_era') else '---'
+        print(f"    SP: {away_p} ({away_era}) vs {home_p} ({home_era})")
+
+        temp = p.get('temp_f')
+        wind = p.get('wind_mph')
+        wind_factor = p.get('wind_out_factor', 0)
+        wind_dir = 'out' if wind_factor > 0.1 else 'in' if wind_factor < -0.1 else 'neutral'
+        if temp and wind:
+            print(f"    Weather: {temp:.0f}°F, {wind:.0f}mph {wind_dir}")
+
         print(
-            f"  {p['away_team']} @ {p['home_team']} | "
-            f"Win%: {p['model_home_win_prob']:.1%} | "
+            f"    Win%: {p['model_home_win_prob']:.1%} | "
             f"Margin: {p['model_run_diff']:+.1f} | "
             f"Total: {p['model_total_runs']:.1f} vs mkt {p.get('market_total', '—')} "
             f"(edge: {p.get('total_edge', 0):+.1f}) | "
             f"ML Edge: {p['ml_edge']:+.1%} | "
             f"{p['confidence']}"
         )
+        print()
     return 0
 
 
