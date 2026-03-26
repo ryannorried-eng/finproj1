@@ -740,7 +740,7 @@ def render_model_picks_page(db_path: str, sport_key: str, api_key: str | None) -
                     styled = display_df.style.apply(_highlight_edge, axis=1)
                     st.dataframe(
                         styled,
-                        use_container_width=True,
+                        width='stretch',
                         hide_index=True,
                     )
                 else:

@@ -682,7 +682,9 @@ def predict_mlb_games(
         ml_art = artifacts["moneyline"]
         ml_scaler = ml_art["scaler"]
         if ml_scaler is not None:
-            X_ml = np.nan_to_num(ml_scaler.transform(X), nan=0.0)
+            # Convert to numpy array BEFORE scaling to avoid feature name warning
+            X_np = X.astype(float).values  # numpy array, no feature names
+            X_ml = np.nan_to_num(ml_scaler.transform(X_np), nan=0.0)
         else:
             X_ml = np.nan_to_num(X.astype(float).values, nan=0.0)
         home_win_prob = float(ml_art["model"].predict_proba(X_ml)[0][1])
@@ -692,18 +694,22 @@ def predict_mlb_games(
         mg_scaler = mg_art["scaler"]
         if mg_scaler is not None:
             X_mg = np.nan_to_num(mg_scaler.transform(X), nan=0.0)
+            run_diff = float(mg_art["model"].predict(X_mg)[0])
         else:
-            X_mg = np.nan_to_num(X.astype(float).values, nan=0.0)
-        run_diff = float(mg_art["model"].predict(X_mg)[0])
+            # Pass DataFrame WITH feature names so HGB can match column order
+            X_df = X.astype(float).fillna(0.0)
+            run_diff = float(mg_art["model"].predict(X_df)[0])
 
         # --- Totals ---
         tot_art = artifacts["totals"]
         tot_scaler = tot_art["scaler"]
         if tot_scaler is not None:
             X_tot = np.nan_to_num(tot_scaler.transform(X), nan=0.0)
+            total_runs = float(tot_art["model"].predict(X_tot)[0])
         else:
-            X_tot = np.nan_to_num(X.astype(float).values, nan=0.0)
-        total_runs = float(tot_art["model"].predict(X_tot)[0])
+            # Pass DataFrame WITH feature names so HGB can match column order
+            X_df_tot = X.astype(float).fillna(0.0)
+            total_runs = float(tot_art["model"].predict(X_df_tot)[0])
 
         # Derived odds
         implied_home_odds = prob_to_american_odds(home_win_prob)
