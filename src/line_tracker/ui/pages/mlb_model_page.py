@@ -56,6 +56,24 @@ def _american_to_implied(odds_str):
         return None
 
 
+def _american_to_prob(odds):
+    if not odds or pd.isna(odds):
+        return None
+    try:
+        o = float(odds)
+        if o < 0:
+            return -o / (-o + 100)
+        return 100 / (o + 100)
+    except Exception:
+        return None
+
+
+def fmt_ml(odds):
+    if not odds:
+        return "—"
+    return f"+{int(odds)}" if odds > 0 else str(int(odds))
+
+
 def _format_sp(name, era):
     if not name or name == "TBD":
         return "TBD"
@@ -168,6 +186,83 @@ def _format_time(ct_str):
     return _fmt_commence(ct_str or "", _display_tz())
 
 
+def _best_bet(p):
+    home_prob = p.get("model_home_win_prob", 0.5)
+    away_prob = 1 - home_prob
+    home_ml = p.get("market_home_ml")
+    away_ml = p.get("market_away_ml")
+    run_diff = p.get("model_run_diff", 0) or 0
+    total_edge = p.get("total_edge", 0) or 0
+    market_total = p.get("market_total")
+    home_br = p.get("home_team_br", "")
+    away_br = p.get("away_team_br", "")
+
+    def fmt_odds(o):
+        if o is None:
+            return ""
+        return f"+{int(o)}" if o > 0 else str(int(o))
+
+    # ML value
+    home_val = None
+    away_val = None
+    if home_ml:
+        mp = _american_to_prob(home_ml)
+        if mp:
+            home_val = (home_prob - mp) * 100
+    if away_ml:
+        mp = _american_to_prob(away_ml)
+        if mp:
+            away_val = (away_prob - mp) * 100
+
+    best_ml_val = None
+    best_ml_team = None
+    best_ml_odds = None
+    if home_val is not None and away_val is not None:
+        if home_val >= away_val and home_val >= 4.0:
+            best_ml_val = home_val
+            best_ml_team = home_br
+            best_ml_odds = home_ml
+        elif away_val >= 4.0:
+            best_ml_val = away_val
+            best_ml_team = away_br
+            best_ml_odds = away_ml
+    elif home_val is not None and home_val >= 4.0:
+        best_ml_val = home_val
+        best_ml_team = home_br
+        best_ml_odds = home_ml
+    elif away_val is not None and away_val >= 4.0:
+        best_ml_val = away_val
+        best_ml_team = away_br
+        best_ml_odds = away_ml
+
+    # Total play
+    total_play = None
+    if market_total and abs(total_edge) >= 0.8:
+        direction = "Over" if total_edge > 0 else "Under"
+        total_play = f"{direction} {market_total} ({total_edge:+.1f})"
+
+    # Run line play
+    rl_play = None
+    if run_diff > 2.0:
+        rl_play = f"{home_br} -1.5 ({run_diff:+.1f})"
+    elif run_diff < -2.0:
+        rl_play = f"{away_br} +1.5 ({run_diff:+.1f})"
+
+    # Priority: strong ML first, then strong total, then moderate ML,
+    # then run line, then moderate total, else no play
+    if best_ml_val and best_ml_val >= 5.0:
+        return f"{best_ml_team} ML {fmt_odds(best_ml_odds)}"
+    if total_play and abs(total_edge) >= 1.2:
+        return total_play
+    if best_ml_val and best_ml_val >= 4.0:
+        return f"{best_ml_team} ML {fmt_odds(best_ml_odds)}"
+    if rl_play:
+        return rl_play
+    if total_play:
+        return total_play
+    return "—"
+
+
 def _find_best_bets(predictions):
     """
     Identify actual betting opportunities from predictions.
@@ -276,6 +371,7 @@ def _find_best_bets(predictions):
                 "wind_mph": p.get("wind_mph"),
                 "wind_out_factor": p.get("wind_out_factor", 0),
                 "ml_edge": ml_edge,
+                "model_run_diff": p.get("model_run_diff"),
             })
 
     # Sort by value score descending, dedupe by matchup+type
@@ -308,47 +404,34 @@ def _render_best_bet_card(bet):
 
         st.divider()
 
-        # Pick + odds
+        # Pick + confidence
         conf_emoji = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(
             bet.get("confidence", "Low"), "⚪"
         )
-        st.markdown(
-            f"**{bet['pick']}** &nbsp; `{bet['odds']}` &nbsp; "
-            f"{conf_emoji} {bet.get('confidence','')}"
-        )
+        st.markdown(f"**{_best_bet(bet)}**")
+        st.caption(f"{conf_emoji} {bet.get('confidence','')}")
 
-        spread_pick = _model_spread_pick(bet.get("model_run_diff"))
-        if spread_pick != "—" and "Push" not in spread_pick:
-            st.caption(f"Run line: {spread_pick}")
+        # Reason line
+        home_prob = bet.get("model_prob", 0.5)
+        market_prob = bet.get("market_prob", 0.5)
+        total_edge = bet.get("total_edge", 0) or 0
+        run_diff = bet.get("model_run_diff", 0) or 0
+        model_total = bet.get("model_total", 0)
+        market_total = bet.get("market_total", 0)
+        edge_type = bet.get("edge_type", "")
 
-        # Edge display
-        if bet["edge_type"] == "ML":
-            edge_color = "green" if bet["edge"] > 0 else "red"
-            st.markdown(
-                f"ML Edge: :{edge_color}[**{bet['edge']:+.1f}%**] &nbsp;|&nbsp; "
-                f"Model: {bet['model_prob']:.1%} vs Mkt: {bet['market_prob']:.1%}"
+        if edge_type == "ML":
+            st.caption(
+                f"Market implies {market_prob:.0%} — "
+                f"model says {home_prob:.0%} — "
+                f"{abs((home_prob - market_prob) * 100):.1f}% edge"
             )
-        else:
-            direction = bet.get("direction", "")
-            edge_color = "green" if bet["edge"] > 0 else "red"
-            st.markdown(
-                f"Total Edge: :{edge_color}[**{bet['edge']:+.1f} runs**] &nbsp;|&nbsp; "
-                f"Model: {bet['model_total']:.1f} vs Mkt: {bet['market_total']}"
+        elif edge_type == "Total":
+            st.caption(
+                f"Model sees {model_total:.1f} runs "
+                f"vs market {market_total} — "
+                f"{total_edge:+.1f} edge"
             )
-
-        # Warning for bad juice situations
-        if bet["bet_type"] == "Moneyline":
-            odds_val = int(bet["odds"].replace("+", ""))
-            if odds_val < -300:
-                st.warning(
-                    f"⚠️ Heavy juice ({bet['odds']}) — "
-                    "need high confidence to find value here"
-                )
-            elif odds_val > 200:
-                st.info(
-                    f"💰 Big dog ({bet['odds']}) — "
-                    "small edge goes a long way at this price"
-                )
 
 
 def render_mlb_model_page(conn: sqlite3.Connection) -> None:
@@ -591,7 +674,6 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             if "Mets" in p.get("home_team", ""):
                 print(f"NYM run_diff: {p.get('model_run_diff')}")
 
-        tz_name = _display_tz()
         rows = []
         for p in preds:
             home_prob = p.get("model_home_win_prob", 0.5)
@@ -608,29 +690,16 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             if not away_br:
                 away_br = p.get("away_team", "")[-3:].upper()
 
-            # Fix 2: Show both sides in Win% column with abbreviations
-            win_pct = f"{home_br} {home_prob:.1%} / {away_br} {away_prob:.1%}"
+            win_pct = f"{away_br} {away_prob:.1%} / {home_br} {home_prob:.1%}"
 
-            # Show the side with positive edge (model prob > market prob)
-            home_val = _value_score(home_prob, home_ml)
-            away_val = _value_score(away_prob, away_ml)
-            if home_val is not None and home_val > 0:
-                value_str = f"+{home_val:.1f} (H)"
-            elif away_val is not None and away_val > 0:
-                value_str = f"+{away_val:.1f} (A)"
-            elif home_val is not None and away_val is not None:
-                # Neither side underpriced — show least negative
-                best = max(home_val, away_val)
-                side = "H" if home_val >= away_val else "A"
-                value_str = f"{best:+.1f} ({side})"
-            elif home_val is not None:
-                value_str = f"{home_val:+.1f} (H)"
-            elif away_val is not None:
-                value_str = f"{away_val:+.1f} (A)"
-            else:
-                value_str = "—"
+            pred_score = _pred_score_abbr(
+                p.get("model_total_runs"),
+                p.get("model_run_diff"),
+                home_prob,
+                away_br,
+                home_br,
+            )
 
-            # Fix 4: Show both sides of spread
             if market_spread is not None:
                 if market_spread < 0:
                     spread_str = f"{market_spread:.1f} / +{abs(market_spread):.1f}"
@@ -641,7 +710,7 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
 
             rows.append({
                 "Matchup":       f"{p['away_team']} @ {p['home_team']}",
-                "Time":          _fmt_commence(p.get("commence_time", ""), tz_name),
+                "Time":          _format_time(p.get("commence_time")),
                 "Away SP":       _format_sp(p.get("away_pitcher"), p.get("away_pitcher_era")),
                 "Home SP":       _format_sp(p.get("home_pitcher"), p.get("home_pitcher_era")),
                 "Weather":       _format_weather(
@@ -649,24 +718,16 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                                      p.get("wind_mph"),
                                      p.get("wind_out_factor", 0),
                                  ),
-                "Home Win%":     win_pct,
-                "Model ML (Home)": _format_ml_odds(home_prob),
-                "Away ML":       f"+{away_ml}" if away_ml and away_ml > 0 else str(away_ml) if away_ml else "—",
-                "Home ML":       f"+{home_ml}" if home_ml and home_ml > 0 else str(home_ml) if home_ml else "—",
+                "Win%":          win_pct,
+                "Pred Score":    pred_score,
                 "Pred Total":    f"{p.get('model_total_runs', 0):.1f}",
-                "Pred Score":    _pred_score_abbr(
-                                     p.get("model_total_runs"),
-                                     p.get("model_run_diff"),
-                                     home_prob,
-                                     away_br,
-                                     home_br,
-                                 ),
                 "Mkt Total":     str(p.get("market_total", "—")),
                 "Total Edge":    f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
+                "Away ML":       fmt_ml(away_ml),
+                "Home ML":       fmt_ml(home_ml),
                 "Mkt Spread":    spread_str,
                 "Model Spread":  _model_spread_pick(p.get("model_run_diff")),
-                "ML Edge":       f"{p.get('ml_edge', 0):+.1%}",
-                "Value":         value_str,
+                "Best Bet":      _best_bet(p),
                 "Confidence":    p.get("confidence", "—"),
             })
 
@@ -676,25 +737,20 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             width='stretch',
             hide_index=True,
             column_config={
-                "Home Win%": st.column_config.TextColumn(
-                    "Home Win%",
-                    help="Home team win probability / Away team win probability"
-                ),
-                "Value": st.column_config.TextColumn(
-                    "Value",
-                    help="Edge quality: (model prob - market prob) × 100. H=home edge, A=away edge"
+                "Win%": st.column_config.TextColumn(
+                    "Win%",
+                    help="Away team win probability / Home team win probability"
                 ),
                 "Total Edge": st.column_config.TextColumn(
                     "Total Edge",
                     help="Model predicted total minus market total. Positive = lean over."
                 ),
-                "ML Edge": st.column_config.TextColumn(
-                    "ML Edge",
-                    help="Model win prob minus market implied prob (home team perspective)"
+                "Best Bet": st.column_config.TextColumn(
+                    "Best Bet",
+                    help="Best betting opportunity for this game based on model edge"
                 ),
             }
         )
-        st.caption("Win% and Model ML reflect the HOME team's probability and implied odds.")
 
         # ------------------------------------------------------------------
         # Best Bets section
