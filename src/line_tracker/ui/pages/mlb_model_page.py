@@ -98,6 +98,25 @@ def _market_implied_prob(american_odds):
         return 100 / (american_odds + 100)
 
 
+def _model_spread_pick(model_run_diff, market_spread=-1.5):
+    """
+    Determine model's run line pick based on predicted margin.
+    model_run_diff: positive = home team wins by that many runs
+    market_spread: typically -1.5 for home team in MLB
+
+    Returns string like "Home -1.5" or "Away +1.5" or "—"
+    """
+    if model_run_diff is None or pd.isna(model_run_diff):
+        return "—"
+
+    if model_run_diff > 1.5:
+        return f"Home -1.5 ({model_run_diff:+.1f})"
+    elif model_run_diff < -1.5:
+        return f"Away +1.5 ({model_run_diff:+.1f})"
+    else:
+        return f"Push zone ({model_run_diff:+.1f})"
+
+
 def _value_score(model_prob, market_ml_odds):
     """Edge quality score: (model - market) * 100"""
     market_prob = _market_implied_prob(market_ml_odds)
@@ -156,6 +175,7 @@ def _find_best_bets(predictions):
                     "model_total": model_total,
                     "market_total": market_total,
                     "total_edge": total_edge,
+                    "model_run_diff": p.get("model_run_diff"),
                 })
 
         # Away ML value
@@ -184,6 +204,7 @@ def _find_best_bets(predictions):
                     "model_total": model_total,
                     "market_total": market_total,
                     "total_edge": total_edge,
+                    "model_run_diff": p.get("model_run_diff"),
                 })
 
         # --- Totals bets ---
@@ -256,6 +277,10 @@ def _render_best_bet_card(bet):
             f"**{bet['pick']}** &nbsp; `{bet['odds']}` &nbsp; "
             f"{conf_emoji} {bet.get('confidence','')}"
         )
+
+        spread_pick = _model_spread_pick(bet.get("model_run_diff"))
+        if spread_pick != "—" and "Push" not in spread_pick:
+            st.caption(f"Run line: {spread_pick}")
 
         # Edge display
         if bet["edge_type"] == "ML":
@@ -493,6 +518,7 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Mkt Total":     str(p.get("market_total", "—")),
                 "Total Edge":    f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
                 "Mkt Spread":    spread_str,
+                "Model Spread":  _model_spread_pick(p.get("model_run_diff")),
                 "ML Edge":       f"{p.get('ml_edge', 0):+.1%}",
                 "Value":         value_str,
                 "Confidence":    p.get("confidence", "—"),
