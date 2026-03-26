@@ -438,8 +438,12 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             value=date.today(),
             key="mlb_pred_date",
         )
-    with col2:
+
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+    with btn_col1:
         load_btn = st.button("Load Predictions", key="mlb_load_preds")
+    with btn_col2:
+        refresh_clicked = st.button("🔄 Refresh Odds", key="mlb_refresh_odds")
 
     save_to_db = st.checkbox("Save to DB", value=False, key="mlb_save_db")
 
@@ -458,6 +462,7 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                             log.warning("Failed to upsert prediction %s: %s", p.get("game_id"), e)
 
                 st.session_state["mlb_predictions"] = preds
+                st.session_state["mlb_odds_fetched_at"] = datetime.now()
                 if preds:
                     st.success(f"Loaded {len(preds)} games for {pred_date}.")
                 else:
@@ -470,6 +475,82 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 log.exception("Error in mlb_model_page predictions")
                 st.session_state["mlb_predictions"] = []
 
+    if refresh_clicked and st.session_state.get("mlb_predictions"):
+        with st.spinner("Refreshing odds..."):
+            try:
+                from line_tracker.model.mlb_predict import (
+                    _fetch_mlb_odds,
+                    _american_to_prob,
+                    prob_to_american_odds,
+                    ODDS_TO_BR,
+                )
+
+                # Fetch fresh odds
+                fresh_odds = _fetch_mlb_odds()
+
+                # Build lookup: (home_br, away_br) -> odds dict
+                odds_lookup = {}
+                for g in fresh_odds:
+                    home_br = ODDS_TO_BR.get(g.get("home_team", ""), "")
+                    away_br = ODDS_TO_BR.get(g.get("away_team", ""), "")
+                    if home_br and away_br:
+                        odds_lookup[(home_br, away_br)] = g
+
+                # Update each prediction with fresh odds
+                updated_preds = []
+                for p in st.session_state["mlb_predictions"]:
+                    home_br = p.get("home_team_br", "")
+                    away_br = p.get("away_team_br", "")
+                    fresh = odds_lookup.get((home_br, away_br))
+
+                    if fresh:
+                        new_home_ml = fresh.get("market_home_ml") or p.get("market_home_ml")
+                        new_away_ml = fresh.get("market_away_ml") or p.get("market_away_ml")
+                        new_market_total = fresh.get("market_total") or p.get("market_total")
+
+                        home_prob = p.get("model_home_win_prob", 0.5)
+                        away_prob = 1 - home_prob
+
+                        if new_home_ml:
+                            market_home_prob = _american_to_prob(new_home_ml)
+                            new_ml_edge = home_prob - market_home_prob
+                        else:
+                            new_ml_edge = p.get("ml_edge", 0)
+
+                        if new_market_total:
+                            new_total_edge = p.get("model_total_runs", 0) - new_market_total
+                        else:
+                            new_total_edge = p.get("total_edge", 0)
+
+                        if abs(new_ml_edge) >= 0.05 or abs(new_total_edge) >= 1.0:
+                            new_confidence = "High"
+                        elif abs(new_ml_edge) >= 0.03 or abs(new_total_edge) >= 0.6:
+                            new_confidence = "Medium"
+                        else:
+                            new_confidence = "Low"
+
+                        p = {
+                            **p,
+                            "market_home_ml": new_home_ml,
+                            "market_away_ml": new_away_ml,
+                            "market_total": new_market_total,
+                            "ml_edge": new_ml_edge,
+                            "total_edge": new_total_edge,
+                            "confidence": new_confidence,
+                        }
+
+                    updated_preds.append(p)
+
+                st.session_state["mlb_predictions"] = updated_preds
+                st.session_state["mlb_odds_fetched_at"] = datetime.now()
+                st.success("✅ Odds refreshed successfully")
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Failed to refresh odds: {e}")
+    elif refresh_clicked:
+        st.warning("Load predictions first before refreshing odds.")
+
     # ------------------------------------------------------------------
     # Predictions table
     # ------------------------------------------------------------------
@@ -479,6 +560,15 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
     elif not preds:
         st.info(f"No MLB games found for {pred_date}.")
     else:
+        fetched_at = st.session_state.get("mlb_odds_fetched_at")
+        if fetched_at:
+            age_minutes = (datetime.now() - fetched_at).seconds // 60
+            if age_minutes < 5:
+                st.caption("✅ Odds fetched just now")
+            elif age_minutes < 30:
+                st.caption(f"⚠️ Odds fetched {age_minutes} min ago — consider refreshing")
+            else:
+                st.caption(f"🔴 Odds fetched {age_minutes} min ago — likely stale, please refresh")
         # Diagnostic for games where model total matches market total exactly
         for p in preds:
             mt = p.get("market_total")
@@ -589,6 +679,14 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
         # Best Bets section
         # ------------------------------------------------------------------
         st.subheader("🎯 Best Bets")
+        fetched_at = st.session_state.get("mlb_odds_fetched_at")
+        if fetched_at:
+            age_minutes = (datetime.now() - fetched_at).seconds // 60
+            if age_minutes >= 15:
+                st.warning(
+                    f"⚠️ Odds are {age_minutes} min old. "
+                    "Click '🔄 Refresh Odds' before placing bets."
+                )
         bets = _find_best_bets(st.session_state.get("mlb_predictions", []))
         if not bets:
             st.info("No high-confidence bets found for today.")
