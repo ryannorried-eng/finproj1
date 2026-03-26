@@ -98,6 +98,20 @@ def _market_implied_prob(american_odds):
         return 100 / (american_odds + 100)
 
 
+def _predicted_scores(model_total, model_run_diff):
+    """
+    Derive predicted scores for each team.
+    Returns (away_score, home_score) tuple.
+    """
+    if model_total is None or model_run_diff is None:
+        return None, None
+    if pd.isna(model_total) or pd.isna(model_run_diff):
+        return None, None
+    home_score = (model_total + model_run_diff) / 2
+    away_score = (model_total - model_run_diff) / 2
+    return round(away_score, 1), round(home_score, 1)
+
+
 def _model_spread_pick(model_run_diff):
     """
     Determine model's run line pick based on predicted margin.
@@ -520,6 +534,12 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Away ML":       f"+{away_ml}" if away_ml and away_ml > 0 else str(away_ml) if away_ml else "—",
                 "Home ML":       f"+{home_ml}" if home_ml and home_ml > 0 else str(home_ml) if home_ml else "—",
                 "Pred Total":    f"{p.get('model_total_runs', 0):.1f}",
+                "Pred Score":    (lambda a, h: f"{a} - {h}" if a is not None else "—")(
+                                     *_predicted_scores(
+                                         p.get("model_total_runs"),
+                                         p.get("model_run_diff"),
+                                     )
+                                 ),
                 "Mkt Total":     str(p.get("market_total", "—")),
                 "Total Edge":    f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
                 "Mkt Spread":    spread_str,
