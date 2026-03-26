@@ -90,6 +90,12 @@ def load_mlb_artifacts(models_dir: Path | None = None) -> dict:
                 data = joblib.load(candidates[-1])
                 if "artifact_file" not in data.get("metadata", {}):
                     data.setdefault("metadata", {})["artifact_file"] = candidates[-1].name
+                # sklearn <1.5 predict_proba checks self.multi_class; models
+                # trained on sklearn >=1.5 no longer store this attribute.
+                # Patch the loaded model so it works across sklearn versions.
+                _model = data.get("model")
+                if _model is not None and not hasattr(_model, "multi_class"):
+                    _model.multi_class = "auto"
                 artifacts[model_type] = data
                 logger.debug("Loaded %s from %s", model_type, candidates[-1])
                 break
