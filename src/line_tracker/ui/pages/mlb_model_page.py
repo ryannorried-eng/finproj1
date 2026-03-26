@@ -1,11 +1,12 @@
 """MLB Model Picks page for the Streamlit dashboard.
 
-Team-form model v1 — powered by pybaseball + The Odds API.
+Pitcher-aware lineup model v4 — powered by MLB Stats API + The Odds API.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -14,6 +15,12 @@ import pandas as pd
 import streamlit as st
 
 log = logging.getLogger(__name__)
+
+is_deployed = bool(
+    os.environ.get("RAILWAY_ENVIRONMENT")
+    or os.environ.get("STREAMLIT_SHARING_MODE")
+    or os.environ.get("HOME", "").startswith("/home/adminuser")
+)
 
 
 def _fmt_commence(ct_str: str, tz_name: str = "America/Chicago") -> str:
@@ -37,10 +44,252 @@ def _display_tz() -> str:
         return "America/Chicago"
 
 
+def _american_to_implied(odds_str):
+    """Convert American odds string to implied probability."""
+    try:
+        odds = int(str(odds_str).replace("+", ""))
+        if odds < 0:
+            return (-odds) / (-odds + 100)
+        else:
+            return 100 / (odds + 100)
+    except Exception:
+        return None
+
+
+def _format_sp(name, era):
+    if not name or name == "TBD":
+        return "TBD"
+    era_str = f"{era:.2f}" if era and not pd.isna(era) else "---"
+    return f"{name} ({era_str})"
+
+
+def _format_weather(temp, wind, wind_factor):
+    if not temp or pd.isna(temp):
+        return "—"
+    if wind_factor > 0.1:
+        direction = "↑out"
+    elif wind_factor < -0.1:
+        direction = "↓in"
+    else:
+        direction = "→"
+    return f"{temp:.0f}°F {wind:.0f}mph {direction}"
+
+
+def _format_ml_odds(prob):
+    """Convert win probability to American odds string."""
+    if not prob or pd.isna(prob):
+        return "—"
+    if prob >= 0.5:
+        odds = -(prob / (1 - prob)) * 100
+        return f"{int(odds)}"
+    else:
+        odds = ((1 - prob) / prob) * 100
+        return f"+{int(odds)}"
+
+
+def _market_implied_prob(american_odds):
+    """Convert American odds to implied probability."""
+    if not american_odds or pd.isna(american_odds):
+        return None
+    if american_odds < 0:
+        return (-american_odds) / (-american_odds + 100)
+    else:
+        return 100 / (american_odds + 100)
+
+
+def _value_score(model_prob, market_ml_odds):
+    """Edge quality score: (model - market) * 100"""
+    market_prob = _market_implied_prob(market_ml_odds)
+    if not market_prob:
+        return None
+    return (model_prob - market_prob) * 100
+
+
+def _format_time(ct_str):
+    return _fmt_commence(ct_str or "", _display_tz())
+
+
+def _find_best_bets(predictions):
+    """
+    Identify actual betting opportunities from predictions.
+    Returns list of bet dicts, sorted by value score descending.
+    """
+    bets = []
+
+    for p in predictions:
+        home_prob = p.get("model_home_win_prob", 0.5)
+        away_prob = 1 - home_prob
+        home_ml = p.get("market_home_ml")
+        away_ml = p.get("market_away_ml")
+        market_total = p.get("market_total")
+        model_total = p.get("model_total_runs")
+        total_edge = p.get("total_edge", 0)
+        ml_edge = p.get("ml_edge", 0)
+
+        matchup = f"{p['away_team']} @ {p['home_team']}"
+
+        # --- Moneyline bets ---
+        # Home ML value
+        if home_ml and abs(ml_edge) >= 0.04:
+            market_prob = _market_implied_prob(home_ml)
+            if market_prob and home_prob > market_prob:
+                edge_pct = (home_prob - market_prob) * 100
+                bets.append({
+                    "matchup": matchup,
+                    "bet_type": "Moneyline",
+                    "pick": f"{p['home_team']} ML",
+                    "odds": f"+{home_ml}" if home_ml > 0 else str(home_ml),
+                    "model_prob": home_prob,
+                    "market_prob": market_prob,
+                    "edge": edge_pct,
+                    "edge_type": "ML",
+                    "value_score": edge_pct,
+                    "confidence": p.get("confidence"),
+                    "away_sp": p.get("away_pitcher", "TBD"),
+                    "home_sp": p.get("home_pitcher", "TBD"),
+                    "away_era": p.get("away_pitcher_era"),
+                    "home_era": p.get("home_pitcher_era"),
+                    "temp_f": p.get("temp_f"),
+                    "wind_mph": p.get("wind_mph"),
+                    "wind_out_factor": p.get("wind_out_factor", 0),
+                    "model_total": model_total,
+                    "market_total": market_total,
+                    "total_edge": total_edge,
+                })
+
+        # Away ML value
+        if away_ml and abs(ml_edge) >= 0.04:
+            market_prob = _market_implied_prob(away_ml)
+            if market_prob and away_prob > market_prob:
+                edge_pct = (away_prob - market_prob) * 100
+                bets.append({
+                    "matchup": matchup,
+                    "bet_type": "Moneyline",
+                    "pick": f"{p['away_team']} ML",
+                    "odds": f"+{away_ml}" if away_ml > 0 else str(away_ml),
+                    "model_prob": away_prob,
+                    "market_prob": market_prob,
+                    "edge": edge_pct,
+                    "edge_type": "ML",
+                    "value_score": edge_pct,
+                    "confidence": p.get("confidence"),
+                    "away_sp": p.get("away_pitcher", "TBD"),
+                    "home_sp": p.get("home_pitcher", "TBD"),
+                    "away_era": p.get("away_pitcher_era"),
+                    "home_era": p.get("home_pitcher_era"),
+                    "temp_f": p.get("temp_f"),
+                    "wind_mph": p.get("wind_mph"),
+                    "wind_out_factor": p.get("wind_out_factor", 0),
+                    "model_total": model_total,
+                    "market_total": market_total,
+                    "total_edge": total_edge,
+                })
+
+        # --- Totals bets ---
+        # Only show totals with meaningful edge (>= 0.8 runs)
+        if market_total and model_total and abs(total_edge) >= 0.8:
+            if total_edge > 0:
+                pick = f"Over {market_total}"
+                direction = "OVER"
+            else:
+                pick = f"Under {market_total}"
+                direction = "UNDER"
+
+            bets.append({
+                "matchup": matchup,
+                "bet_type": "Total",
+                "pick": pick,
+                "odds": "-110",  # standard juice
+                "direction": direction,
+                "model_total": model_total,
+                "market_total": market_total,
+                "edge": abs(total_edge),
+                "edge_type": "Total",
+                "value_score": abs(total_edge) * 3,  # scale to compare with ML edge
+                "confidence": p.get("confidence"),
+                "away_sp": p.get("away_pitcher", "TBD"),
+                "home_sp": p.get("home_pitcher", "TBD"),
+                "away_era": p.get("away_pitcher_era"),
+                "home_era": p.get("home_pitcher_era"),
+                "temp_f": p.get("temp_f"),
+                "wind_mph": p.get("wind_mph"),
+                "wind_out_factor": p.get("wind_out_factor", 0),
+                "ml_edge": ml_edge,
+            })
+
+    # Sort by value score descending, dedupe by matchup+type
+    bets.sort(key=lambda x: x["value_score"], reverse=True)
+    return bets
+
+
+def _render_best_bet_card(bet):
+    """Render a single best bet card."""
+    with st.container(border=True):
+        # Header
+        st.markdown(f"**{bet['matchup']}**")
+
+        # Pitcher matchup
+        away_era = f"{bet['away_era']:.2f}" if bet.get("away_era") else "---"
+        home_era = f"{bet['home_era']:.2f}" if bet.get("home_era") else "---"
+        st.caption(
+            f"{bet.get('away_sp','TBD')} ({away_era}) "
+            f"vs {bet.get('home_sp','TBD')} ({home_era})"
+        )
+
+        # Weather
+        weather = _format_weather(
+            bet.get("temp_f"),
+            bet.get("wind_mph"),
+            bet.get("wind_out_factor", 0),
+        )
+        if weather != "—":
+            st.caption(f"🌡️ {weather}")
+
+        st.divider()
+
+        # Pick + odds
+        conf_emoji = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(
+            bet.get("confidence", "Low"), "⚪"
+        )
+        st.markdown(
+            f"**{bet['pick']}** &nbsp; `{bet['odds']}` &nbsp; "
+            f"{conf_emoji} {bet.get('confidence','')}"
+        )
+
+        # Edge display
+        if bet["edge_type"] == "ML":
+            edge_color = "green" if bet["edge"] > 0 else "red"
+            st.markdown(
+                f"ML Edge: :{edge_color}[**{bet['edge']:+.1f}%**] &nbsp;|&nbsp; "
+                f"Model: {bet['model_prob']:.1%} vs Mkt: {bet['market_prob']:.1%}"
+            )
+        else:
+            direction = bet.get("direction", "")
+            edge_color = "green" if bet["edge"] > 0 else "red"
+            st.markdown(
+                f"Total Edge: :{edge_color}[**{bet['edge']:+.1f} runs**] &nbsp;|&nbsp; "
+                f"Model: {bet['model_total']:.1f} vs Mkt: {bet['market_total']}"
+            )
+
+        # Warning for bad juice situations
+        if bet["bet_type"] == "Moneyline":
+            odds_val = int(bet["odds"].replace("+", ""))
+            if odds_val < -300:
+                st.warning(
+                    f"⚠️ Heavy juice ({bet['odds']}) — "
+                    "need high confidence to find value here"
+                )
+            elif odds_val > 200:
+                st.info(
+                    f"💰 Big dog ({bet['odds']}) — "
+                    "small edge goes a long way at this price"
+                )
+
+
 def render_mlb_model_page(conn: sqlite3.Connection) -> None:
     """Render the full MLB Model Picks page."""
     st.header("⚾ MLB Model Picks")
-    st.caption("Team-form model · v1 · Powered by pybaseball + The Odds API")
+    st.caption("Pitcher-aware lineup model · v4 · Powered by MLB Stats API + The Odds API")
     st.info(
         "Opening Day baseline uses 2025 season-end team form. "
         "Predictions sharpen as 2026 games accumulate."
@@ -72,12 +321,20 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             mg_score = mg_meta.get("cv_score", 0.0)
             tot_score = tot_meta.get("cv_score", 0.0)
 
+            artifact_name = ml_meta.get("artifact_file", ml_meta.get("artifact", "mlb_models.pkl"))
+
             st.success(
                 f"✅ All 3 models loaded · Trained {trained_str}\n\n"
                 f"Moneyline: {ml_score:.1%} acc | "
                 f"Margin MAE: {mg_score:.2f} | "
-                f"Totals MAE: {tot_score:.2f}"
+                f"Totals MAE: {tot_score:.2f}\n\n"
+                f"Artifact: {artifact_name}"
             )
+            if st.button("🔄 Reload Artifacts"):
+                for key in list(st.session_state.keys()):
+                    if "mlb" in key.lower():
+                        del st.session_state[key]
+                st.rerun()
         except FileNotFoundError as exc:
             st.warning(str(exc))
         except Exception as exc:
@@ -94,22 +351,28 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             key="mlb_train_seasons",
         )
         force_refresh = st.checkbox("Force refresh data", key="mlb_force_refresh")
-        if st.button("Train MLB Models", key="mlb_train_btn"):
-            with st.spinner("Training MLB models — this takes 3–5 minutes..."):
-                try:
-                    from line_tracker.model.mlb_train import train_mlb_models
-                    result = train_mlb_models(
-                        seasons=sel_seasons,
-                        force_refresh=force_refresh,
-                    )
-                    st.success(
-                        f"✅ Training complete!\n"
-                        f"Moneyline: {result['moneyline']}\n"
-                        f"Margin: {result['margin']}\n"
-                        f"Totals: {result['totals']}"
-                    )
-                except Exception as exc:
-                    st.error(f"Training failed: {exc}")
+        if is_deployed:
+            st.warning(
+                "⚠️ Model training must be run locally. "
+                "Current deployed model was trained 2026-03-25."
+            )
+        else:
+            if st.button("Train MLB Models", key="mlb_train_btn"):
+                with st.spinner("Training MLB models — this takes 3–5 minutes..."):
+                    try:
+                        from line_tracker.model.mlb_train import train_mlb_models
+                        result = train_mlb_models(
+                            seasons=sel_seasons,
+                            force_refresh=force_refresh,
+                        )
+                        st.success(
+                            f"✅ Training complete!\n"
+                            f"Moneyline: {result['moneyline']}\n"
+                            f"Margin: {result['margin']}\n"
+                            f"Totals: {result['totals']}"
+                        )
+                    except Exception as exc:
+                        st.error(f"Training failed: {exc}")
 
     # ------------------------------------------------------------------
     # Predictions section
@@ -165,65 +428,62 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
         tz_name = _display_tz()
         rows = []
         for p in preds:
-            mt = p.get("market_total")
-            te = p.get("total_edge")
-            me = p.get("ml_edge")
+            home_prob = p.get("model_home_win_prob", 0.5)
+            away_prob = 1 - home_prob
+            home_ml = p.get("market_home_ml")
+            away_ml = p.get("market_away_ml")
+            market_spread = p.get("market_spread")
+            val = _value_score(home_prob, home_ml)
+
             rows.append({
-                "Matchup": f"{p['away_team']} @ {p['home_team']}",
-                "Time": _fmt_commence(p.get("commence_time", ""), tz_name),
-                "Win Prob": f"{p['model_home_win_prob']:.1%}",
-                "Pred Margin": f"{p['model_run_diff']:+.1f}",
-                "Pred Total": f"{p['model_total_runs']:.1f}",
-                "Mkt Total": f"{mt}" if mt is not None else "—",
-                "Total Edge": f"{te:+.1f}" if te is not None and mt is not None else "—",
-                "ML Edge": f"{me:+.1%}" if me is not None and p.get("market_home_ml") else "—",
-                "Pick": p.get("model_spread_pick", ""),
-                "Confidence": p.get("confidence", ""),
-                "Source": p.get("data_source", ""),
+                "Matchup":    f"{p['away_team']} @ {p['home_team']}",
+                "Time":       _fmt_commence(p.get("commence_time", ""), tz_name),
+                "Away SP":    _format_sp(p.get("away_pitcher"), p.get("away_pitcher_era")),
+                "Home SP":    _format_sp(p.get("home_pitcher"), p.get("home_pitcher_era")),
+                "Weather":    _format_weather(
+                                  p.get("temp_f"),
+                                  p.get("wind_mph"),
+                                  p.get("wind_out_factor", 0),
+                              ),
+                "Win%":       f"{home_prob:.1%}",
+                "Model ML":   _format_ml_odds(home_prob),
+                "Away ML":    f"+{away_ml}" if away_ml and away_ml > 0 else str(away_ml) if away_ml else "—",
+                "Home ML":    f"+{home_ml}" if home_ml and home_ml > 0 else str(home_ml) if home_ml else "—",
+                "Pred Total": f"{p.get('model_total_runs', 0):.1f}",
+                "Mkt Total":  str(p.get("market_total", "—")),
+                "Total Edge": f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
+                "Mkt Spread": f"{market_spread:+.1f}" if market_spread else "—",
+                "ML Edge":    f"{p.get('ml_edge', 0):+.1%}",
+                "Value":      f"{val:+.1f}" if val is not None else "—",
+                "Confidence": p.get("confidence", "—"),
             })
 
-        display_df = pd.DataFrame(rows)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        df_display = pd.DataFrame(rows)
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
 
         # ------------------------------------------------------------------
         # Best Bets section
         # ------------------------------------------------------------------
         st.subheader("🎯 Best Bets")
-        best = [
-            p for p in preds
-            if abs(p.get("ml_edge") or 0) >= 0.05
-            or abs(p.get("total_edge") or 0) >= 1.0
-        ]
-
-        if not best:
-            st.info("No high-confidence bets for today.")
+        bets = _find_best_bets(st.session_state.get("mlb_predictions", []))
+        if not bets:
+            st.info("No high-confidence bets found for today.")
         else:
-            cols = st.columns(min(3, len(best)))
-            for i, p in enumerate(best):
-                col = cols[i % 3]
-                with col:
-                    with st.container(border=True):
-                        st.markdown(f"**{p['away_team']} @ {p['home_team']}**")
-                        st.markdown(f"Pick: **{p.get('model_spread_pick', '—')}**")
-                        st.caption(p.get("confidence", ""))
-                        me = p.get("ml_edge") or 0
-                        te = p.get("total_edge") or 0
-                        if abs(me) >= abs(te):
-                            st.metric("ML Edge", f"{me:+.1%}")
-                        else:
-                            st.metric("Total Edge", f"{te:+.1f}")
-                        mkt_home = p.get("market_home_ml")
-                        mkt_away = p.get("market_away_ml")
-                        if mkt_home and mkt_away:
-                            from line_tracker.model.mlb_predict import _american_to_prob
-                            implied_home = _american_to_prob(mkt_home)
-                            implied_away = _american_to_prob(mkt_away)
-                            denom = implied_home + implied_away
-                            devig_home = implied_home / denom if denom else 0.5
-                            st.caption(
-                                f"Model: {p['model_home_win_prob']:.1%} | "
-                                f"Market implied: {devig_home:.1%}"
-                            )
+            # Show top 6 bets max, 3 per row
+            top_bets = bets[:6]
+            for i in range(0, len(top_bets), 3):
+                cols = st.columns(3)
+                for j, bet in enumerate(top_bets[i:i + 3]):
+                    with cols[j]:
+                        _render_best_bet_card(bet)
+
+            # Summary line
+            ml_bets = [b for b in top_bets if b["edge_type"] == "ML"]
+            total_bets = [b for b in top_bets if b["edge_type"] == "Total"]
+            st.caption(
+                f"Showing top {len(top_bets)} bets: "
+                f"{len(ml_bets)} moneyline, {len(total_bets)} totals"
+            )
 
     # ------------------------------------------------------------------
     # Historical Accuracy section
