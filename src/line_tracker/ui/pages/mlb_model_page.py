@@ -98,20 +98,23 @@ def _market_implied_prob(american_odds):
         return 100 / (american_odds + 100)
 
 
-def _model_spread_pick(model_run_diff, market_spread=-1.5):
+def _model_spread_pick(model_run_diff):
     """
     Determine model's run line pick based on predicted margin.
-    model_run_diff: positive = home team wins by that many runs
-    market_spread: typically -1.5 for home team in MLB
+    model_run_diff is always from the HOME team's perspective:
+      positive = home team wins by that many runs
+      negative = away team wins by that many runs
 
-    Returns string like "Home -1.5" or "Away +1.5" or "—"
+    Returns string like "Home -1.5 (+2.2)" or "Away +1.5 (-2.2)" or "—"
     """
     if model_run_diff is None or pd.isna(model_run_diff):
         return "—"
 
     if model_run_diff > 1.5:
+        # Home wins by more than 1.5 → Home covers -1.5
         return f"Home -1.5 ({model_run_diff:+.1f})"
     elif model_run_diff < -1.5:
+        # Away wins by more than 1.5 → Away covers +1.5
         return f"Away +1.5 ({model_run_diff:+.1f})"
     else:
         return f"Push zone ({model_run_diff:+.1f})"
@@ -451,7 +454,7 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
     elif not preds:
         st.info(f"No MLB games found for {pred_date}.")
     else:
-        # Fix 5: Diagnostic for games where model total matches market total exactly
+        # Diagnostic for games where model total matches market total exactly
         for p in preds:
             mt = p.get("market_total")
             pt = p.get("model_total_runs")
@@ -459,6 +462,8 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 print(f"WARNING: model total matches market exactly for "
                       f"{p['away_team']} @ {p['home_team']}: "
                       f"model={pt}, market={mt}")
+            if "Mets" in p.get("home_team", ""):
+                print(f"NYM run_diff: {p.get('model_run_diff')}")
 
         tz_name = _display_tz()
         rows = []
