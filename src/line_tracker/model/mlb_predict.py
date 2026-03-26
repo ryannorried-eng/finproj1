@@ -11,6 +11,21 @@ import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="X has feature names",
+    category=UserWarning,
+    module="sklearn",
+)
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn",
+)
+
 import joblib
 import numpy as np
 import pandas as pd
