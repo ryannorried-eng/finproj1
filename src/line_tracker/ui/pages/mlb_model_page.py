@@ -123,6 +123,17 @@ def _pred_score_with_flag(model_total, model_run_diff, home_prob):
     return f"{away_score} - {home_score}{flag}"
 
 
+def _pred_score_abbr(model_total, model_run_diff, home_prob, away_br, home_br):
+    """Return predicted score string with team abbreviations and contradiction flag."""
+    away_score, home_score = _predicted_scores(model_total, model_run_diff)
+    if away_score is None:
+        return "—"
+    run_diff = model_run_diff if model_run_diff is not None else 0
+    contradiction = (home_prob > 0.5 and run_diff < 0) or (home_prob < 0.5 and run_diff > 0)
+    flag = " \u26a0\ufe0f" if contradiction else ""
+    return f"{away_br} {away_score} - {home_br} {home_score}{flag}"
+
+
 def _model_spread_pick(model_run_diff):
     """
     Determine model's run line pick based on predicted margin.
@@ -589,8 +600,16 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             away_ml = p.get("market_away_ml")
             market_spread = p.get("market_spread")
 
-            # Fix 2: Show both sides in Win% column
-            win_pct = f"{home_prob:.1%} / {away_prob:.1%}"
+            # Extract team abbreviations from BR codes
+            home_br = p.get("home_team_br", "")
+            away_br = p.get("away_team_br", "")
+            if not home_br:
+                home_br = p.get("home_team", "")[-3:].upper()
+            if not away_br:
+                away_br = p.get("away_team", "")[-3:].upper()
+
+            # Fix 2: Show both sides in Win% column with abbreviations
+            win_pct = f"{home_br} {home_prob:.1%} / {away_br} {away_prob:.1%}"
 
             # Show the side with positive edge (model prob > market prob)
             home_val = _value_score(home_prob, home_ml)
@@ -631,14 +650,16 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                                      p.get("wind_out_factor", 0),
                                  ),
                 "Home Win%":     win_pct,
-                "Home Model ML": _format_ml_odds(home_prob),
+                "Model ML (Home)": _format_ml_odds(home_prob),
                 "Away ML":       f"+{away_ml}" if away_ml and away_ml > 0 else str(away_ml) if away_ml else "—",
                 "Home ML":       f"+{home_ml}" if home_ml and home_ml > 0 else str(home_ml) if home_ml else "—",
                 "Pred Total":    f"{p.get('model_total_runs', 0):.1f}",
-                "Pred Score":    _pred_score_with_flag(
+                "Pred Score":    _pred_score_abbr(
                                      p.get("model_total_runs"),
                                      p.get("model_run_diff"),
-                                     p.get("model_home_win_prob", 0.5),
+                                     home_prob,
+                                     away_br,
+                                     home_br,
                                  ),
                 "Mkt Total":     str(p.get("market_total", "—")),
                 "Total Edge":    f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
