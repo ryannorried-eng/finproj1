@@ -80,7 +80,7 @@ FEATURE_COLUMNS = [
     "away_team_runs_scored_away_r15",
     "home_team_runs_allowed_home_r15",
     "away_team_runs_allowed_away_r15",
-    # v2 — weather placeholders (3 features; overwritten at prediction time)
+    # v2 — weather features (historical values with null-safe fallback)
     "wind_out_factor",
     "temp_f",
     "precip_prob",
