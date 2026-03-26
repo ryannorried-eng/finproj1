@@ -112,6 +112,17 @@ def _predicted_scores(model_total, model_run_diff):
     return round(away_score, 1), round(home_score, 1)
 
 
+def _pred_score_with_flag(model_total, model_run_diff, home_prob):
+    """Return predicted score string, flagging model contradictions with ⚠️."""
+    away_score, home_score = _predicted_scores(model_total, model_run_diff)
+    if away_score is None:
+        return "—"
+    run_diff = model_run_diff if model_run_diff is not None else 0
+    contradiction = (home_prob > 0.5 and run_diff < 0) or (home_prob < 0.5 and run_diff > 0)
+    flag = " \u26a0\ufe0f" if contradiction else ""
+    return f"{away_score} - {home_score}{flag}"
+
+
 def _model_spread_pick(model_run_diff):
     """
     Determine model's run line pick based on predicted margin.
@@ -534,11 +545,10 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Away ML":       f"+{away_ml}" if away_ml and away_ml > 0 else str(away_ml) if away_ml else "—",
                 "Home ML":       f"+{home_ml}" if home_ml and home_ml > 0 else str(home_ml) if home_ml else "—",
                 "Pred Total":    f"{p.get('model_total_runs', 0):.1f}",
-                "Pred Score":    (lambda a, h: f"{a} - {h}" if a is not None else "—")(
-                                     *_predicted_scores(
-                                         p.get("model_total_runs"),
-                                         p.get("model_run_diff"),
-                                     )
+                "Pred Score":    _pred_score_with_flag(
+                                     p.get("model_total_runs"),
+                                     p.get("model_run_diff"),
+                                     p.get("model_home_win_prob", 0.5),
                                  ),
                 "Mkt Total":     str(p.get("market_total", "—")),
                 "Total Edge":    f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
