@@ -88,6 +88,8 @@ def load_mlb_artifacts(models_dir: Path | None = None) -> dict:
             candidates = sorted(d.glob(pattern)) if d.exists() else []
             if candidates:
                 data = joblib.load(candidates[-1])
+                if "artifact_file" not in data.get("metadata", {}):
+                    data.setdefault("metadata", {})["artifact_file"] = candidates[-1].name
                 artifacts[model_type] = data
                 logger.debug("Loaded %s from %s", model_type, candidates[-1])
                 break

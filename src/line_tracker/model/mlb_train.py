@@ -329,6 +329,7 @@ def _save_artifact(
         "cv_score": cv_score,
         "cv_metric": cv_metric,
         "trained_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_file": filename,
     }
 
     joblib.dump({"model": model, "scaler": scaler, "metadata": metadata}, path)
