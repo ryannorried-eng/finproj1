@@ -12,7 +12,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import warnings
+from sklearn.exceptions import InconsistentVersionWarning
 
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
 warnings.filterwarnings(
     "ignore",
     message="X has feature names",
