@@ -500,7 +500,7 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
         df_display = pd.DataFrame(rows)
         st.dataframe(
             df_display,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "Home Win%": st.column_config.TextColumn(
