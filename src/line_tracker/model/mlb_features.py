@@ -545,6 +545,17 @@ def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
     return result
 
 
+def _null_safe_float(val: object, default: float) -> float:
+    """Convert val to float; return default only if val is None/NaN, not for 0.0."""
+    if val is None:
+        return default
+    try:
+        f = float(val)  # type: ignore[arg-type]
+        return default if pd.isna(f) else f
+    except (TypeError, ValueError):
+        return default
+
+
 def build_feature_matrix(
     df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -825,10 +836,10 @@ def build_feature_matrix(
             "away_team_runs_scored_away_r15": away_rs_away_r15,
             "home_team_runs_allowed_home_r15": home_ra_home_r15,
             "away_team_runs_allowed_away_r15": away_ra_away_r15,
-            # v2 — weather placeholders (neutral values for training)
-            "wind_out_factor": 0.0,
-            "temp_f": 72.0,
-            "precip_prob": 0.0,
+            # v2 — weather (real historical values from training data)
+            "wind_out_factor": _null_safe_float(row.get("wind_out_factor"), 0.0),
+            "temp_f": _null_safe_float(row.get("temp_f"), 72.0),
+            "precip_prob": _null_safe_float(row.get("precip_prob"), 0.0),
             # v4 — lineup strength
             "home_lineup_wrc":       home_lineup["lineup_wrc_weighted"],
             "away_lineup_wrc":       away_lineup["lineup_wrc_weighted"],

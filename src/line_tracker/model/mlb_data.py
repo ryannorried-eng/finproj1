@@ -494,6 +494,95 @@ def load_mlb_training_data(
             merged["away_lineup"] = None
 
         merged["season"] = year
+
+        # ── Join historical weather ───────────────────────────────────────
+        try:
+            weather = fetch_historical_weather(year, force_refresh=force_refresh)
+            if not weather.empty:
+                weather_sub = weather[
+                    ["game_id", "temp_f", "wind_mph", "wind_dir", "precip_prob", "wind_out_factor"]
+                ].rename(columns={
+                    "temp_f": "_w_temp_f",
+                    "wind_mph": "_w_wind_mph",
+                    "wind_dir": "_w_wind_dir",
+                    "precip_prob": "_w_precip_prob",
+                    "wind_out_factor": "_w_wind_out_factor",
+                })
+                merged = merged.merge(weather_sub, on="game_id", how="left")
+
+                # Fallback: match by (date_str, home_team) for any still-missing rows
+                missing_mask = merged["_w_temp_f"].isna()
+                if missing_mask.any():
+                    weather_fb = weather[
+                        ["date", "home_team", "temp_f", "wind_mph", "wind_dir", "precip_prob", "wind_out_factor"]
+                    ].copy()
+                    weather_fb["date_str"] = weather_fb["date"].dt.strftime("%Y-%m-%d")
+                    weather_fb = (
+                        weather_fb
+                        .drop_duplicates(subset=["date_str", "home_team"])
+                        .rename(columns={
+                            "temp_f": "_fb_temp_f",
+                            "wind_mph": "_fb_wind_mph",
+                            "wind_dir": "_fb_wind_dir",
+                            "precip_prob": "_fb_precip_prob",
+                            "wind_out_factor": "_fb_wind_out_factor",
+                        })
+                    )
+                    merged = merged.merge(
+                        weather_fb[[
+                            "date_str", "home_team",
+                            "_fb_temp_f", "_fb_wind_mph", "_fb_wind_dir",
+                            "_fb_precip_prob", "_fb_wind_out_factor",
+                        ]],
+                        on=["date_str", "home_team"],
+                        how="left",
+                    )
+                    for src, dst in [
+                        ("_fb_temp_f", "_w_temp_f"),
+                        ("_fb_wind_mph", "_w_wind_mph"),
+                        ("_fb_wind_dir", "_w_wind_dir"),
+                        ("_fb_precip_prob", "_w_precip_prob"),
+                        ("_fb_wind_out_factor", "_w_wind_out_factor"),
+                    ]:
+                        merged[dst] = merged[dst].fillna(merged[src])
+                    merged = merged.drop(
+                        columns=[
+                            "_fb_temp_f", "_fb_wind_mph", "_fb_wind_dir",
+                            "_fb_precip_prob", "_fb_wind_out_factor",
+                        ],
+                        errors="ignore",
+                    )
+
+                # Coalesce into canonical columns with neutral defaults
+                merged["temp_f"] = merged["_w_temp_f"].fillna(72.0)
+                merged["wind_mph"] = merged["_w_wind_mph"].fillna(0.0)
+                merged["wind_dir"] = merged["_w_wind_dir"].fillna(0.0)
+                merged["wind_out_factor"] = merged["_w_wind_out_factor"].fillna(0.0)
+                merged["precip_prob"] = merged["_w_precip_prob"].fillna(0.0)
+                merged = merged.drop(
+                    columns=[
+                        "_w_temp_f", "_w_wind_mph", "_w_wind_dir",
+                        "_w_precip_prob", "_w_wind_out_factor",
+                    ],
+                    errors="ignore",
+                )
+            else:
+                merged["temp_f"] = 72.0
+                merged["wind_mph"] = 0.0
+                merged["wind_dir"] = 0.0
+                merged["wind_out_factor"] = 0.0
+                merged["precip_prob"] = 0.0
+        except Exception as exc:
+            logger.warning(
+                "Historical weather join failed for season %d: %s; using neutral defaults",
+                year, exc,
+            )
+            merged["temp_f"] = 72.0
+            merged["wind_mph"] = 0.0
+            merged["wind_dir"] = 0.0
+            merged["wind_out_factor"] = 0.0
+            merged["precip_prob"] = 0.0
+
         all_seasons.append(merged)
 
     if not all_seasons:
@@ -1451,6 +1540,169 @@ def fetch_batter_game_logs(season: int, force_refresh: bool = False) -> pd.DataF
         df["date"] = pd.to_datetime(df["date"])
 
     df.to_parquet(cache_path, index=False)
+    return df
+
+
+def fetch_historical_weather(
+    season: int,
+    force_refresh: bool = False,
+) -> pd.DataFrame:
+    """Fetch historical game-time weather for every game in a season.
+
+    Uses Open-Meteo historical archive API:
+      https://archive-api.open-meteo.com/v1/archive
+
+    Returns DataFrame with columns:
+      game_id, date, home_team,
+      temp_f, wind_mph, wind_dir,
+      precip_prob, wind_out_factor
+
+    Cache path:
+      CACHE_DIR / f"historical_weather_{season}.parquet"
+    """
+    cache_path = CACHE_DIR / f"historical_weather_{season}.parquet"
+    if not force_refresh and cache_path.exists():
+        logger.debug("Loading historical weather from cache: %s", cache_path)
+        return pd.read_parquet(cache_path)
+
+    logger.info("Fetching historical weather for season %d ...", season)
+    t0 = time.time()
+
+    schedule = fetch_schedule_and_results(season, force_refresh=False)
+    if schedule.empty:
+        logger.warning(
+            "No schedule data for season %d; returning empty weather DataFrame", season
+        )
+        return pd.DataFrame(
+            columns=[
+                "game_id", "date", "home_team",
+                "temp_f", "wind_mph", "wind_dir", "precip_prob", "wind_out_factor",
+            ]
+        )
+
+    # Group by (home_team, date) so each unique park-date is fetched once
+    park_dates = schedule[["home_team", "date"]].drop_duplicates().copy()
+    park_dates["date_str"] = park_dates["date"].dt.strftime("%Y-%m-%d")
+
+    weather_records: dict[tuple, dict | None] = {}
+
+    for i, (_, row) in enumerate(park_dates.iterrows()):
+        home_team = str(row["home_team"])
+        date_str = str(row["date_str"])
+
+        if i > 0 and i % 200 == 0:
+            logger.info(
+                "Historical weather: processed %d / %d park-dates", i, len(park_dates)
+            )
+
+        coords = PARK_COORDS.get(home_team)
+        if coords is None:
+            logger.debug("No park coordinates for team %s; skipping", home_team)
+            weather_records[(home_team, date_str)] = None
+            time.sleep(0.1)
+            continue
+
+        lat, lon = coords
+        url = (
+            "https://archive-api.open-meteo.com/v1/archive"
+            f"?latitude={lat}&longitude={lon}"
+            f"&start_date={date_str}&end_date={date_str}"
+            "&hourly=temperature_2m,windspeed_10m,winddirection_10m,precipitation"
+            "&temperature_unit=fahrenheit"
+            "&windspeed_unit=mph"
+            "&timezone=America/New_York"
+        )
+
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning(
+                "Weather archive fetch failed for %s on %s: %s", home_team, date_str, exc
+            )
+            weather_records[(home_team, date_str)] = None
+            time.sleep(0.1)
+            continue
+
+        try:
+            hourly = data.get("hourly", {})
+            times = hourly.get("time", [])
+
+            # Find index for 7pm (19:00) local time; fall back to nearest hour
+            target_hour = f"{date_str}T19:00"
+            if target_hour in times:
+                idx = times.index(target_hour)
+            elif times:
+                def _hour_dist(t: str) -> float:
+                    try:
+                        return abs(int(t.split("T")[1].split(":")[0]) - 19)
+                    except Exception:
+                        return 99.0
+                idx = min(range(len(times)), key=lambda ii: _hour_dist(times[ii]))
+            else:
+                weather_records[(home_team, date_str)] = None
+                time.sleep(0.1)
+                continue
+
+            temp_f = float(hourly["temperature_2m"][idx])
+            wind_mph = float(hourly["windspeed_10m"][idx])
+            wind_dir = float(hourly["winddirection_10m"][idx])
+            precip_mm = float(hourly["precipitation"][idx])
+            precip_prob = min(precip_mm / 10.0, 1.0)
+
+            wind_dir_rad = math.radians(wind_dir)
+            if home_team == "COL":
+                wind_out_factor = abs(wind_mph * math.cos(wind_dir_rad) * 0.1)
+            else:
+                wind_out_factor = wind_mph * math.cos(wind_dir_rad) * 0.1
+
+            weather_records[(home_team, date_str)] = {
+                "temp_f": temp_f,
+                "wind_mph": wind_mph,
+                "wind_dir": wind_dir,
+                "precip_prob": precip_prob,
+                "wind_out_factor": wind_out_factor,
+            }
+        except Exception as exc:
+            logger.warning(
+                "Weather archive parse failed for %s on %s: %s", home_team, date_str, exc
+            )
+            weather_records[(home_team, date_str)] = None
+
+        time.sleep(0.1)
+
+    # Build weather DataFrame aligned to schedule games
+    out_rows = []
+    for _, srow in schedule.iterrows():
+        home_team = str(srow["home_team"])
+        date_str = srow["date"].strftime("%Y-%m-%d")
+        w = weather_records.get((home_team, date_str))
+        rec: dict = {
+            "game_id": srow["game_id"],
+            "date": srow["date"],
+            "home_team": home_team,
+        }
+        if w is not None:
+            rec.update(w)
+        else:
+            rec.update({
+                "temp_f": np.nan,
+                "wind_mph": np.nan,
+                "wind_dir": np.nan,
+                "precip_prob": np.nan,
+                "wind_out_factor": np.nan,
+            })
+        out_rows.append(rec)
+
+    df = pd.DataFrame(out_rows)
+    df.to_parquet(cache_path, index=False)
+
+    elapsed = time.time() - t0
+    logger.info(
+        "Historical weather for season %d: %d rows, %.1fs elapsed",
+        season, len(df), elapsed,
+    )
     return df
 
 
