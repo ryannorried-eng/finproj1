@@ -425,6 +425,15 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
     elif not preds:
         st.info(f"No MLB games found for {pred_date}.")
     else:
+        # Fix 5: Diagnostic for games where model total matches market total exactly
+        for p in preds:
+            mt = p.get("market_total")
+            pt = p.get("model_total_runs")
+            if mt and pt and abs(pt - mt) < 0.1:
+                print(f"WARNING: model total matches market exactly for "
+                      f"{p['away_team']} @ {p['home_team']}: "
+                      f"model={pt}, market={mt}")
+
         tz_name = _display_tz()
         rows = []
         for p in preds:
@@ -433,33 +442,85 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             home_ml = p.get("market_home_ml")
             away_ml = p.get("market_away_ml")
             market_spread = p.get("market_spread")
-            val = _value_score(home_prob, home_ml)
+
+            # Fix 2: Show both sides in Win% column
+            win_pct = f"{home_prob:.1%} / {away_prob:.1%}"
+
+            # Fix 3: Show best edge (home or away) with side label
+            home_val = _value_score(home_prob, home_ml)
+            away_val = _value_score(away_prob, away_ml)
+            if home_val is not None and away_val is not None:
+                if abs(home_val) >= abs(away_val):
+                    best_val = home_val
+                    val_side = "H"
+                else:
+                    best_val = away_val
+                    val_side = "A"
+                value_str = f"{best_val:+.1f} ({val_side})"
+            elif home_val is not None:
+                value_str = f"{home_val:+.1f} (H)"
+            elif away_val is not None:
+                value_str = f"{away_val:+.1f} (A)"
+            else:
+                value_str = "—"
+
+            # Fix 4: Show both sides of spread
+            if market_spread is not None:
+                if market_spread < 0:
+                    spread_str = f"{market_spread:.1f} / +{abs(market_spread):.1f}"
+                else:
+                    spread_str = f"+{market_spread:.1f} / -{market_spread:.1f}"
+            else:
+                spread_str = "-1.5 / +1.5" if p.get("market_total") else "—"
 
             rows.append({
-                "Matchup":    f"{p['away_team']} @ {p['home_team']}",
-                "Time":       _fmt_commence(p.get("commence_time", ""), tz_name),
-                "Away SP":    _format_sp(p.get("away_pitcher"), p.get("away_pitcher_era")),
-                "Home SP":    _format_sp(p.get("home_pitcher"), p.get("home_pitcher_era")),
-                "Weather":    _format_weather(
-                                  p.get("temp_f"),
-                                  p.get("wind_mph"),
-                                  p.get("wind_out_factor", 0),
-                              ),
-                "Win%":       f"{home_prob:.1%}",
-                "Model ML":   _format_ml_odds(home_prob),
-                "Away ML":    f"+{away_ml}" if away_ml and away_ml > 0 else str(away_ml) if away_ml else "—",
-                "Home ML":    f"+{home_ml}" if home_ml and home_ml > 0 else str(home_ml) if home_ml else "—",
-                "Pred Total": f"{p.get('model_total_runs', 0):.1f}",
-                "Mkt Total":  str(p.get("market_total", "—")),
-                "Total Edge": f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
-                "Mkt Spread": f"{market_spread:+.1f}" if market_spread else "—",
-                "ML Edge":    f"{p.get('ml_edge', 0):+.1%}",
-                "Value":      f"{val:+.1f}" if val is not None else "—",
-                "Confidence": p.get("confidence", "—"),
+                "Matchup":       f"{p['away_team']} @ {p['home_team']}",
+                "Time":          _fmt_commence(p.get("commence_time", ""), tz_name),
+                "Away SP":       _format_sp(p.get("away_pitcher"), p.get("away_pitcher_era")),
+                "Home SP":       _format_sp(p.get("home_pitcher"), p.get("home_pitcher_era")),
+                "Weather":       _format_weather(
+                                     p.get("temp_f"),
+                                     p.get("wind_mph"),
+                                     p.get("wind_out_factor", 0),
+                                 ),
+                "Home Win%":     win_pct,
+                "Home Model ML": _format_ml_odds(home_prob),
+                "Away ML":       f"+{away_ml}" if away_ml and away_ml > 0 else str(away_ml) if away_ml else "—",
+                "Home ML":       f"+{home_ml}" if home_ml and home_ml > 0 else str(home_ml) if home_ml else "—",
+                "Pred Total":    f"{p.get('model_total_runs', 0):.1f}",
+                "Mkt Total":     str(p.get("market_total", "—")),
+                "Total Edge":    f"{p.get('total_edge', 0):+.1f}" if p.get("market_total") else "—",
+                "Mkt Spread":    spread_str,
+                "ML Edge":       f"{p.get('ml_edge', 0):+.1%}",
+                "Value":         value_str,
+                "Confidence":    p.get("confidence", "—"),
             })
 
         df_display = pd.DataFrame(rows)
-        st.dataframe(df_display, use_container_width=True, hide_index=True)
+        st.dataframe(
+            df_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Home Win%": st.column_config.TextColumn(
+                    "Home Win%",
+                    help="Home team win probability / Away team win probability"
+                ),
+                "Value": st.column_config.TextColumn(
+                    "Value",
+                    help="Edge quality: (model prob - market prob) × 100. H=home edge, A=away edge"
+                ),
+                "Total Edge": st.column_config.TextColumn(
+                    "Total Edge",
+                    help="Model predicted total minus market total. Positive = lean over."
+                ),
+                "ML Edge": st.column_config.TextColumn(
+                    "ML Edge",
+                    help="Model win prob minus market implied prob (home team perspective)"
+                ),
+            }
+        )
+        st.caption("Win% and Model ML reflect the HOME team's probability and implied odds.")
 
         # ------------------------------------------------------------------
         # Best Bets section
