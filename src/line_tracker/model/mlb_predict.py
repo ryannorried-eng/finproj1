@@ -725,6 +725,14 @@ def predict_mlb_games(
             X_df = X.astype(float).fillna(0.0)
             run_diff = float(mg_art["model"].predict(X_df)[0])
 
+        # Resolve large contradictions: when |run_diff| > 1.0 and the two models
+        # disagree directionally, trust the margin model and nudge home_win_prob.
+        if abs(run_diff) > 1.0:
+            if run_diff > 0 and home_win_prob < 0.5:
+                home_win_prob = max(home_win_prob, 0.5 + abs(run_diff) * 0.02)
+            elif run_diff < 0 and home_win_prob > 0.5:
+                home_win_prob = min(home_win_prob, 0.5 - abs(run_diff) * 0.02)
+
         # --- Totals ---
         tot_art = artifacts["totals"]
         tot_scaler = tot_art["scaler"]
