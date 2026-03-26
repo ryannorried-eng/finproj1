@@ -172,7 +172,12 @@ def _train_moneyline(X, y_target, tscv):
         X_tr_s = scaler.fit_transform(X_tr)
         X_val_s = scaler.transform(X_val)
 
-        model = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
+        model = LogisticRegression(
+            C=1.0,
+            max_iter=1000,
+            random_state=42,
+            solver="lbfgs",
+        )
         model.fit(X_tr_s, y_tr)
         preds = model.predict(X_val_s)
         cv_scores.append(accuracy_score(y_val, preds))
@@ -182,7 +187,12 @@ def _train_moneyline(X, y_target, tscv):
     # Refit on full dataset
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_arr)
-    model = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
+    model = LogisticRegression(
+        C=1.0,
+        max_iter=1000,
+        random_state=42,
+        solver="lbfgs",
+    )
     model.fit(X_scaled, y_arr)
 
     return model, scaler, cv_score
