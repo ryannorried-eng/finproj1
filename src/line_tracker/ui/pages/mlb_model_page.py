@@ -79,6 +79,7 @@ def _format_ml_odds(prob):
     """Convert win probability to American odds string."""
     if not prob or pd.isna(prob):
         return "—"
+    prob = max(0.001, min(0.999, prob))
     if prob >= 0.5:
         odds = -(prob / (1 - prob)) * 100
         return f"{int(odds)}"
