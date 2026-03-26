@@ -446,17 +446,18 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             # Fix 2: Show both sides in Win% column
             win_pct = f"{home_prob:.1%} / {away_prob:.1%}"
 
-            # Fix 3: Show best edge (home or away) with side label
+            # Show the side with positive edge (model prob > market prob)
             home_val = _value_score(home_prob, home_ml)
             away_val = _value_score(away_prob, away_ml)
-            if home_val is not None and away_val is not None:
-                if abs(home_val) >= abs(away_val):
-                    best_val = home_val
-                    val_side = "H"
-                else:
-                    best_val = away_val
-                    val_side = "A"
-                value_str = f"{best_val:+.1f} ({val_side})"
+            if home_val is not None and home_val > 0:
+                value_str = f"+{home_val:.1f} (H)"
+            elif away_val is not None and away_val > 0:
+                value_str = f"+{away_val:.1f} (A)"
+            elif home_val is not None and away_val is not None:
+                # Neither side underpriced — show least negative
+                best = max(home_val, away_val)
+                side = "H" if home_val >= away_val else "A"
+                value_str = f"{best:+.1f} ({side})"
             elif home_val is not None:
                 value_str = f"{home_val:+.1f} (H)"
             elif away_val is not None:
