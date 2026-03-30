@@ -63,6 +63,15 @@ _PROJECT_MODELS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "mo
 _HOME_MODELS_DIR = Path.home() / ".line_tracker" / "models"
 _CLOUD_MODELS_DIR = Path("/mount/src/finproj1/models")
 
+# Teams where 2025 trailing stats are least predictive of 2026 performance
+# Based on 4-day sample (46 games) — revisit at 100 games
+# Format: frozenset of BR abbreviations for a matchup
+BLIND_SPOT_MATCHUPS = [
+    frozenset({"WSN", "CHC"}),  # Model 1-2 on Cubs picks, overrating CHC
+    frozenset({"KCR", "ATL"}),  # Model 0-2 on Royals picks, underrating ATL
+    frozenset({"COL", "MIA"}),  # COL consistently underperforming model
+]
+
 
 # ---------------------------------------------------------------------------
 # Artifact loading
@@ -782,6 +791,22 @@ def predict_mlb_games(
         else:
             confidence = "Low"
 
+        # ML bet qualified: favored team >= 57% AND |ml_edge| >= 0.04
+        away_win_prob = 1 - home_win_prob
+        favored_prob = max(home_win_prob, away_win_prob)
+        ml_bet_qualified = favored_prob >= 0.57 and abs(ml_edge) >= 0.04
+
+        # Blind spot check
+        matchup_set = frozenset([home_br, away_br])
+        is_blind_spot = any(matchup_set == bs for bs in BLIND_SPOT_MATCHUPS)
+
+        if is_blind_spot:
+            # Downgrade confidence by one level
+            if confidence == "High":
+                confidence = "Medium"
+            elif confidence == "Medium":
+                confidence = "Low"
+
         predictions.append({
             "game_id": g["game_id"],
             "game_date": date_str,
@@ -802,6 +827,8 @@ def predict_mlb_games(
             "total_edge": round(total_edge, 2),
             "model_spread_pick": spread_pick,
             "confidence": confidence,
+            "ml_bet_qualified": ml_bet_qualified,
+            "blind_spot": is_blind_spot,
             "data_source": "2025_trailing",
             # v2 fields
             "home_pitcher": home_pitcher_name,
