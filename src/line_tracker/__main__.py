@@ -197,6 +197,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     predict_mlb_p.add_argument("--db", default="lines.db", help="DB path")
 
+    # --- backfill-weather ---
+    backfill_weather_p = sub.add_parser(
+        "backfill-weather",
+        help="Fetch historical weather for all parks and seasons",
+    )
+    backfill_weather_p.add_argument(
+        "--seasons",
+        default="2022,2023,2024,2025",
+        help="Comma-separated seasons to backfill (default: 2022,2023,2024,2025)",
+    )
+    backfill_weather_p.add_argument(
+        "--workers", type=int, default=12,
+        help="Parallel workers (default: 12)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -235,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_train_mlb_model(args)
     if args.command == "predict-mlb":
         return _cmd_predict_mlb(args)
+    if args.command == "backfill-weather":
+        return _cmd_backfill_weather(args)
     return 0
 
 
@@ -645,6 +662,16 @@ def _cmd_train_mlb_model(args) -> int:
         models_dir=models_path,
         force_refresh=args.force_refresh,
     )
+    return 0
+
+
+def _cmd_backfill_weather(args) -> int:
+    from line_tracker.model.mlb_data import fetch_all_historical_weather
+
+    season_list = [int(s.strip()) for s in args.seasons.split(",")]
+    print(f"Backfilling weather for seasons: {season_list}")
+    fetch_all_historical_weather(seasons=season_list, max_workers=args.workers)
+    print("Done.")
     return 0
 
 

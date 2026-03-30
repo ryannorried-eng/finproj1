@@ -99,6 +99,11 @@ FEATURE_COLUMNS = [
     "home_bullpen_exposure",
     "away_bullpen_exposure",
     "bullpen_exposure_diff",
+    # v6 — high-resolution historical weather (4 features)
+    "weather_temp_f",
+    "weather_wind_mph",
+    "weather_wind_out_factor",
+    "weather_precip",
 ]
 
 
@@ -556,6 +561,50 @@ def _null_safe_float(val: object, default: float) -> float:
         return default
 
 
+def _add_weather_features(
+    df: pd.DataFrame,
+    home_team_col: str = "home_team",
+    date_col: str = "game_date",
+) -> pd.DataFrame:
+    """Join high-resolution historical weather to training games.
+
+    For each game, looks up weather at the home team's park on the game date
+    at approximately game time (7pm local default).
+
+    Adds columns:
+      weather_temp_f, weather_wind_mph, weather_wind_out_factor, weather_precip
+    """
+    from line_tracker.model.mlb_data import get_game_weather
+
+    temp_fs = []
+    wind_mphs = []
+    wind_outs = []
+    precips = []
+
+    for _, row in df.iterrows():
+        team = str(row.get(home_team_col, ""))
+        date = str(row.get(date_col, ""))
+        season = int(str(date)[:4]) if date else 2025
+
+        try:
+            w = get_game_weather(team, date, game_hour_local=19, season=season)
+        except Exception:
+            w = {"temp_f": 70.0, "wind_mph": 8.0,
+                 "wind_out_factor": 0.0, "precip": 0.0}
+
+        temp_fs.append(float(w.get("temp_f", 70.0)))
+        wind_mphs.append(float(w.get("wind_mph", 8.0)))
+        wind_outs.append(float(w.get("wind_out_factor", 0.0)))
+        precips.append(float(w.get("precip", 0.0)))
+
+    df = df.copy()
+    df["weather_temp_f"]          = temp_fs
+    df["weather_wind_mph"]        = wind_mphs
+    df["weather_wind_out_factor"] = wind_outs
+    df["weather_precip"]          = precips
+    return df
+
+
 def build_feature_matrix(
     df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -694,6 +743,12 @@ def build_feature_matrix(
             pitcher_logs_by_season[s] = fetch_pitcher_game_logs(s)
         except Exception:
             pitcher_logs_by_season[s] = pd.DataFrame()
+
+    # ---------------------------------------------------------------------------
+    # Step 4d: v6 — join high-resolution historical weather
+    # ---------------------------------------------------------------------------
+    logger.info("Joining historical weather to training games...")
+    df = _add_weather_features(df, home_team_col="home_team", date_col="date")
 
     # ---------------------------------------------------------------------------
     # Step 5: Assemble matchup feature rows
@@ -855,6 +910,11 @@ def build_feature_matrix(
             "home_bullpen_exposure": float(home_bp_exposure),
             "away_bullpen_exposure": float(away_bp_exposure),
             "bullpen_exposure_diff": float(bp_exposure_diff),
+            # v6 — high-resolution historical weather
+            "weather_temp_f":          _null_safe_float(row.get("weather_temp_f"), 70.0),
+            "weather_wind_mph":        _null_safe_float(row.get("weather_wind_mph"), 8.0),
+            "weather_wind_out_factor": _null_safe_float(row.get("weather_wind_out_factor"), 0.0),
+            "weather_precip":          _null_safe_float(row.get("weather_precip"), 0.0),
         }
         feature_rows.append(feat)
 
