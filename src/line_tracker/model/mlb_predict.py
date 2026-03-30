@@ -123,78 +123,274 @@ def load_mlb_artifacts(models_dir: Path | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def get_trailing_stats(season: int = 2025) -> dict[str, dict]:
-    """Compute season-end trailing stats for each team.
-
-    Uses the last 15 games (R15) and last 10 games (R10) of the season.
-    These stats are used for Opening Day / early season predictions before
-    current-season rolling stats accumulate.
-
-    Returns
-    -------
-    dict: {team_abbr: {runs_scored_r15, runs_allowed_r15, run_diff_r15,
-                        k_rate_r15, bb_rate_r15, run_diff_r10}}
+def fetch_current_season_logs(force_refresh: bool = False) -> pd.DataFrame:
     """
-    from line_tracker.model.mlb_data import CACHE_DIR, fetch_team_game_logs
+    Fetch 2026 team game logs from MLB Stats API.
+    Uses the same pattern as mlb_data.fetch_team_game_logs()
+    but for the current season.
 
-    cache_path = CACHE_DIR / f"trailing_stats_{season}.parquet"
-    if cache_path.exists():
-        cached = pd.read_parquet(cache_path)
-        return cached.set_index("team").to_dict("index")
+    Cache: ~/.cache/line_tracker/mlb/team_logs_2026.parquet
+    Cache expiry: 6 hours (refresh if older than 6 hours)
 
-    logs = fetch_team_game_logs(season)
-    if logs.empty:
-        logger.warning("No game logs for season %d; using league-average defaults", season)
-        return _league_avg_trailing_stats()
+    Returns DataFrame with same schema as fetch_team_game_logs():
+      team, date, home_away, opponent,
+      runs_scored, runs_allowed, hits, walks,
+      strikeouts, innings_pitched
 
+    Returns empty DataFrame if API call fails.
+    """
+    from line_tracker.model.mlb_data import (
+        CACHE_DIR, MLB_STATS_API, _to_canonical, _get_mlb_teams, _safe_float
+    )
+    import requests
+    import time
+
+    cache_path = CACHE_DIR / "team_logs_2026.parquet"
+
+    # Check cache age — refresh if older than 6 hours
+    if not force_refresh and cache_path.exists():
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        if age_hours < 6:
+            try:
+                return pd.read_parquet(cache_path)
+            except Exception:
+                pass
+
+    logger.info("Fetching 2026 team game logs...")
+
+    try:
+        teams = _get_mlb_teams()
+    except Exception as exc:
+        logger.warning("Could not fetch team list: %s", exc)
+        return pd.DataFrame()
+
+    all_rows = []
+
+    for team in teams:
+        team_id = team.get("id")
+        abbrev = team.get("abbreviation", "")
+        br_abbrev = _to_canonical(abbrev)
+
+        if not team_id:
+            continue
+
+        hitting_splits: dict = {}
+        pitching_splits: dict = {}
+
+        for group in ["hitting", "pitching"]:
+            try:
+                url = (
+                    f"{MLB_STATS_API}/teams/{team_id}/stats"
+                    f"?stats=gameLog&season=2026&group={group}&gameType=R"
+                )
+                resp = requests.get(url, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+
+                if group == "hitting":
+                    for sg in data.get("stats", []):
+                        for split in sg.get("splits", []):
+                            date_str = split.get("date", "")
+                            game_num = split.get("gameNumber", 1)
+                            stat = split.get("stat", {})
+                            opponent_abbrev = split.get("opponent", {}).get("abbreviation", "")
+                            is_home = split.get("isHome")
+                            hitting_splits[(date_str, game_num)] = {
+                                "runs_scored": _safe_float(stat.get("runs")),
+                                "hits": _safe_float(stat.get("hits")),
+                                "walks": _safe_float(stat.get("baseOnBalls")),
+                                "strikeouts": _safe_float(stat.get("strikeOuts")),
+                                "opponent": _to_canonical(opponent_abbrev),
+                                "is_home": is_home,
+                            }
+
+                elif group == "pitching":
+                    for sg in data.get("stats", []):
+                        for split in sg.get("splits", []):
+                            date_str = split.get("date", "")
+                            game_num = split.get("gameNumber", 1)
+                            stat = split.get("stat", {})
+                            pitching_splits[(date_str, game_num)] = {
+                                "runs_allowed": _safe_float(stat.get("runs")),
+                                "innings_pitched": _safe_float(stat.get("inningsPitched")),
+                            }
+
+                time.sleep(0.05)
+
+            except Exception as exc:
+                logger.debug("Game log failed for %s %s: %s", br_abbrev, group, exc)
+                continue
+
+        # Join hitting + pitching by date/game_num
+        for (date_str, game_num), hit in hitting_splits.items():
+            pit = pitching_splits.get((date_str, game_num), {})
+            home_away = "H" if hit.get("is_home") else "A"
+            all_rows.append({
+                "team": br_abbrev,
+                "date": pd.Timestamp(date_str),
+                "home_away": home_away,
+                "opponent": hit.get("opponent"),
+                "runs_scored": hit.get("runs_scored"),
+                "runs_allowed": pit.get("runs_allowed"),
+                "hits": hit.get("hits"),
+                "walks": hit.get("walks"),
+                "strikeouts": hit.get("strikeouts"),
+                "innings_pitched": pit.get("innings_pitched"),
+            })
+
+    if not all_rows:
+        logger.warning("No 2026 game logs retrieved")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["team", "date"]).reset_index(drop=True)
+
+    # Cache result
+    df.to_parquet(cache_path, index=False)
+    logger.info("Fetched %d 2026 game log rows for %d teams",
+                len(df), df["team"].nunique())
+    return df
+
+
+def get_trailing_stats(base_season: int = 2025) -> dict[str, dict]:
+    """
+    Compute per-team rolling stats for use as prediction features.
+
+    Logic:
+    - Fetch 2026 game logs (cached, refreshed every 6 hours)
+    - For teams with >= 15 games in 2026: use 2026 rolling window
+    - For teams with 5-14 games in 2026: blend 2026 recent + 2025 trailing
+    - For teams with < 5 games in 2026: use 2025 end-of-season trailing
+
+    Returns dict: {team_abbrev: {feature: value}}
+    """
+    from line_tracker.model.mlb_data import (
+        CACHE_DIR, fetch_team_game_logs
+    )
+    from line_tracker.model.mlb_features import compute_team_rolling_stats
+
+    # Step 1: Try to get 2026 game logs
+    logs_2026 = pd.DataFrame()
+    try:
+        logs_2026 = fetch_current_season_logs()
+    except Exception as exc:
+        logger.warning("Could not fetch 2026 logs: %s", exc)
+
+    # Step 2: Get 2025 end-of-season trailing stats as fallback
+    trailing_cache = CACHE_DIR / f"trailing_stats_{base_season}.parquet"
+
+    stats_2025: dict[str, dict] = {}
+    try:
+        if trailing_cache.exists():
+            df_2025 = pd.read_parquet(trailing_cache)
+            for _, row in df_2025.iterrows():
+                stats_2025[row["team"]] = row.to_dict()
+        else:
+            logs_base = fetch_team_game_logs(base_season)
+            if not logs_base.empty:
+                rolling = compute_team_rolling_stats(logs_base)
+                for team, group in rolling.groupby("team"):
+                    last = group.sort_values("date").iloc[-1]
+                    stats_2025[str(team)] = {
+                        "runs_scored_r15": last.get("runs_scored_r15", 4.5),
+                        "runs_allowed_r15": last.get("runs_allowed_r15", 4.5),
+                        "run_diff_r15":     last.get("run_diff_r15", 0.0),
+                        "k_rate_r15":       last.get("k_rate_r15", 0.21),
+                        "bb_rate_r15":      last.get("bb_rate_r15", 0.085),
+                        "run_diff_r10":     last.get("run_diff_r10", 0.0),
+                    }
+    except Exception as exc:
+        logger.warning("Could not load %d trailing stats: %s", base_season, exc)
+
+    # Step 3: Build final trailing stats per team
     result: dict[str, dict] = {}
 
-    for team, group in logs.groupby("team"):
-        group = group.sort_values("date").copy()
+    # Get all known teams
+    all_teams: set[str] = set(stats_2025.keys())
+    if not logs_2026.empty:
+        all_teams |= set(logs_2026["team"].unique())
 
-        last15 = group.tail(15)
-        last10 = group.tail(10)
+    for team in all_teams:
+        # Count 2026 games for this team
+        team_2026 = pd.DataFrame()
+        if not logs_2026.empty and "team" in logs_2026.columns:
+            team_2026 = logs_2026[logs_2026["team"] == team].sort_values("date")
 
-        rs15 = float(last15["runs_scored"].mean()) if last15["runs_scored"].notna().any() else 4.5
-        ra15 = float(last15["runs_allowed"].mean()) if last15["runs_allowed"].notna().any() else 4.5
+        n_games_2026 = len(team_2026)
 
-        denom15 = last15["hits"] + last15["walks"] + last15["strikeouts"]
-        safe_denom15 = denom15.replace(0, np.nan)
-        k15 = float((last15["strikeouts"] / safe_denom15).mean()) if safe_denom15.notna().any() else 0.20
-        bb15 = float((last15["walks"] / safe_denom15).mean()) if safe_denom15.notna().any() else 0.09
+        if n_games_2026 >= 15:
+            recent = team_2026.tail(15)
+            source = "2026_rolling"
+        elif n_games_2026 >= 5:
+            source = "2026_blend"
+            recent = team_2026
+        else:
+            recent = pd.DataFrame()
+            source = "2025_trailing"
 
-        rd15 = rs15 - ra15
+        if not recent.empty:
+            rs = pd.to_numeric(recent["runs_scored"], errors="coerce").fillna(0)
+            ra = pd.to_numeric(recent["runs_allowed"], errors="coerce").fillna(0)
+            h  = pd.to_numeric(recent.get("hits",       pd.Series([0] * len(recent))), errors="coerce").fillna(0)
+            bb = pd.to_numeric(recent.get("walks",      pd.Series([0] * len(recent))), errors="coerce").fillna(0)
+            so = pd.to_numeric(recent.get("strikeouts", pd.Series([0] * len(recent))), errors="coerce").fillna(0)
 
-        rd10 = float(
-            (last10["runs_scored"] - last10["runs_allowed"]).mean()
-        ) if len(last10) > 0 else 0.0
+            denom = (h + bb + so).replace(0, 1)
 
-        # v2 — home/away splits from last N home/away games
-        home_games = group[group["home_away"] == "H"].tail(15)
-        away_games = group[group["home_away"] == "A"].tail(15)
+            runs_scored_r15  = float(rs.mean())
+            runs_allowed_r15 = float(ra.mean())
+            run_diff_r15     = float((rs - ra).mean())
+            k_rate_r15       = float((so / denom).mean())
+            bb_rate_r15      = float((bb / denom).mean())
 
-        rs_home_r15 = float(home_games["runs_scored"].mean()) if home_games["runs_scored"].notna().any() else rs15
-        ra_home_r15 = float(home_games["runs_allowed"].mean()) if home_games["runs_allowed"].notna().any() else ra15
-        rs_away_r15 = float(away_games["runs_scored"].mean()) if away_games["runs_scored"].notna().any() else rs15
-        ra_away_r15 = float(away_games["runs_allowed"].mean()) if away_games["runs_allowed"].notna().any() else ra15
+            last10 = team_2026.tail(10) if n_games_2026 >= 10 else recent
+            rs10 = pd.to_numeric(last10["runs_scored"], errors="coerce").fillna(0)
+            ra10 = pd.to_numeric(last10["runs_allowed"], errors="coerce").fillna(0)
+            run_diff_r10 = float((rs10 - ra10).mean())
 
-        result[str(team)] = {
-            "runs_scored_r15": rs15,
-            "runs_allowed_r15": ra15,
-            "run_diff_r15": rd15,
-            "k_rate_r15": k15,
-            "bb_rate_r15": bb15,
-            "run_diff_r10": rd10,
-            # v2 splits
-            "runs_scored_home_r15": rs_home_r15,
-            "runs_allowed_home_r15": ra_home_r15,
-            "runs_scored_away_r15": rs_away_r15,
-            "runs_allowed_away_r15": ra_away_r15,
-        }
+            if source == "2026_blend" and team in stats_2025:
+                s25 = stats_2025[team]
+                w26 = n_games_2026 / 15.0
+                w25 = 1 - w26
+                runs_scored_r15  = w26 * runs_scored_r15  + w25 * s25.get("runs_scored_r15", 4.5)
+                runs_allowed_r15 = w26 * runs_allowed_r15 + w25 * s25.get("runs_allowed_r15", 4.5)
+                run_diff_r15     = w26 * run_diff_r15     + w25 * s25.get("run_diff_r15", 0.0)
+                k_rate_r15       = w26 * k_rate_r15       + w25 * s25.get("k_rate_r15", 0.21)
+                bb_rate_r15      = w26 * bb_rate_r15      + w25 * s25.get("bb_rate_r15", 0.085)
+                run_diff_r10     = w26 * run_diff_r10     + w25 * s25.get("run_diff_r10", 0.0)
 
-    # Cache as parquet
-    rows = [{"team": k, **v} for k, v in result.items()]
-    pd.DataFrame(rows).to_parquet(cache_path, index=False)
+            # Preserve home/away splits from 2025 if available (blend doesn't compute them)
+            s_base = stats_2025.get(team, {})
+            result[team] = {
+                "runs_scored_r15":        runs_scored_r15,
+                "runs_allowed_r15":       runs_allowed_r15,
+                "run_diff_r15":           run_diff_r15,
+                "k_rate_r15":             k_rate_r15,
+                "bb_rate_r15":            bb_rate_r15,
+                "run_diff_r10":           run_diff_r10,
+                "runs_scored_home_r15":   s_base.get("runs_scored_home_r15", runs_scored_r15),
+                "runs_allowed_home_r15":  s_base.get("runs_allowed_home_r15", runs_allowed_r15),
+                "runs_scored_away_r15":   s_base.get("runs_scored_away_r15", runs_scored_r15),
+                "runs_allowed_away_r15":  s_base.get("runs_allowed_away_r15", runs_allowed_r15),
+                "data_source":            source,
+                "games_2026":             n_games_2026,
+            }
+
+        elif team in stats_2025:
+            s = stats_2025[team].copy()
+            s["data_source"] = "2025_trailing"
+            s["games_2026"] = 0
+            result[team] = s
+
+    logger.info(
+        "Trailing stats: %d teams | "
+        "2026_rolling: %d | 2026_blend: %d | 2025_trailing: %d",
+        len(result),
+        sum(1 for v in result.values() if v.get("data_source") == "2026_rolling"),
+        sum(1 for v in result.values() if v.get("data_source") == "2026_blend"),
+        sum(1 for v in result.values() if v.get("data_source") == "2025_trailing"),
+    )
 
     return result
 
@@ -587,7 +783,7 @@ def predict_mlb_games(
         return []
 
     # Load trailing stats and v2 data
-    trailing_stats = get_trailing_stats(season=2025)
+    trailing_stats = get_trailing_stats()
 
     # v2 — fetch probable pitchers and pitcher season stats
     from line_tracker.model.mlb_data import (
@@ -807,6 +1003,19 @@ def predict_mlb_games(
             elif confidence == "Medium":
                 confidence = "Low"
 
+        # Determine data_source from trailing stats for each team
+        home_source = trailing_stats.get(home_br, {}).get("data_source", "2025_trailing")
+        away_source = trailing_stats.get(away_br, {}).get("data_source", "2025_trailing")
+        home_games_2026 = trailing_stats.get(home_br, {}).get("games_2026", 0)
+        away_games_2026 = trailing_stats.get(away_br, {}).get("games_2026", 0)
+
+        if "rolling" in home_source and "rolling" in away_source:
+            data_source = "2026_rolling"
+        elif home_games_2026 + away_games_2026 > 0:
+            data_source = f"2026_blend ({home_games_2026 + away_games_2026} games)"
+        else:
+            data_source = "2025_trailing"
+
         predictions.append({
             "game_id": g["game_id"],
             "game_date": date_str,
@@ -829,7 +1038,7 @@ def predict_mlb_games(
             "confidence": confidence,
             "ml_bet_qualified": ml_bet_qualified,
             "blind_spot": is_blind_spot,
-            "data_source": "2025_trailing",
+            "data_source": data_source,
             # v2 fields
             "home_pitcher": home_pitcher_name,
             "away_pitcher": away_pitcher_name,
