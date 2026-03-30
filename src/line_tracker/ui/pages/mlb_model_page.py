@@ -235,11 +235,14 @@ def _best_bet(p):
         best_ml_team = away_br
         best_ml_odds = away_ml
 
-    # Total play
+    # Total play — Overs only
+    # Only bet Overs — Under signal is 50% (coin flip) based on 46-game sample
+    # Over signal is 64% — meaningful edge
     total_play = None
-    if market_total and abs(total_edge) >= 0.8:
-        direction = "Over" if total_edge > 0 else "Under"
-        total_play = f"{direction} {market_total} ({total_edge:+.1f})"
+    if total_edge >= 0.8 and market_total:
+        total_play = f"Over {market_total} ({total_edge:+.1f})"
+    else:
+        total_play = None  # Skip unders entirely
 
     # Run line play
     rl_play = None
@@ -248,18 +251,26 @@ def _best_bet(p):
     elif run_diff < -2.0:
         rl_play = f"{away_br} +1.5 ({run_diff:+.1f})"
 
-    # Priority: strong ML first, then strong total, then moderate ML,
-    # then run line, then moderate total, else no play
-    if best_ml_val and best_ml_val >= 5.0:
+    # Only surface ML picks where model has sufficient conviction
+    # Threshold: favored team >= 57% AND edge >= 4%
+    # Based on 4-day data: losses concentrated in 51-56% range
+    ml_qualified = p.get("ml_bet_qualified", False)
+
+    if best_ml_val and best_ml_val >= 5.0 and ml_qualified:
         return f"{best_ml_team} ML {fmt_odds(best_ml_odds)}"
+
     if total_play and abs(total_edge) >= 1.2:
         return total_play
-    if best_ml_val and best_ml_val >= 4.0:
+
+    if best_ml_val and best_ml_val >= 4.0 and ml_qualified:
         return f"{best_ml_team} ML {fmt_odds(best_ml_odds)}"
+
     if rl_play:
         return rl_play
+
     if total_play:
         return total_play
+
     return "—"
 
 
@@ -283,85 +294,82 @@ def _find_best_bets(predictions):
         matchup = f"{p['away_team']} @ {p['home_team']}"
 
         # --- Moneyline bets ---
-        # Home ML value
-        if home_ml and abs(ml_edge) >= 0.04:
-            market_prob = _market_implied_prob(home_ml)
-            if market_prob and home_prob > market_prob:
-                edge_pct = (home_prob - market_prob) * 100
-                bets.append({
-                    "matchup": matchup,
-                    "bet_type": "Moneyline",
-                    "pick": f"{p['home_team']} ML",
-                    "odds": f"+{home_ml}" if home_ml > 0 else str(home_ml),
-                    "model_prob": home_prob,
-                    "market_prob": market_prob,
-                    "edge": edge_pct,
-                    "edge_type": "ML",
-                    "value_score": edge_pct,
-                    "confidence": p.get("confidence"),
-                    "away_sp": p.get("away_pitcher", "TBD"),
-                    "home_sp": p.get("home_pitcher", "TBD"),
-                    "away_era": p.get("away_pitcher_era"),
-                    "home_era": p.get("home_pitcher_era"),
-                    "temp_f": p.get("temp_f"),
-                    "wind_mph": p.get("wind_mph"),
-                    "wind_out_factor": p.get("wind_out_factor", 0),
-                    "model_total": model_total,
-                    "market_total": market_total,
-                    "total_edge": total_edge,
-                    "model_run_diff": p.get("model_run_diff"),
-                })
+        # Only show ML bets meeting the 57% threshold
+        if p.get("ml_bet_qualified", False):
+            # Home ML value
+            if home_ml and abs(ml_edge) >= 0.04:
+                market_prob = _market_implied_prob(home_ml)
+                if market_prob and home_prob > market_prob:
+                    edge_pct = (home_prob - market_prob) * 100
+                    bets.append({
+                        "matchup": matchup,
+                        "bet_type": "Moneyline",
+                        "pick": f"{p['home_team']} ML",
+                        "odds": f"+{home_ml}" if home_ml > 0 else str(home_ml),
+                        "model_prob": home_prob,
+                        "market_prob": market_prob,
+                        "edge": edge_pct,
+                        "edge_type": "ML",
+                        "value_score": edge_pct,
+                        "confidence": p.get("confidence"),
+                        "away_sp": p.get("away_pitcher", "TBD"),
+                        "home_sp": p.get("home_pitcher", "TBD"),
+                        "away_era": p.get("away_pitcher_era"),
+                        "home_era": p.get("home_pitcher_era"),
+                        "temp_f": p.get("temp_f"),
+                        "wind_mph": p.get("wind_mph"),
+                        "wind_out_factor": p.get("wind_out_factor", 0),
+                        "model_total": model_total,
+                        "market_total": market_total,
+                        "total_edge": total_edge,
+                        "model_run_diff": p.get("model_run_diff"),
+                        "ml_bet_qualified": True,
+                    })
 
-        # Away ML value
-        if away_ml and abs(ml_edge) >= 0.04:
-            market_prob = _market_implied_prob(away_ml)
-            if market_prob and away_prob > market_prob:
-                edge_pct = (away_prob - market_prob) * 100
-                bets.append({
-                    "matchup": matchup,
-                    "bet_type": "Moneyline",
-                    "pick": f"{p['away_team']} ML",
-                    "odds": f"+{away_ml}" if away_ml > 0 else str(away_ml),
-                    "model_prob": away_prob,
-                    "market_prob": market_prob,
-                    "edge": edge_pct,
-                    "edge_type": "ML",
-                    "value_score": edge_pct,
-                    "confidence": p.get("confidence"),
-                    "away_sp": p.get("away_pitcher", "TBD"),
-                    "home_sp": p.get("home_pitcher", "TBD"),
-                    "away_era": p.get("away_pitcher_era"),
-                    "home_era": p.get("home_pitcher_era"),
-                    "temp_f": p.get("temp_f"),
-                    "wind_mph": p.get("wind_mph"),
-                    "wind_out_factor": p.get("wind_out_factor", 0),
-                    "model_total": model_total,
-                    "market_total": market_total,
-                    "total_edge": total_edge,
-                    "model_run_diff": p.get("model_run_diff"),
-                })
+            # Away ML value
+            if away_ml and abs(ml_edge) >= 0.04:
+                market_prob = _market_implied_prob(away_ml)
+                if market_prob and away_prob > market_prob:
+                    edge_pct = (away_prob - market_prob) * 100
+                    bets.append({
+                        "matchup": matchup,
+                        "bet_type": "Moneyline",
+                        "pick": f"{p['away_team']} ML",
+                        "odds": f"+{away_ml}" if away_ml > 0 else str(away_ml),
+                        "model_prob": away_prob,
+                        "market_prob": market_prob,
+                        "edge": edge_pct,
+                        "edge_type": "ML",
+                        "value_score": edge_pct,
+                        "confidence": p.get("confidence"),
+                        "away_sp": p.get("away_pitcher", "TBD"),
+                        "home_sp": p.get("home_pitcher", "TBD"),
+                        "away_era": p.get("away_pitcher_era"),
+                        "home_era": p.get("home_pitcher_era"),
+                        "temp_f": p.get("temp_f"),
+                        "wind_mph": p.get("wind_mph"),
+                        "wind_out_factor": p.get("wind_out_factor", 0),
+                        "model_total": model_total,
+                        "market_total": market_total,
+                        "total_edge": total_edge,
+                        "model_run_diff": p.get("model_run_diff"),
+                        "ml_bet_qualified": True,
+                    })
 
         # --- Totals bets ---
-        # Only show totals with meaningful edge (>= 0.8 runs)
-        if market_total and model_total and abs(total_edge) >= 0.8:
-            if total_edge > 0:
-                pick = f"Over {market_total}"
-                direction = "OVER"
-            else:
-                pick = f"Under {market_total}"
-                direction = "UNDER"
-
+        # Only Overs — Under signal is 50% (coin flip) based on 46-game sample
+        if market_total and model_total and total_edge >= 0.8:
             bets.append({
                 "matchup": matchup,
                 "bet_type": "Total",
-                "pick": pick,
+                "pick": f"Over {market_total}",
                 "odds": "-110",  # standard juice
-                "direction": direction,
+                "direction": "OVER",
                 "model_total": model_total,
                 "market_total": market_total,
-                "edge": abs(total_edge),
+                "edge": total_edge,
                 "edge_type": "Total",
-                "value_score": abs(total_edge) * 3,  # scale to compare with ML edge
+                "value_score": total_edge * 3,  # scale to compare with ML edge
                 "confidence": p.get("confidence"),
                 "away_sp": p.get("away_pitcher", "TBD"),
                 "home_sp": p.get("home_pitcher", "TBD"),
@@ -728,7 +736,11 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Mkt Spread":    spread_str,
                 "Model Spread":  _model_spread_pick(p.get("model_run_diff")),
                 "Best Bet":      _best_bet(p),
-                "Confidence":    p.get("confidence", "—"),
+                "Confidence":    (
+                    f"{p.get('confidence', '—')} ⚠️"
+                    if p.get("blind_spot", False)
+                    else p.get("confidence", "—")
+                ),
             })
 
         df_display = pd.DataFrame(rows)
@@ -751,11 +763,18 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 ),
             }
         )
+        st.caption("⚠️ = Known blind spot matchup (model historically less accurate). Based on 46-game sample — revisit at 100 games.")
 
         # ------------------------------------------------------------------
         # Best Bets section
         # ------------------------------------------------------------------
         st.subheader("🎯 Best Bets")
+        st.caption(
+            "📊 Filters applied based on 46-game sample: "
+            "ML picks require 57%+ model confidence · "
+            "Totals: Overs only (64% hit rate) · "
+            "Unders skipped (50% hit rate)"
+        )
         fetched_at = st.session_state.get("mlb_odds_fetched_at")
         if fetched_at:
             age_minutes = (datetime.now() - fetched_at).seconds // 60
