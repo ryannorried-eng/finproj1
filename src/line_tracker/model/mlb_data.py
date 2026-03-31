@@ -20,6 +20,9 @@ import requests
 CACHE_DIR = Path.home() / ".cache" / "line_tracker" / "mlb"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+WEATHER_CACHE_DIR = CACHE_DIR / "weather"
+WEATHER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 logger = logging.getLogger(__name__)
 
 MLB_STATS_API = "https://statsapi.mlb.com/api/v1"
@@ -495,93 +498,37 @@ def load_mlb_training_data(
 
         merged["season"] = year
 
-        # ── Join historical weather ───────────────────────────────────────
-        try:
-            weather = fetch_historical_weather(year, force_refresh=force_refresh)
-            if not weather.empty:
-                weather_sub = weather[
-                    ["game_id", "temp_f", "wind_mph", "wind_dir", "precip_prob", "wind_out_factor"]
-                ].rename(columns={
-                    "temp_f": "_w_temp_f",
-                    "wind_mph": "_w_wind_mph",
-                    "wind_dir": "_w_wind_dir",
-                    "precip_prob": "_w_precip_prob",
-                    "wind_out_factor": "_w_wind_out_factor",
-                })
-                merged = merged.merge(weather_sub, on="game_id", how="left")
-
-                # Fallback: match by (date_str, home_team) for any still-missing rows
-                missing_mask = merged["_w_temp_f"].isna()
-                if missing_mask.any():
-                    weather_fb = weather[
-                        ["date", "home_team", "temp_f", "wind_mph", "wind_dir", "precip_prob", "wind_out_factor"]
-                    ].copy()
-                    weather_fb["date_str"] = weather_fb["date"].dt.strftime("%Y-%m-%d")
-                    weather_fb = (
-                        weather_fb
-                        .drop_duplicates(subset=["date_str", "home_team"])
-                        .rename(columns={
-                            "temp_f": "_fb_temp_f",
-                            "wind_mph": "_fb_wind_mph",
-                            "wind_dir": "_fb_wind_dir",
-                            "precip_prob": "_fb_precip_prob",
-                            "wind_out_factor": "_fb_wind_out_factor",
-                        })
-                    )
-                    merged = merged.merge(
-                        weather_fb[[
-                            "date_str", "home_team",
-                            "_fb_temp_f", "_fb_wind_mph", "_fb_wind_dir",
-                            "_fb_precip_prob", "_fb_wind_out_factor",
-                        ]],
-                        on=["date_str", "home_team"],
-                        how="left",
-                    )
-                    for src, dst in [
-                        ("_fb_temp_f", "_w_temp_f"),
-                        ("_fb_wind_mph", "_w_wind_mph"),
-                        ("_fb_wind_dir", "_w_wind_dir"),
-                        ("_fb_precip_prob", "_w_precip_prob"),
-                        ("_fb_wind_out_factor", "_w_wind_out_factor"),
-                    ]:
-                        merged[dst] = merged[dst].fillna(merged[src])
-                    merged = merged.drop(
-                        columns=[
-                            "_fb_temp_f", "_fb_wind_mph", "_fb_wind_dir",
-                            "_fb_precip_prob", "_fb_wind_out_factor",
-                        ],
-                        errors="ignore",
-                    )
-
-                # Coalesce into canonical columns with neutral defaults
-                merged["temp_f"] = merged["_w_temp_f"].fillna(72.0)
-                merged["wind_mph"] = merged["_w_wind_mph"].fillna(0.0)
-                merged["wind_dir"] = merged["_w_wind_dir"].fillna(0.0)
-                merged["wind_out_factor"] = merged["_w_wind_out_factor"].fillna(0.0)
-                merged["precip_prob"] = merged["_w_precip_prob"].fillna(0.0)
-                merged = merged.drop(
-                    columns=[
-                        "_w_temp_f", "_w_wind_mph", "_w_wind_dir",
-                        "_w_precip_prob", "_w_wind_out_factor",
-                    ],
-                    errors="ignore",
+        # ── Join historical weather (seasonal hourly cache) ───────────────
+        logger.info("Joining weather for season %d from hourly cache...", year)
+        w_temp_f = []
+        w_wind_mph = []
+        w_wind_dir = []
+        w_precip_prob = []
+        w_wind_out_factor = []
+        for _, mrow in merged.iterrows():
+            try:
+                w = get_game_weather(
+                    str(mrow["home_team"]),
+                    str(mrow["date_str"]),
+                    game_hour_local=19,
+                    season=year,
                 )
-            else:
-                merged["temp_f"] = 72.0
-                merged["wind_mph"] = 0.0
-                merged["wind_dir"] = 0.0
-                merged["wind_out_factor"] = 0.0
-                merged["precip_prob"] = 0.0
-        except Exception as exc:
-            logger.warning(
-                "Historical weather join failed for season %d: %s; using neutral defaults",
-                year, exc,
-            )
-            merged["temp_f"] = 72.0
-            merged["wind_mph"] = 0.0
-            merged["wind_dir"] = 0.0
-            merged["wind_out_factor"] = 0.0
-            merged["precip_prob"] = 0.0
+                w_temp_f.append(w["temp_f"])
+                w_wind_mph.append(w["wind_mph"])
+                w_wind_dir.append(float(w["wind_deg"]))
+                w_precip_prob.append(w["precip"])
+                w_wind_out_factor.append(w["wind_out_factor"])
+            except Exception:
+                w_temp_f.append(72.0)
+                w_wind_mph.append(0.0)
+                w_wind_dir.append(0.0)
+                w_precip_prob.append(0.0)
+                w_wind_out_factor.append(0.0)
+        merged["temp_f"] = w_temp_f
+        merged["wind_mph"] = w_wind_mph
+        merged["wind_dir"] = w_wind_dir
+        merged["precip_prob"] = w_precip_prob
+        merged["wind_out_factor"] = w_wind_out_factor
 
         all_seasons.append(merged)
 
@@ -1766,3 +1713,226 @@ def fetch_weather(home_team: str, game_date) -> dict | None:
     except Exception as exc:
         logger.warning("Weather parse failed for %s on %s: %s", home_team, date_str, exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Historical weather backfill — one request per team per season
+# ---------------------------------------------------------------------------
+
+# CF orientation for each park (degrees that wind blows OUT toward CF)
+# 0=N, 90=E, 180=S, 270=W
+_CF_ORIENTATION: dict[str, int] = {
+    "NYY": 315, "NYM": 45,  "BOS": 270, "TBR": 0,
+    "BAL": 315, "TOR": 0,   "CLE": 225, "CHW": 315,
+    "DET": 45,  "KCR": 270, "MIN": 0,   "HOU": 0,
+    "LAA": 270, "OAK": 270, "SEA": 315, "ATL": 270,
+    "MIA": 315, "PHI": 315, "WSN": 315, "CHC": 90,
+    "CIN": 270, "MIL": 270, "PIT": 90,  "STL": 315,
+    "ARI": 315, "COL": 315, "LAD": 315, "SDP": 270,
+    "SFG": 90,  "TEX": 315,
+}
+
+
+def _compute_wind_out_factor(team: str, wind_deg: int) -> float:
+    """Compute wind-out factor based on park CF orientation and wind direction.
+
+    Returns float between -1.0 (blowing in) and +1.0 (blowing out).
+    """
+    cf_dir = _CF_ORIENTATION.get(team, 315)
+    diff = abs(wind_deg - cf_dir) % 360
+    if diff > 180:
+        diff = 360 - diff
+    if diff <= 45:
+        factor = 1.0 - (diff / 45.0)
+        return round(factor, 2)
+    elif diff >= 135:
+        factor = -1.0 * (1.0 - (180 - diff) / 45.0)
+        return round(max(factor, -1.0), 2)
+    else:
+        return 0.0
+
+
+def _default_weather() -> dict:
+    return {
+        "temp_f": 70.0,
+        "wind_mph": 8.0,
+        "wind_deg": 0,
+        "wind_out_factor": 0.0,
+        "precip": 0.0,
+    }
+
+
+def fetch_historical_weather_season(
+    team: str,
+    season: int,
+) -> pd.DataFrame:
+    """Fetch full season of hourly weather for a team's park.
+
+    Uses Open-Meteo archive API — one request per team per season.
+    Caches result to parquet.
+
+    Returns DataFrame with columns:
+      date (date), hour (int), temp_f (float),
+      wind_mph (float), wind_deg (int), precip (float)
+    """
+    cache_path = WEATHER_CACHE_DIR / f"{team}_{season}_hourly.parquet"
+    if cache_path.exists():
+        return pd.read_parquet(cache_path)
+
+    coords = PARK_COORDS.get(team)
+    if not coords:
+        return pd.DataFrame()
+
+    lat, lon = coords
+    url = (
+        "https://archive-api.open-meteo.com/v1/archive"
+        f"?latitude={lat}&longitude={lon}"
+        f"&start_date={season}-03-01&end_date={season}-11-30"
+        "&hourly=temperature_2m,windspeed_10m,winddirection_10m,precipitation"
+        "&temperature_unit=fahrenheit&windspeed_unit=mph&timezone=America/New_York"
+    )
+
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("Weather fetch failed for %s %d: %s", team, season, exc)
+        return pd.DataFrame()
+
+    hourly = data.get("hourly", {})
+    times = hourly.get("time", [])
+    temps = hourly.get("temperature_2m", [])
+    winds = hourly.get("windspeed_10m", [])
+    wind_dirs = hourly.get("winddirection_10m", [])
+    precips = hourly.get("precipitation", [])
+
+    rows = []
+    for i, t in enumerate(times):
+        try:
+            dt = pd.Timestamp(t)
+            rows.append({
+                "date": dt.date(),
+                "hour": dt.hour,
+                "temp_f": _safe_float(temps[i] if i < len(temps) else None),
+                "wind_mph": _safe_float(winds[i] if i < len(winds) else None),
+                "wind_deg": int(wind_dirs[i]) if i < len(wind_dirs) and wind_dirs[i] is not None else 0,
+                "precip": _safe_float(precips[i] if i < len(precips) else None),
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+
+    df_out = pd.DataFrame(rows)
+    df_out.to_parquet(cache_path, index=False)
+    return df_out
+
+
+def get_game_weather(
+    team: str,
+    game_date: str,
+    game_hour_local: int = 19,
+    season: int = None,
+) -> dict:
+    """Look up historical weather for a specific game.
+
+    Uses cached hourly data from fetch_historical_weather_season().
+
+    Returns dict with:
+      temp_f, wind_mph, wind_deg, wind_out_factor, precip
+    """
+    if season is None:
+        season = pd.Timestamp(game_date).year
+
+    df = fetch_historical_weather_season(team, season)
+    if df.empty:
+        return _default_weather()
+
+    target_date = pd.Timestamp(game_date).date()
+    day_df = df[df["date"] == target_date]
+    if day_df.empty:
+        return _default_weather()
+
+    hour_df = day_df.copy()
+    hour_df = hour_df.assign(hour_diff=(hour_df["hour"] - game_hour_local).abs())
+    closest = hour_df.sort_values("hour_diff").iloc[0]
+
+    wind_deg = int(closest.get("wind_deg", 0))
+    wind_out = _compute_wind_out_factor(team, wind_deg)
+
+    return {
+        "temp_f": float(closest.get("temp_f", 70.0)),
+        "wind_mph": float(closest.get("wind_mph", 8.0)),
+        "wind_deg": wind_deg,
+        "wind_out_factor": wind_out,
+        "precip": float(closest.get("precip", 0.0)),
+    }
+
+
+def fetch_all_historical_weather(
+    seasons: list[int] = None,
+    max_workers: int = 12,
+) -> None:
+    """Fetch historical weather for all parks and all seasons in parallel.
+
+    Runs once — all results cached to parquet files in WEATHER_CACHE_DIR.
+
+    Usage::
+
+        from line_tracker.model.mlb_data import fetch_all_historical_weather
+        fetch_all_historical_weather([2022, 2023, 2024, 2025])
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if seasons is None:
+        seasons = [2022, 2023, 2024, 2025]
+
+    teams = list(PARK_COORDS.keys())
+    tasks = [(team, season) for team in teams for season in seasons]
+
+    pending = [
+        (team, season) for team, season in tasks
+        if not (WEATHER_CACHE_DIR / f"{team}_{season}_hourly.parquet").exists()
+    ]
+
+    if not pending:
+        logger.info("All weather data already cached (%d files)", len(tasks))
+        return
+
+    logger.info(
+        "Fetching weather for %d team-seasons in parallel (workers=%d)...",
+        len(pending), max_workers,
+    )
+
+    completed = 0
+    failed = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {
+            executor.submit(fetch_historical_weather_season, team, season): (team, season)
+            for team, season in pending
+        }
+        for future in as_completed(future_to_task):
+            team, season = future_to_task[future]
+            try:
+                df = future.result()
+                if df.empty:
+                    failed += 1
+                    logger.warning("Empty weather data: %s %d", team, season)
+                else:
+                    completed += 1
+                    if completed % 10 == 0:
+                        logger.info(
+                            "Weather progress: %d/%d completed, %d failed",
+                            completed, len(pending), failed,
+                        )
+            except Exception as exc:
+                failed += 1
+                logger.warning("Weather fetch error %s %d: %s", team, season, exc)
+
+    logger.info(
+        "Weather backfill complete: %d completed, %d failed out of %d total",
+        completed, failed, len(pending),
+    )

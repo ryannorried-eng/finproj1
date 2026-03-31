@@ -205,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     backfill_weather_p.add_argument(
         "--seasons",
         default="2022,2023,2024,2025",
-        help="Comma-separated seasons to backfill",
+        help="Comma-separated seasons to backfill (default: 2022,2023,2024,2025)",
     )
     backfill_weather_p.add_argument(
         "--workers", type=int, default=12,
@@ -667,6 +667,7 @@ def _cmd_train_mlb_model(args) -> int:
 
 def _cmd_backfill_weather(args) -> int:
     from line_tracker.model.mlb_data import fetch_all_historical_weather
+
     season_list = [int(s.strip()) for s in args.seasons.split(",")]
     print(f"Backfilling weather for seasons: {season_list}")
     fetch_all_historical_weather(seasons=season_list, max_workers=args.workers)
