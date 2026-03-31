@@ -319,13 +319,24 @@ def get_trailing_stats(base_season: int = 2025) -> dict[str, dict]:
 
         n_games_2026 = len(team_2026)
 
+        # Blend threshold: require 8+ games before mixing 2026 data
+        # Rationale: 4-5 game samples are too small and prone to outlier
+        # skew (e.g. one blowout loss inflates/deflates rolling stats).
+        # Cap blend at 50% until full 15-game window to prevent
+        # early-season noise from dominating predictions.
+        # Revisit threshold at 50+ games if model accuracy degrades.
         if n_games_2026 >= 15:
+            # Full 2026 rolling window
             recent = team_2026.tail(15)
             source = "2026_rolling"
-        elif n_games_2026 >= 5:
+        elif n_games_2026 >= 8:
+            # Partial blend — capped at 50% 2026 weight
+            # 4-5 game samples too small and prone to outlier skew
             source = "2026_blend"
             recent = team_2026
         else:
+            # Fewer than 8 games — pure 2025 trailing
+            # Not enough 2026 data to trust yet
             recent = pd.DataFrame()
             source = "2025_trailing"
 
@@ -351,7 +362,9 @@ def get_trailing_stats(base_season: int = 2025) -> dict[str, dict]:
 
             if source == "2026_blend" and team in stats_2025:
                 s25 = stats_2025[team]
-                w26 = n_games_2026 / 15.0
+                # Gradual blend capped at 50% until full 15-game window
+                raw_weight = (n_games_2026 - 7) / 8.0  # 8 games = 12.5%, 14 games = 87.5%
+                w26 = min(raw_weight, 0.50)            # cap at 50%
                 w25 = 1 - w26
                 runs_scored_r15  = w26 * runs_scored_r15  + w25 * s25.get("runs_scored_r15", 4.5)
                 runs_allowed_r15 = w26 * runs_allowed_r15 + w25 * s25.get("runs_allowed_r15", 4.5)
