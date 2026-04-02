@@ -518,7 +518,7 @@ def load_mlb_training_data(
                 w_wind_dir.append(float(w["wind_deg"]))
                 w_precip_prob.append(w["precip"])
                 w_wind_out_factor.append(w["wind_out_factor"])
-            except Exception:
+            except (TimeoutError, requests.exceptions.Timeout, Exception):
                 w_temp_f.append(72.0)
                 w_wind_mph.append(0.0)
                 w_wind_dir.append(0.0)
@@ -1493,6 +1493,7 @@ def fetch_batter_game_logs(season: int, force_refresh: bool = False) -> pd.DataF
 def fetch_historical_weather(
     season: int,
     force_refresh: bool = False,
+    max_games: int = 50,
 ) -> pd.DataFrame:
     """Fetch historical game-time weather for every game in a season.
 
@@ -1506,6 +1507,14 @@ def fetch_historical_weather(
 
     Cache path:
       CACHE_DIR / f"historical_weather_{season}.parquet"
+
+    Parameters
+    ----------
+    max_games:
+        If the number of unique park-dates that need fetching exceeds this
+        limit, skip the network fetch entirely and return whatever is already
+        cached (or an empty DataFrame if no cache exists).  Prevents runaway
+        fetches for full seasons with 2,400+ games.
     """
     cache_path = CACHE_DIR / f"historical_weather_{season}.parquet"
     if not force_refresh and cache_path.exists():
@@ -1530,6 +1539,27 @@ def fetch_historical_weather(
     # Group by (home_team, date) so each unique park-date is fetched once
     park_dates = schedule[["home_team", "date"]].drop_duplicates().copy()
     park_dates["date_str"] = park_dates["date"].dt.strftime("%Y-%m-%d")
+
+    # Guard: if there are too many park-dates to fetch, return existing cache or empty
+    if len(park_dates) > max_games:
+        if cache_path.exists():
+            logger.warning(
+                "Season %d has %d park-dates to fetch (limit %d); "
+                "returning existing cache as-is.",
+                season, len(park_dates), max_games,
+            )
+            return pd.read_parquet(cache_path)
+        logger.warning(
+            "Season %d has %d park-dates to fetch (limit %d); "
+            "skipping fetch entirely and returning empty DataFrame.",
+            season, len(park_dates), max_games,
+        )
+        return pd.DataFrame(
+            columns=[
+                "game_id", "date", "home_team",
+                "temp_f", "wind_mph", "wind_dir", "precip_prob", "wind_out_factor",
+            ]
+        )
 
     weather_records: dict[tuple, dict | None] = {}
 
@@ -1561,7 +1591,7 @@ def fetch_historical_weather(
         )
 
         try:
-            resp = requests.get(url, timeout=30)
+            resp = requests.get(url, timeout=10)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
