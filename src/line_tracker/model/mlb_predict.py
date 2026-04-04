@@ -724,6 +724,7 @@ def _fetch_mlb_odds() -> list[dict]:
 def predict_mlb_games(
     target_date: date | None = None,
     models_dir: Path | None = None,
+    use_ensemble: bool = True,
 ) -> list[dict]:
     """Generate MLB model predictions for a given date.
 
@@ -733,6 +734,9 @@ def predict_mlb_games(
         Date to predict. Defaults to today.
     models_dir:
         Directory containing model artifacts.
+    use_ensemble:
+        If True (default), enrich predictions with ensemble meta-model outputs.
+        Falls back gracefully to base moneyline if ensemble artifacts are absent.
 
     Returns
     -------
@@ -972,6 +976,7 @@ def predict_mlb_games(
         market_total = g.get("market_total")
 
         # Edges
+        devig_home: float | None = None
         if market_home_ml is not None and market_away_ml is not None:
             implied_home = _american_to_prob(market_home_ml)
             implied_away = _american_to_prob(market_away_ml)
@@ -1029,7 +1034,7 @@ def predict_mlb_games(
         else:
             data_source = "2025_trailing"
 
-        predictions.append({
+        pred = {
             "game_id": g["game_id"],
             "game_date": date_str,
             "home_team": home_full,
@@ -1060,7 +1065,49 @@ def predict_mlb_games(
             "temp_f": round(weather["temp_f"], 1) if weather else None,
             "wind_mph": round(weather["wind_mph"], 1) if weather else None,
             "wind_out_factor": round(weather["wind_out_factor"], 2) if weather else None,
-        })
+        }
+
+        # ------------------------------------------------------------------
+        # Ensemble enrichment (additive — does not break base predictions)
+        # ------------------------------------------------------------------
+        if use_ensemble:
+            try:
+                from line_tracker.model.mlb_ensemble import predict_ensemble as _ens
+                pred = _ens(pred)
+
+                # If ensemble produced a recommended_prob, recalculate edge
+                # using it instead of the raw moneyline probability.
+                rec_prob = pred.get("recommended_prob")
+                if rec_prob is not None and devig_home is not None:
+                    new_ml_edge = rec_prob - devig_home
+                    pred["ml_edge"] = round(new_ml_edge, 4)
+
+                    # Recalculate confidence and ml_bet_qualified
+                    abs_new_ml = abs(new_ml_edge)
+                    if abs_new_ml >= 0.05 or abs(total_edge) >= 1.0:
+                        new_conf = "High"
+                    elif abs_new_ml >= 0.03 or abs(total_edge) >= 0.6:
+                        new_conf = "Medium"
+                    else:
+                        new_conf = "Low"
+                    if is_blind_spot:
+                        if new_conf == "High":
+                            new_conf = "Medium"
+                        elif new_conf == "Medium":
+                            new_conf = "Low"
+                    pred["confidence"] = new_conf
+
+                    away_win_prob_ens = 1 - rec_prob
+                    favored_prob_ens = max(rec_prob, away_win_prob_ens)
+                    pred["ml_bet_qualified"] = (
+                        favored_prob_ens >= 0.57 and abs_new_ml >= 0.04
+                    )
+
+            except Exception as exc:
+                logger.debug("Ensemble enrichment failed for %s @ %s: %s",
+                             away_full, home_full, exc)
+
+        predictions.append(pred)
 
     logger.info("Generated %d MLB predictions for %s", len(predictions), date_str)
     return predictions
