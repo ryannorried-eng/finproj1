@@ -1693,8 +1693,19 @@ def fetch_historical_weather(
     return df
 
 
+# Module-level TTL cache: (team, date_str) → {"data": dict|None, "ts": float}
+# Entries expire after 30 minutes to avoid hammering the free-tier Open-Meteo API
+# (rate limit ~10 req/min) when predict_mlb_games is called repeatedly.
+_weather_cache: dict[tuple, dict] = {}
+
+_WEATHER_CACHE_TTL = 1800  # seconds
+
+
 def fetch_weather(home_team: str, game_date) -> dict | None:
     """Fetch game-time weather via Open-Meteo (no API key required).
+
+    Results are cached in memory for 30 minutes keyed by (team, date) to
+    avoid 429 rate-limit errors when many games are predicted in one run.
 
     Returns dict with keys: temp_f, wind_mph, wind_dir, precip_prob,
     wind_out_factor.  Returns None on any failure.
@@ -1708,6 +1719,13 @@ def fetch_weather(home_team: str, game_date) -> dict | None:
         date_str = game_date.strftime("%Y-%m-%d")
     else:
         date_str = str(game_date)
+
+    # Check TTL cache before making an HTTP request
+    cache_key = (home_team, date_str)
+    cached = _weather_cache.get(cache_key)
+    if cached is not None and time.time() - cached["ts"] < _WEATHER_CACHE_TTL:
+        logger.debug("Weather cache hit for %s on %s", home_team, date_str)
+        return cached["data"]
 
     lat, lon = coords
     url = (
@@ -1726,6 +1744,7 @@ def fetch_weather(home_team: str, game_date) -> dict | None:
         data = resp.json()
     except Exception as exc:
         logger.warning("Weather fetch failed for %s on %s: %s", home_team, date_str, exc)
+        _weather_cache[cache_key] = {"data": None, "ts": time.time()}
         return None
 
     try:
@@ -1743,15 +1762,18 @@ def fetch_weather(home_team: str, game_date) -> dict | None:
             wind_dir_rad = math.radians(wind_dir)
             wind_out_factor = wind_mph * math.cos(wind_dir_rad) * 0.1
 
-        return {
+        result = {
             "temp_f": temp_f,
             "wind_mph": wind_mph,
             "wind_dir": wind_dir,
             "precip_prob": precip_prob,
             "wind_out_factor": wind_out_factor,
         }
+        _weather_cache[cache_key] = {"data": result, "ts": time.time()}
+        return result
     except Exception as exc:
         logger.warning("Weather parse failed for %s on %s: %s", home_team, date_str, exc)
+        _weather_cache[cache_key] = {"data": None, "ts": time.time()}
         return None
 
 

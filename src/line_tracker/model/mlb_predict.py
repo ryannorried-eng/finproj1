@@ -855,6 +855,12 @@ def predict_mlb_games(
 
     predictions: list[dict] = []
 
+    # Per-run weather deduplication: avoids re-fetching the same ballpark
+    # within one predict_mlb_games call (e.g. doubleheaders, repeated calls).
+    # The module-level TTL cache in mlb_data.py handles cross-call deduplication.
+    _WEATHER_SENTINEL = object()
+    _weather_run_cache: dict[str, dict | None] = {}
+
     for g in target_games:
         home_full = g["home_team"]
         away_full = g["away_team"]
@@ -906,12 +912,15 @@ def predict_mlb_games(
                 }
                 away_pitcher_era = away_pitcher_stats["era"]
 
-        # v2 — fetch weather for home park
-        weather: dict | None = None
-        try:
-            weather = fetch_weather(home_br, target_date)
-        except Exception as exc:
-            logger.debug("Weather fetch failed for %s: %s", home_br, exc)
+        # v2 — fetch weather for home park (deduplicated within this run)
+        weather: dict | None = _weather_run_cache.get(home_br, _WEATHER_SENTINEL)
+        if weather is _WEATHER_SENTINEL:
+            try:
+                weather = fetch_weather(home_br, target_date)
+            except Exception as exc:
+                logger.warning("Weather fetch failed for %s: %s", home_br, exc)
+                weather = None
+            _weather_run_cache[home_br] = weather
 
         # Build features
         X = build_prediction_features(
