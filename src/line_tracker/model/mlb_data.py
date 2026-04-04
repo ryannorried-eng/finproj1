@@ -1494,6 +1494,7 @@ def fetch_historical_weather(
     season: int,
     force_refresh: bool = False,
     max_games: int = 50,
+    allow_full_fetch: bool = False,
 ) -> pd.DataFrame:
     """Fetch historical game-time weather for every game in a season.
 
@@ -1515,7 +1516,15 @@ def fetch_historical_weather(
         limit, skip the network fetch entirely and return whatever is already
         cached (or an empty DataFrame if no cache exists).  Prevents runaway
         fetches for full seasons with 2,400+ games.
+    allow_full_fetch:
+        If True, raise the effective limit to 200 park-dates.  Set this to
+        True for the current season where early-season schedules have far
+        fewer games than a completed 162-game season (2,400+ park-dates).
     """
+    import datetime as _dt
+    current_year = _dt.date.today().year
+    effective_max = 200 if allow_full_fetch or season == current_year else max_games
+
     cache_path = CACHE_DIR / f"historical_weather_{season}.parquet"
     if not force_refresh and cache_path.exists():
         logger.debug("Loading historical weather from cache: %s", cache_path)
@@ -1540,19 +1549,20 @@ def fetch_historical_weather(
     park_dates = schedule[["home_team", "date"]].drop_duplicates().copy()
     park_dates["date_str"] = park_dates["date"].dt.strftime("%Y-%m-%d")
 
-    # Guard: if there are too many park-dates to fetch, return existing cache or empty
-    if len(park_dates) > max_games:
+    # Guard: if there are too many park-dates to fetch, return existing cache or empty.
+    # Current-season fetches use effective_max=200; completed seasons use max_games=50.
+    if len(park_dates) > effective_max:
         if cache_path.exists():
             logger.warning(
                 "Season %d has %d park-dates to fetch (limit %d); "
                 "returning existing cache as-is.",
-                season, len(park_dates), max_games,
+                season, len(park_dates), effective_max,
             )
             return pd.read_parquet(cache_path)
         logger.warning(
             "Season %d has %d park-dates to fetch (limit %d); "
             "skipping fetch entirely and returning empty DataFrame.",
-            season, len(park_dates), max_games,
+            season, len(park_dates), effective_max,
         )
         return pd.DataFrame(
             columns=[
