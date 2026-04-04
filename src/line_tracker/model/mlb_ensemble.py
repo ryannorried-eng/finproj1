@@ -322,6 +322,7 @@ def train_ensemble(
             "trained_at": trained_at,
             "disagreement_threshold": DISAGREEMENT_THRESHOLD,
             "seasons": seasons,
+            "primary_model": True,  # LR is the primary ensemble model
         },
     }
     lr_path = models_dir / f"mlb_ensemble_lr_v{timestamp}.joblib"
@@ -338,6 +339,7 @@ def train_ensemble(
             "trained_at": trained_at,
             "disagreement_threshold": DISAGREEMENT_THRESHOLD,
             "seasons": seasons,
+            "primary_model": False,  # GBM is reference only; LR is primary
         },
     }
     gbm_path = models_dir / f"mlb_ensemble_gbm_v{timestamp}.joblib"
@@ -463,6 +465,7 @@ def predict_ensemble(base_pred_dict: dict) -> dict:
             **base_pred_dict,
             "ensemble_prob": None,
             "ensemble_lr_prob": None,
+            "ensemble_gbm_prob": None,
             "margin_implied_prob": round(margin_imp, 4),
             "model_disagreement": round(disagreement, 4),
             "flagged": flagged,
@@ -473,26 +476,27 @@ def predict_ensemble(base_pred_dict: dict) -> dict:
     # -- Build feature vector -------------------------------------------
     feat = np.array([[moneyline_prob, margin_pred, totals_pred, margin_imp, disagreement]])
 
-    # -- GBM prediction -------------------------------------------------
-    gbm_art = artifacts["gbm"]
-    ensemble_prob = float(gbm_art["model"].predict_proba(feat)[0][1])
-
-    # -- LR prediction --------------------------------------------------
+    # -- LR prediction (PRIMARY — 55.8% CV vs 54.8% for GBM) -----------
     lr_art = artifacts["lr"]
     lr_scaler = lr_art.get("scaler")
     if lr_scaler is not None:
         feat_scaled = lr_scaler.transform(feat)
     else:
         feat_scaled = feat
-    ensemble_lr_prob = float(lr_art["model"].predict_proba(feat_scaled)[0][1])
+    ensemble_prob = float(lr_art["model"].predict_proba(feat_scaled)[0][1])
 
-    # -- Recommended probability ----------------------------------------
+    # -- GBM prediction (reference only) --------------------------------
+    gbm_art = artifacts["gbm"]
+    ensemble_gbm_prob = float(gbm_art["model"].predict_proba(feat)[0][1])
+
+    # -- Recommended probability (LR as primary) -----------------------
     recommended_prob: float | None = ensemble_prob if not flagged else None
 
     return {
         **base_pred_dict,
-        "ensemble_prob": round(ensemble_prob, 4),
-        "ensemble_lr_prob": round(ensemble_lr_prob, 4),
+        "ensemble_prob": round(ensemble_prob, 4),        # LR (primary)
+        "ensemble_lr_prob": round(ensemble_prob, 4),     # alias for clarity
+        "ensemble_gbm_prob": round(ensemble_gbm_prob, 4),  # GBM (reference)
         "margin_implied_prob": round(margin_imp, 4),
         "model_disagreement": round(disagreement, 4),
         "flagged": flagged,
