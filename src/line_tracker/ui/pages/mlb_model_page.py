@@ -716,6 +716,21 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             else:
                 spread_str = "-1.5 / +1.5" if p.get("market_total") else "—"
 
+            # Model agreement indicator
+            disagreement = p.get("model_disagreement")
+            is_flagged = p.get("flagged", False)
+            if disagreement is None:
+                agreement_str = "—"
+            elif is_flagged:
+                agreement_str = f"🔴 {disagreement:.3f}"
+            elif disagreement >= 0.05:
+                agreement_str = f"🟡 {disagreement:.3f}"
+            else:
+                agreement_str = f"🟢 {disagreement:.3f}"
+
+            ensemble_prob = p.get("ensemble_prob")
+            ensemble_str = f"{ensemble_prob:.1%}" if ensemble_prob is not None else "—"
+
             rows.append({
                 "Matchup":       f"{p['away_team']} @ {p['home_team']}",
                 "Time":          _format_time(p.get("commence_time")),
@@ -727,6 +742,8 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                                      p.get("wind_out_factor", 0),
                                  ),
                 "Win%":          win_pct,
+                "Ensemble":      ensemble_str,
+                "Agreement":     agreement_str,
                 "Pred Score":    pred_score,
                 "Pred Total":    f"{p.get('model_total_runs', 0):.1f}",
                 "Mkt Total":     str(p.get("market_total", "—")),
@@ -735,7 +752,11 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Home ML":       fmt_ml(home_ml),
                 "Mkt Spread":    spread_str,
                 "Model Spread":  _model_spread_pick(p.get("model_run_diff")),
-                "Best Bet":      _best_bet(p),
+                "Best Bet":      (
+                    "⚠️ Models disagree — skip this game"
+                    if is_flagged
+                    else _best_bet(p)
+                ),
                 "Confidence":    (
                     f"{p.get('confidence', '—')} ⚠️"
                     if p.get("blind_spot", False)
@@ -753,17 +774,33 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                     "Win%",
                     help="Away team win probability / Home team win probability"
                 ),
+                "Ensemble": st.column_config.TextColumn(
+                    "Ensemble",
+                    help="GBM meta-model home win probability (stacks all three base models)"
+                ),
+                "Agreement": st.column_config.TextColumn(
+                    "Agreement",
+                    help=(
+                        "Model agreement: 🟢 < 0.05 (agree) · "
+                        "🟡 0.05–0.08 (slight disagreement) · "
+                        "🔴 > 0.08 (flagged — do not bet)"
+                    ),
+                ),
                 "Total Edge": st.column_config.TextColumn(
                     "Total Edge",
                     help="Model predicted total minus market total. Positive = lean over."
                 ),
                 "Best Bet": st.column_config.TextColumn(
                     "Best Bet",
-                    help="Best betting opportunity for this game based on model edge"
+                    help="Best betting opportunity. ⚠️ = models disagree, skip this game."
                 ),
             }
         )
-        st.caption("⚠️ = Known blind spot matchup (model historically less accurate). Based on 46-game sample — revisit at 100 games.")
+        st.caption(
+            "⚠️ = Known blind spot matchup (model historically less accurate). "
+            "Agreement: 🟢 agree · 🟡 slight disagreement · 🔴 flagged (skip). "
+            "Based on 46-game sample — revisit at 100 games."
+        )
 
         # ------------------------------------------------------------------
         # Best Bets section

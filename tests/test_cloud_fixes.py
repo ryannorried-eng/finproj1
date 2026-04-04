@@ -212,8 +212,12 @@ def test_has_persistent_db_true_when_db_path_file_exists(monkeypatch, tmp_path):
         assert cfg.has_persistent_db() is True
 
 
-def test_has_persistent_db_false_when_db_path_file_missing(monkeypatch, tmp_path):
-    """has_persistent_db returns False when DB_PATH is set but file doesn't exist yet."""
+def test_has_persistent_db_true_when_db_path_configured(monkeypatch, tmp_path):
+    """has_persistent_db returns True when DB_PATH is set, even if file doesn't exist yet.
+
+    LineStore creates the DB on first connect, so has_persistent_db() treats a
+    configured DB_PATH as persistent regardless of whether the file is present.
+    """
     db = str(tmp_path / "nonexistent.db")
     monkeypatch.setenv("DB_PATH", db)
 
@@ -222,4 +226,4 @@ def test_has_persistent_db_false_when_db_path_file_missing(monkeypatch, tmp_path
 
     with patch.dict("sys.modules", {"streamlit": mock_st}):
         cfg = _reload_config()
-        assert cfg.has_persistent_db() is False
+        assert cfg.has_persistent_db() is True

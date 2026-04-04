@@ -196,6 +196,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Min |ml_edge| to display (default: 0.0)",
     )
     predict_mlb_p.add_argument("--db", default="lines.db", help="DB path")
+    predict_mlb_p.add_argument(
+        "--no-ensemble", action="store_true",
+        help="Skip ensemble meta-model enrichment (use base moneyline only)",
+    )
+
+    # --- train-mlb-ensemble ---
+    train_ens_p = sub.add_parser(
+        "train-mlb-ensemble",
+        help="Train ensemble meta-model on top of MLB base models",
+    )
+    train_ens_p.add_argument(
+        "--seasons",
+        default="2022,2023,2024,2025",
+        help="Comma-separated seasons (default: 2022,2023,2024,2025)",
+    )
+    train_ens_p.add_argument(
+        "--models-dir", default=None,
+        help="Directory to save ensemble artifacts",
+    )
+
+    # --- predict-mlb-ensemble ---
+    predict_ens_p = sub.add_parser(
+        "predict-mlb-ensemble",
+        help="Generate MLB predictions with ensemble meta-model enrichment",
+    )
+    predict_ens_p.add_argument(
+        "--date", default=None,
+        help="Date to predict YYYY-MM-DD (default: today)",
+    )
+    predict_ens_p.add_argument(
+        "--min-edge", type=float, default=0.0,
+        help="Min |ml_edge| to display (default: 0.0)",
+    )
 
     # --- backfill-weather ---
     backfill_weather_p = sub.add_parser(
@@ -250,6 +283,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_train_mlb_model(args)
     if args.command == "predict-mlb":
         return _cmd_predict_mlb(args)
+    if args.command == "train-mlb-ensemble":
+        return _cmd_train_mlb_ensemble(args)
+    if args.command == "predict-mlb-ensemble":
+        return _cmd_predict_mlb_ensemble(args)
     if args.command == "backfill-weather":
         return _cmd_backfill_weather(args)
     return 0
@@ -684,7 +721,8 @@ def _cmd_predict_mlb(args) -> int:
     from line_tracker.model.mlb_predict import predict_mlb_games
 
     target = date_type.fromisoformat(args.date) if args.date else date_type.today()
-    preds = predict_mlb_games(target_date=target)
+    use_ensemble = not getattr(args, "no_ensemble", False)
+    preds = predict_mlb_games(target_date=target, use_ensemble=use_ensemble)
 
     if args.save:
         from line_tracker.db.repos.mlb_predictions_repo import upsert_prediction
@@ -708,7 +746,9 @@ def _cmd_predict_mlb(args) -> int:
 
     print(f"\n⚾ MLB Predictions for {target} ({len(filtered)} games):\n")
     for p in filtered:
-        print(f"  {p['away_team']} @ {p['home_team']}")
+        is_flagged = p.get("flagged", False)
+        flag_str = " ⚠️" if is_flagged else ""
+        print(f"  {p['away_team']} @ {p['home_team']}{flag_str}")
 
         home_p = p.get('home_pitcher') or 'TBD'
         away_p = p.get('away_pitcher') or 'TBD'
@@ -723,14 +763,82 @@ def _cmd_predict_mlb(args) -> int:
         if temp and wind:
             print(f"    Weather: {temp:.0f}°F, {wind:.0f}mph {wind_dir}")
 
+        ens_prob = p.get("ensemble_prob")
+        ens_str = f" | Ensemble: {ens_prob:.1%}" if ens_prob is not None else ""
+        disagreement = p.get("model_disagreement")
+        dis_str = f" | Disagreement: {disagreement:.3f}" if disagreement is not None else ""
+
         print(
             f"    Win%: {p['model_home_win_prob']:.1%} | "
             f"Margin: {p['model_run_diff']:+.1f} | "
             f"Total: {p['model_total_runs']:.1f} vs mkt {p.get('market_total', '—')} "
             f"(edge: {p.get('total_edge', 0):+.1f}) | "
+            f"ML Edge: {p['ml_edge']:+.1%}{ens_str}{dis_str} | "
+            f"{p['confidence']}"
+        )
+        if is_flagged and p.get("flag_reason"):
+            print(f"    ⚠️  FLAGGED: {p['flag_reason']} — skip this game")
+        print()
+    return 0
+
+
+def _cmd_train_mlb_ensemble(args) -> int:
+    import warnings
+    warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+
+    from pathlib import Path as _Path
+    from line_tracker.model.mlb_ensemble import train_ensemble
+
+    seasons = [int(s) for s in args.seasons.split(",")]
+    models_dir = _Path(args.models_dir) if args.models_dir else None
+    train_ensemble(seasons=seasons, models_dir=models_dir)
+    return 0
+
+
+def _cmd_predict_mlb_ensemble(args) -> int:
+    """predict-mlb-ensemble: predict with ensemble enrichment (always on)."""
+    import warnings
+    warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+
+    from datetime import date as date_type
+    from line_tracker.model.mlb_predict import predict_mlb_games
+
+    target = date_type.fromisoformat(args.date) if args.date else date_type.today()
+    preds = predict_mlb_games(target_date=target, use_ensemble=True)
+
+    min_edge = getattr(args, "min_edge", 0.0)
+    filtered = [
+        p for p in preds
+        if abs(p.get("ml_edge") or 0) >= min_edge
+        or abs(p.get("total_edge") or 0) >= 0.5
+    ]
+    filtered.sort(key=lambda x: abs(x.get("ml_edge") or 0), reverse=True)
+
+    if not filtered:
+        print(f"No predictions with |ml_edge| >= {min_edge}")
+        return 0
+
+    print(f"\n⚾ MLB Predictions (Ensemble) for {target} ({len(filtered)} games):\n")
+    for p in filtered:
+        is_flagged = p.get("flagged", False)
+        flag_str = " ⚠️" if is_flagged else ""
+        print(f"  {p['away_team']} @ {p['home_team']}{flag_str}")
+
+        ens_prob = p.get("ensemble_prob")
+        dis = p.get("model_disagreement")
+        rec = p.get("recommended_prob")
+
+        if ens_prob is not None:
+            print(f"    Ensemble: {ens_prob:.1%} | Disagreement: {dis:.3f} | "
+                  f"Recommended: {f'{rec:.1%}' if rec is not None else 'None (flagged)'}")
+        print(
+            f"    Win%: {p['model_home_win_prob']:.1%} | "
+            f"Margin: {p['model_run_diff']:+.1f} | "
             f"ML Edge: {p['ml_edge']:+.1%} | "
             f"{p['confidence']}"
         )
+        if is_flagged and p.get("flag_reason"):
+            print(f"    ⚠️  FLAGGED: {p['flag_reason']} — skip this game")
         print()
     return 0
 
