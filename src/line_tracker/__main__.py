@@ -766,15 +766,18 @@ def _cmd_predict_mlb(args) -> int:
         ens_prob = p.get("ensemble_prob")
         ens_str = f" | Ensemble: {ens_prob:.1%}" if ens_prob is not None else ""
         disagreement = p.get("model_disagreement")
-        dis_str = f" | Disagreement: {disagreement:.3f}" if disagreement is not None else ""
+        if disagreement is not None:
+            agree_emoji = "🟢" if disagreement < 0.04 else "🟡" if disagreement < 0.08 else "🔴"
+            dis_str = f" | Disagreement: {disagreement:.3f} | {agree_emoji}"
+        else:
+            dis_str = ""
 
         print(
             f"    Win%: {p['model_home_win_prob']:.1%} | "
             f"Margin: {p['model_run_diff']:+.1f} | "
             f"Total: {p['model_total_runs']:.1f} vs mkt {p.get('market_total', '—')} "
             f"(edge: {p.get('total_edge', 0):+.1f}) | "
-            f"ML Edge: {p['ml_edge']:+.1%}{ens_str}{dis_str} | "
-            f"{p['confidence']}"
+            f"ML Edge: {p['ml_edge']:+.1%}{ens_str}{dis_str}"
         )
         if is_flagged and p.get("flag_reason"):
             print(f"    ⚠️  FLAGGED: {p['flag_reason']} — skip this game")
@@ -829,13 +832,13 @@ def _cmd_predict_mlb_ensemble(args) -> int:
         rec = p.get("recommended_prob")
 
         if ens_prob is not None:
-            print(f"    Ensemble: {ens_prob:.1%} | Disagreement: {dis:.3f} | "
+            agree_emoji = "🟢" if dis < 0.04 else "🟡" if dis < 0.08 else "🔴"
+            print(f"    Ensemble: {ens_prob:.1%} | Disagreement: {dis:.3f} | {agree_emoji} | "
                   f"Recommended: {f'{rec:.1%}' if rec is not None else 'None (flagged)'}")
         print(
             f"    Win%: {p['model_home_win_prob']:.1%} | "
             f"Margin: {p['model_run_diff']:+.1f} | "
-            f"ML Edge: {p['ml_edge']:+.1%} | "
-            f"{p['confidence']}"
+            f"ML Edge: {p['ml_edge']:+.1%}"
         )
         if is_flagged and p.get("flag_reason"):
             print(f"    ⚠️  FLAGGED: {p['flag_reason']} — skip this game")
