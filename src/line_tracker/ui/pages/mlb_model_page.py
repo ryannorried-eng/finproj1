@@ -764,6 +764,29 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 ),
             })
 
+        # NRFI/YRFI enrichment — best-effort (silently skipped if model not trained)
+        nrfi_lookup: dict[str, dict] = {}
+        try:
+            from line_tracker.model.mlb_nrfi import predict_nrfi
+            nrfi_preds = predict_nrfi(game_date=pred_date)
+            for np_ in nrfi_preds:
+                key = (np_["away_team"], np_["home_team"])
+                nrfi_lookup[key] = np_
+        except Exception:
+            pass
+
+        if nrfi_lookup:
+            for row, p in zip(rows, preds):
+                away_br = p.get("away_team_br", "") or p.get("away_team", "")[-3:].upper()
+                home_br = p.get("home_team_br", "") or p.get("home_team", "")[-3:].upper()
+                np_ = nrfi_lookup.get((away_br, home_br)) or {}
+                yrfi_prob = np_.get("yrfi_prob")
+                row["YRFI%"] = f"{yrfi_prob:.1%}" if yrfi_prob else "—"
+                bet = np_.get("bet")
+                edge = np_.get("edge")
+                row["NRFI/YRFI Bet"] = bet or "—"
+                row["NRFI/YRFI Edge"] = f"{edge*100:+.1f}%" if edge else "—"
+
         df_display = pd.DataFrame(rows)
         st.dataframe(
             df_display,
@@ -793,6 +816,18 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Best Bet": st.column_config.TextColumn(
                     "Best Bet",
                     help="Best betting opportunity. ⚠️ DATA CHECK = extreme model disagreement, verify data first."
+                ),
+                "YRFI%": st.column_config.TextColumn(
+                    "YRFI%",
+                    help="Probability that at least one run scores in the first inning (NRFI/YRFI model)."
+                ),
+                "NRFI/YRFI Bet": st.column_config.TextColumn(
+                    "NRFI/YRFI Bet",
+                    help="Recommended NRFI or YRFI bet when model edge exceeds 5%."
+                ),
+                "NRFI/YRFI Edge": st.column_config.TextColumn(
+                    "NRFI/YRFI Edge",
+                    help="Model probability minus market implied probability for the recommended NRFI/YRFI bet."
                 ),
             }
         )

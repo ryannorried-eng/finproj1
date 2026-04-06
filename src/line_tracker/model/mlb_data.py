@@ -2020,3 +2020,179 @@ def fetch_all_historical_weather(
         "Weather backfill complete: %d completed, %d failed out of %d total",
         completed, failed, len(pending),
     )
+
+
+# ---------------------------------------------------------------------------
+# First-inning data for NRFI/YRFI model
+# ---------------------------------------------------------------------------
+
+
+def fetch_first_inning_data(
+    seasons: list[int],
+    force_refresh: bool = False,
+) -> pd.DataFrame:
+    """Fetch first-inning run data for every completed game in the given seasons.
+
+    For each game, calls the MLB Stats API linescore endpoint to extract
+    the runs scored by each team in the first inning.
+
+    Resume-capable: per-season partial caches mean interrupted fetches can
+    be continued without re-fetching already-completed game_pks.
+
+    Cache paths
+    -----------
+    Per-season : CACHE_DIR / "first_inning_{year}.parquet"
+    Combined   : CACHE_DIR / "first_inning_{min_s}_{max_s}.parquet"
+
+    Returns
+    -------
+    DataFrame with columns:
+        game_pk, date, home_team, away_team,
+        home_sp_id, away_sp_id,
+        home_lineup, away_lineup,
+        first_inning_home_runs, first_inning_away_runs,
+        yrfi (1 = run scored in first inning, 0 = no run),
+        season
+    """
+    min_s, max_s = min(seasons), max(seasons)
+    final_cache = CACHE_DIR / f"first_inning_{min_s}_{max_s}.parquet"
+
+    if not force_refresh and final_cache.exists():
+        logger.debug("Loading first-inning data from cache: %s", final_cache)
+        return pd.read_parquet(final_cache)
+
+    all_season_frames: list[pd.DataFrame] = []
+
+    for year in seasons:
+        season_cache = CACHE_DIR / f"first_inning_{year}.parquet"
+
+        # Load game starters (provides game_pk, teams, SPs, lineups)
+        print(f"Loading game starters for {year}...")
+        try:
+            starters = fetch_game_starters(year, force_refresh=force_refresh)
+        except Exception as exc:
+            logger.error("Failed to load game starters for %d: %s", year, exc)
+            continue
+
+        if starters.empty:
+            logger.warning("No game starters for season %d; skipping.", year)
+            continue
+
+        all_game_pks = set(int(pk) for pk in starters["game_pk"].tolist())
+        starters_lookup = starters.set_index("game_pk")
+
+        # Load existing partial results for resume
+        existing_df: pd.DataFrame | None = None
+        already_fetched_pks: set[int] = set()
+
+        if not force_refresh and season_cache.exists():
+            try:
+                existing_df = pd.read_parquet(season_cache)
+                already_fetched_pks = set(int(pk) for pk in existing_df["game_pk"].tolist())
+                logger.info(
+                    "Resuming %d: %d/%d game_pks already cached.",
+                    year, len(already_fetched_pks), len(all_game_pks),
+                )
+            except Exception as exc:
+                logger.warning("Could not load partial cache for %d: %s", year, exc)
+                existing_df = None
+                already_fetched_pks = set()
+
+        remaining_pks = sorted(all_game_pks - already_fetched_pks)
+
+        if not remaining_pks:
+            logger.info("Season %d: all %d games already cached.", year, len(all_game_pks))
+            if existing_df is not None:
+                all_season_frames.append(existing_df)
+            continue
+
+        print(
+            f"Season {year}: fetching {len(remaining_pks)} linescore(s) "
+            f"({len(already_fetched_pks)} already cached)..."
+        )
+
+        new_rows: list[dict] = []
+        total = len(remaining_pks)
+
+        def _save_partial() -> None:
+            """Merge new_rows with existing cache and persist."""
+            parts = []
+            if existing_df is not None and not existing_df.empty:
+                parts.append(existing_df)
+            if new_rows:
+                parts.append(pd.DataFrame(new_rows))
+            if parts:
+                pd.concat(parts, ignore_index=True).to_parquet(season_cache, index=False)
+
+        for i, game_pk in enumerate(remaining_pks, 1):
+            if i % 500 == 0:
+                print(f"  Fetched {i}/{total} for season {year}...")
+                _save_partial()
+
+            try:
+                url = f"{MLB_STATS_API}/game/{game_pk}/linescore"
+                resp = requests.get(url, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+
+                innings = data.get("innings", [])
+                if not innings:
+                    # Postponed / spring training / no play
+                    time.sleep(0.05)
+                    continue
+
+                first = innings[0]
+                home_runs = int(first.get("home", {}).get("runs") or 0)
+                away_runs = int(first.get("away", {}).get("runs") or 0)
+
+                try:
+                    row_info = starters_lookup.loc[game_pk]
+                except KeyError:
+                    time.sleep(0.05)
+                    continue
+
+                new_rows.append({
+                    "game_pk": int(game_pk),
+                    "date": row_info["date"],
+                    "home_team": row_info["home_team"],
+                    "away_team": row_info["away_team"],
+                    "home_sp_id": row_info.get("home_sp_id"),
+                    "away_sp_id": row_info.get("away_sp_id"),
+                    "home_lineup": row_info.get("home_lineup"),
+                    "away_lineup": row_info.get("away_lineup"),
+                    "first_inning_home_runs": home_runs,
+                    "first_inning_away_runs": away_runs,
+                    "yrfi": 1 if (home_runs + away_runs) > 0 else 0,
+                    "season": year,
+                })
+
+            except Exception as exc:
+                logger.debug("Linescore failed for game_pk %s: %s", game_pk, exc)
+
+            time.sleep(0.05)
+
+        # Final save for this season
+        _save_partial()
+
+        # Rebuild full season frame from cache (preserves resume consistency)
+        if season_cache.exists():
+            try:
+                season_df = pd.read_parquet(season_cache)
+                all_season_frames.append(season_df)
+                print(f"Season {year}: {len(season_df)} games with first-inning data.")
+            except Exception as exc:
+                logger.error("Could not load season cache for %d: %s", year, exc)
+
+    if not all_season_frames:
+        return pd.DataFrame()
+
+    result = pd.concat(all_season_frames, ignore_index=True)
+    result["date"] = pd.to_datetime(result["date"])
+    result = result.sort_values("date").reset_index(drop=True)
+
+    result.to_parquet(final_cache, index=False)
+    logger.info(
+        "First-inning data cached: %d games across seasons %s",
+        len(result), seasons,
+    )
+    return result
