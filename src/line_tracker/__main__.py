@@ -763,24 +763,54 @@ def _cmd_predict_mlb(args) -> int:
         if temp and wind:
             print(f"    Weather: {temp:.0f}°F, {wind:.0f}mph {wind_dir}")
 
+        # Win% — labeled by team (away / home) to match CSV export
+        home_prob = p['model_home_win_prob']
+        away_prob = 1 - home_prob
+        home_br = p.get('home_team_br') or p.get('home_team', '')[:3].upper()
+        away_br = p.get('away_team_br') or p.get('away_team', '')[:3].upper()
+        win_str = f"{away_br} {away_prob:.1%} / {home_br} {home_prob:.1%}"
+
+        # Ensemble probability
         ens_prob = p.get("ensemble_prob")
-        ens_str = f" | Ensemble: {ens_prob:.1%}" if ens_prob is not None else ""
+        ens_str = f"{ens_prob:.1%}" if ens_prob is not None else "—"
+
+        # Agreement emoji + disagreement value
         disagreement = p.get("model_disagreement")
         if disagreement is not None:
             agree_emoji = "🟢" if disagreement < 0.04 else "🟡" if disagreement < 0.08 else "🔴"
-            dis_str = f" | Disagreement: {disagreement:.3f} | {agree_emoji}"
+            agree_str = f"{agree_emoji} {disagreement:.2f}"
         else:
-            dis_str = ""
+            agree_str = "—"
+        skip_str = " ⚠️  SKIP" if is_flagged else ""
+
+        print(f"    Win%: {win_str} | Ensemble: {ens_str} | Agreement: {agree_str}{skip_str}")
+
+        # Best Bet
+        market_total = p.get('market_total')
+        total_edge = p.get('total_edge', 0) or 0
+        ml_edge = p.get('ml_edge', 0) or 0
+        ml_qualified = p.get('ml_bet_qualified', False)
+        if is_flagged:
+            best_bet = "⚠️ Models disagree"
+        else:
+            ml_bet = None
+            tot_bet = None
+            if ml_qualified and abs(ml_edge) >= 0.04:
+                ml_bet = f"{p['home_team']} ML" if ml_edge > 0 else f"{p['away_team']} ML"
+            if market_total and abs(total_edge) >= 0.5:
+                direction = "Over" if total_edge > 0 else "Under"
+                tot_bet = f"{direction} {market_total}"
+            best_bet = " / ".join(filter(None, [ml_bet, tot_bet])) or "—"
 
         print(
-            f"    Win%: {p['model_home_win_prob']:.1%} | "
-            f"Margin: {p['model_run_diff']:+.1f} | "
+            f"    Margin: {p['model_run_diff']:+.1f} | "
             f"Total: {p['model_total_runs']:.1f} vs mkt {p.get('market_total', '—')} "
-            f"(edge: {p.get('total_edge', 0):+.1f}) | "
-            f"ML Edge: {p['ml_edge']:+.1%}{ens_str}{dis_str}"
+            f"(edge: {total_edge:+.1f}) | "
+            f"ML Edge: {p['ml_edge']:+.1%}"
         )
+        print(f"    Best Bet: {best_bet} | Confidence: {p.get('confidence', '—')}")
         if is_flagged and p.get("flag_reason"):
-            print(f"    ⚠️  FLAGGED: {p['flag_reason']} — skip this game")
+            print(f"    ⚠️  FLAGGED: {p['flag_reason']}")
         print()
     return 0
 
@@ -827,21 +857,51 @@ def _cmd_predict_mlb_ensemble(args) -> int:
         flag_str = " ⚠️" if is_flagged else ""
         print(f"  {p['away_team']} @ {p['home_team']}{flag_str}")
 
-        ens_prob = p.get("ensemble_prob")
-        dis = p.get("model_disagreement")
-        rec = p.get("recommended_prob")
+        # Win% — labeled by team (away / home) to match CSV export
+        home_prob = p['model_home_win_prob']
+        away_prob = 1 - home_prob
+        home_br = p.get('home_team_br') or p.get('home_team', '')[:3].upper()
+        away_br = p.get('away_team_br') or p.get('away_team', '')[:3].upper()
+        win_str = f"{away_br} {away_prob:.1%} / {home_br} {home_prob:.1%}"
 
-        if ens_prob is not None:
-            agree_emoji = "🟢" if dis < 0.04 else "🟡" if dis < 0.08 else "🔴"
-            print(f"    Ensemble: {ens_prob:.1%} | Disagreement: {dis:.3f} | {agree_emoji} | "
-                  f"Recommended: {f'{rec:.1%}' if rec is not None else 'None (flagged)'}")
+        ens_prob = p.get("ensemble_prob")
+        ens_str = f"{ens_prob:.1%}" if ens_prob is not None else "—"
+
+        disagreement = p.get("model_disagreement")
+        if disagreement is not None:
+            agree_emoji = "🟢" if disagreement < 0.04 else "🟡" if disagreement < 0.08 else "🔴"
+            agree_str = f"{agree_emoji} {disagreement:.2f}"
+        else:
+            agree_str = "—"
+        skip_str = " ⚠️  SKIP" if is_flagged else ""
+
+        print(f"    Win%: {win_str} | Ensemble: {ens_str} | Agreement: {agree_str}{skip_str}")
+
+        market_total = p.get('market_total')
+        total_edge = p.get('total_edge', 0) or 0
+        ml_edge = p.get('ml_edge', 0) or 0
+        ml_qualified = p.get('ml_bet_qualified', False)
+        if is_flagged:
+            best_bet = "⚠️ Models disagree"
+        else:
+            ml_bet = None
+            tot_bet = None
+            if ml_qualified and abs(ml_edge) >= 0.04:
+                ml_bet = f"{p['home_team']} ML" if ml_edge > 0 else f"{p['away_team']} ML"
+            if market_total and abs(total_edge) >= 0.5:
+                direction = "Over" if total_edge > 0 else "Under"
+                tot_bet = f"{direction} {market_total}"
+            best_bet = " / ".join(filter(None, [ml_bet, tot_bet])) or "—"
+
         print(
-            f"    Win%: {p['model_home_win_prob']:.1%} | "
-            f"Margin: {p['model_run_diff']:+.1f} | "
+            f"    Margin: {p['model_run_diff']:+.1f} | "
+            f"Total: {p['model_total_runs']:.1f} vs mkt {p.get('market_total', '—')} "
+            f"(edge: {total_edge:+.1f}) | "
             f"ML Edge: {p['ml_edge']:+.1%}"
         )
+        print(f"    Best Bet: {best_bet} | Confidence: {p.get('confidence', '—')}")
         if is_flagged and p.get("flag_reason"):
-            print(f"    ⚠️  FLAGGED: {p['flag_reason']} — skip this game")
+            print(f"    ⚠️  FLAGGED: {p['flag_reason']}")
         print()
     return 0
 
