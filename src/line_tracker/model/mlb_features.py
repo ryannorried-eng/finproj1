@@ -19,6 +19,11 @@ LEAGUE_AVG_K9        = 8.50
 LEAGUE_AVG_OPS       = 0.720
 LEAGUE_AVG_WRC_PLUS  = 100.0
 
+# Cap individual game run contributions before rolling window calculations.
+# 13 runs covers ~99% of normal MLB games; prevents single blowouts from
+# dominating early-season r15/r10 windows when the sample is small.
+CAP_RUNS = 13
+
 # Hardcoded 2025 park factors (index 100 = neutral)
 PARK_FACTORS: dict[str, dict[str, int]] = {
     "COL": {"runs": 115, "hr": 123}, "BOS": {"runs": 107, "hr": 103},
@@ -124,12 +129,17 @@ def compute_team_rolling_stats(game_logs: pd.DataFrame) -> pd.DataFrame:
     """
     result_parts = []
 
+    # Determine the most recent season in the logs for early-season blending.
+    max_year = pd.to_datetime(game_logs["date"]).dt.year.max()
+
     for _team, group in game_logs.groupby("team"):
         group = group.sort_values("date").copy()
 
-        # Apply pd.to_numeric on plain Series before shift — guarantees float output
-        s_scored = pd.to_numeric(group["runs_scored"], errors="coerce").shift(1)
-        s_allowed = pd.to_numeric(group["runs_allowed"], errors="coerce").shift(1)
+        # Apply pd.to_numeric on plain Series before shift — guarantees float output.
+        # Cap individual game values at CAP_RUNS so single blowout games cannot
+        # dominate a 15-game rolling window, especially early in a new season.
+        s_scored = pd.to_numeric(group["runs_scored"], errors="coerce").clip(upper=CAP_RUNS).shift(1)
+        s_allowed = pd.to_numeric(group["runs_allowed"], errors="coerce").clip(upper=CAP_RUNS).shift(1)
         s_hits = pd.to_numeric(group["hits"], errors="coerce").shift(1)
         s_walks = pd.to_numeric(group["walks"], errors="coerce").shift(1)
         s_strikeouts = pd.to_numeric(group["strikeouts"], errors="coerce").shift(1)
@@ -147,6 +157,56 @@ def compute_team_rolling_stats(game_logs: pd.DataFrame) -> pd.DataFrame:
         group["bb_rate_r15"] = (s_walks / safe_denom).rolling(15, min_periods=15).mean()
 
         group["run_diff_r10"] = run_diff.rolling(10, min_periods=10).mean()
+
+        # -----------------------------------------------------------------
+        # Early-season confidence blending.
+        # When fewer than 15 max_year games have been played, blend the
+        # cross-year rolling stats toward the prior-year trailing values.
+        # confidence = n_max_year_prior_games / 15  (0.0 → 1.0)
+        # -----------------------------------------------------------------
+        dates = pd.to_datetime(group["date"])
+        years = dates.dt.year
+        is_current = (years == max_year).astype(int)
+
+        # Count of max_year games BEFORE each row (shift so current game not counted)
+        n_prior_current = is_current.shift(1).fillna(0).cumsum().astype(int)
+
+        prev_year_mask = years < max_year
+        if prev_year_mask.any():
+            # Grab the last valid prior-year r15 values as the blend anchor
+            prev_rs15_series = group.loc[prev_year_mask, "runs_scored_r15"].dropna()
+            prev_ra15_series = group.loc[prev_year_mask, "runs_allowed_r15"].dropna()
+            prev_rd15_series = group.loc[prev_year_mask, "run_diff_r15"].dropna()
+            last_prev_rs15 = float(prev_rs15_series.iloc[-1]) if len(prev_rs15_series) else np.nan
+            last_prev_ra15 = float(prev_ra15_series.iloc[-1]) if len(prev_ra15_series) else np.nan
+            last_prev_rd15 = float(prev_rd15_series.iloc[-1]) if len(prev_rd15_series) else np.nan
+        else:
+            last_prev_rs15 = last_prev_ra15 = last_prev_rd15 = np.nan
+
+        # Only blend rows that are in the current year and under-sampled
+        current_year_idx = group.index[years == max_year]
+        for idx in current_year_idx:
+            n = int(n_prior_current.loc[idx])
+            if n >= 15:
+                break  # rows are sorted; once we reach 15 games we're done
+            confidence = n / 15.0
+
+            r15_rs = group.at[idx, "runs_scored_r15"]
+            r15_ra = group.at[idx, "runs_allowed_r15"]
+            r15_rd = group.at[idx, "run_diff_r15"]
+
+            if pd.notna(r15_rs) and pd.notna(last_prev_rs15):
+                group.at[idx, "runs_scored_r15"] = (
+                    confidence * r15_rs + (1.0 - confidence) * last_prev_rs15
+                )
+            if pd.notna(r15_ra) and pd.notna(last_prev_ra15):
+                group.at[idx, "runs_allowed_r15"] = (
+                    confidence * r15_ra + (1.0 - confidence) * last_prev_ra15
+                )
+            if pd.notna(r15_rd) and pd.notna(last_prev_rd15):
+                group.at[idx, "run_diff_r15"] = (
+                    confidence * r15_rd + (1.0 - confidence) * last_prev_rd15
+                )
 
         result_parts.append(group)
 
@@ -482,8 +542,8 @@ def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
         # --- Home split ---
         home_only = group[group["home_away"] == "H"].copy().sort_values("date")
         if len(home_only) > 0:
-            sh_scored = home_only["runs_scored"].shift(1)
-            sh_allowed = home_only["runs_allowed"].shift(1)
+            sh_scored = home_only["runs_scored"].clip(upper=CAP_RUNS).shift(1)
+            sh_allowed = home_only["runs_allowed"].clip(upper=CAP_RUNS).shift(1)
             home_only["rs_home_r15"] = sh_scored.rolling(15, min_periods=15).mean()
             home_only["ra_home_r15"] = sh_allowed.rolling(15, min_periods=15).mean()
         else:
@@ -493,8 +553,8 @@ def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
         # --- Away split ---
         away_only = group[group["home_away"] == "A"].copy().sort_values("date")
         if len(away_only) > 0:
-            sa_scored = away_only["runs_scored"].shift(1)
-            sa_allowed = away_only["runs_allowed"].shift(1)
+            sa_scored = away_only["runs_scored"].clip(upper=CAP_RUNS).shift(1)
+            sa_allowed = away_only["runs_allowed"].clip(upper=CAP_RUNS).shift(1)
             away_only["rs_away_r15"] = sa_scored.rolling(15, min_periods=15).mean()
             away_only["ra_away_r15"] = sa_allowed.rolling(15, min_periods=15).mean()
         else:
