@@ -2079,7 +2079,9 @@ def fetch_first_inning_data(
             continue
 
         all_game_pks = set(int(pk) for pk in starters["game_pk"].tolist())
-        starters_lookup = starters.set_index("game_pk")
+        # Deduplicate before indexing — duplicate game_pks would cause .loc[]
+        # to return a DataFrame instead of a Series, corrupting column types.
+        starters_lookup = starters.drop_duplicates(subset=["game_pk"]).set_index("game_pk")
 
         # Load existing partial results for resume
         existing_df: pd.DataFrame | None = None
@@ -2122,7 +2124,9 @@ def fetch_first_inning_data(
             if new_rows:
                 parts.append(pd.DataFrame(new_rows))
             if parts:
-                pd.concat(parts, ignore_index=True).to_parquet(season_cache, index=False)
+                combined = pd.concat(parts, ignore_index=True)
+                combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
+                combined.to_parquet(season_cache, index=False)
 
         for i, game_pk in enumerate(remaining_pks, 1):
             if i % 500 == 0:
@@ -2153,7 +2157,7 @@ def fetch_first_inning_data(
 
                 new_rows.append({
                     "game_pk": int(game_pk),
-                    "date": row_info["date"],
+                    "date": pd.to_datetime(row_info["date"]),
                     "home_team": row_info["home_team"],
                     "away_team": row_info["away_team"],
                     "home_sp_id": row_info.get("home_sp_id"),
