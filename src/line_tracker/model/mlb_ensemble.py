@@ -31,7 +31,7 @@ from line_tracker.model import mlb_features
 
 logger = logging.getLogger(__name__)
 
-DISAGREEMENT_THRESHOLD = 0.08  # flag games where models contradict each other
+DISAGREEMENT_THRESHOLD = 0.20  # flag games where models contradict each other
 BREAKEVEN_PROB = 110 / 210     # ~0.5238 at -110 juice
 
 _PROJECT_MODELS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "models"
@@ -447,7 +447,7 @@ def predict_ensemble(base_pred_dict: dict) -> dict:
     disagreement = abs(moneyline_prob - margin_imp)
     flagged = disagreement > DISAGREEMENT_THRESHOLD
     flag_reason: str | None = (
-        f"disagreement {disagreement:.2f} > threshold {DISAGREEMENT_THRESHOLD}"
+        f"Extreme model disagreement {disagreement:.2f} — possible data issue, verify manually"
         if flagged
         else None
     )
