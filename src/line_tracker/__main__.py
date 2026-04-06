@@ -777,11 +777,11 @@ def _cmd_predict_mlb(args) -> int:
         # Agreement emoji + disagreement value
         disagreement = p.get("model_disagreement")
         if disagreement is not None:
-            agree_emoji = "🟢" if disagreement < 0.04 else "🟡" if disagreement < 0.08 else "🔴"
+            agree_emoji = "🟢" if disagreement < 0.10 else "🟡" if disagreement < 0.20 else "🔴"
             agree_str = f"{agree_emoji} {disagreement:.2f}"
         else:
             agree_str = "—"
-        skip_str = " ⚠️  SKIP" if is_flagged else ""
+        skip_str = " ⚠️  DATA CHECK" if is_flagged else ""
 
         print(f"    Win%: {win_str} | Ensemble: {ens_str} | Agreement: {agree_str}{skip_str}")
 
@@ -869,11 +869,11 @@ def _cmd_predict_mlb_ensemble(args) -> int:
 
         disagreement = p.get("model_disagreement")
         if disagreement is not None:
-            agree_emoji = "🟢" if disagreement < 0.04 else "🟡" if disagreement < 0.08 else "🔴"
+            agree_emoji = "🟢" if disagreement < 0.10 else "🟡" if disagreement < 0.20 else "🔴"
             agree_str = f"{agree_emoji} {disagreement:.2f}"
         else:
             agree_str = "—"
-        skip_str = " ⚠️  SKIP" if is_flagged else ""
+        skip_str = " ⚠️  DATA CHECK" if is_flagged else ""
 
         print(f"    Win%: {win_str} | Ensemble: {ens_str} | Agreement: {agree_str}{skip_str}")
 

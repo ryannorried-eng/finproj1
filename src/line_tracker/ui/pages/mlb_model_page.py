@@ -721,9 +721,9 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             is_flagged = p.get("flagged", False)
             if disagreement is None:
                 agreement_str = "—"
-            elif is_flagged:
+            elif disagreement >= 0.20:
                 agreement_str = f"🔴 {disagreement:.3f}"
-            elif disagreement >= 0.05:
+            elif disagreement >= 0.10:
                 agreement_str = f"🟡 {disagreement:.3f}"
             else:
                 agreement_str = f"🟢 {disagreement:.3f}"
@@ -753,7 +753,7 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Mkt Spread":    spread_str,
                 "Model Spread":  _model_spread_pick(p.get("model_run_diff")),
                 "Best Bet":      (
-                    "⚠️ Models disagree — skip this game"
+                    "⚠️ DATA CHECK — verify data before betting"
                     if is_flagged
                     else _best_bet(p)
                 ),
@@ -781,9 +781,9 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Agreement": st.column_config.TextColumn(
                     "Agreement",
                     help=(
-                        "Model agreement: 🟢 < 0.05 (agree) · "
-                        "🟡 0.05–0.08 (slight disagreement) · "
-                        "🔴 > 0.08 (flagged — do not bet)"
+                        "Model agreement: 🟢 < 0.10 (models aligned) · "
+                        "🟡 0.10–0.20 (some conflict — use with caution) · "
+                        "🔴 >= 0.20 (extreme disagreement — likely data issue)"
                     ),
                 ),
                 "Total Edge": st.column_config.TextColumn(
@@ -792,13 +792,13 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 ),
                 "Best Bet": st.column_config.TextColumn(
                     "Best Bet",
-                    help="Best betting opportunity. ⚠️ = models disagree, skip this game."
+                    help="Best betting opportunity. ⚠️ DATA CHECK = extreme model disagreement, verify data first."
                 ),
             }
         )
         st.caption(
             "⚠️ = Known blind spot matchup (model historically less accurate). "
-            "Agreement: 🟢 agree · 🟡 slight disagreement · 🔴 flagged (skip). "
+            "Agreement: 🟢 < 0.10 (aligned) · 🟡 0.10–0.20 (caution) · 🔴 >= 0.20 (data check). "
             "Based on 46-game sample — revisit at 100 games."
         )
 

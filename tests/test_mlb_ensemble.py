@@ -73,8 +73,8 @@ class TestDisagreementCalculation:
     def test_formula_contradicting_models(self):
         """Models disagree directionally: moneyline says home wins, margin says away."""
         from line_tracker.model.mlb_ensemble import _margin_implied_prob, DISAGREEMENT_THRESHOLD
-        margin = -0.5      # margin model says away wins
-        moneyline = 0.55   # moneyline says home wins
+        margin = -1.5      # margin model strongly says away wins; sigmoid(-1.5) ≈ 0.182
+        moneyline = 0.75   # moneyline strongly says home wins → disagreement ≈ 0.57
         mip = _margin_implied_prob(margin)
         dis = abs(moneyline - mip)
         assert dis > DISAGREEMENT_THRESHOLD, f"Expected flagged (>{DISAGREEMENT_THRESHOLD}), got {dis:.4f}"
@@ -91,8 +91,8 @@ class TestPredictFlaggedGame:
     def _run(self):
         from line_tracker.model.mlb_ensemble import predict_ensemble
         return predict_ensemble({
-            "moneyline_prob": 0.55,
-            "margin_pred": -0.5,   # margin says away wins
+            "moneyline_prob": 0.75,
+            "margin_pred": -1.5,   # margin strongly says away wins; disagreement ≈ 0.57
             "totals_pred": 7.8,
         })
 
@@ -208,8 +208,8 @@ class TestPredictWithRealArtifacts:
         monkeypatch.setattr(mlb_ensemble, "_CLOUD_MODELS_DIR", _small_ensemble_dir)
 
         result = mlb_ensemble.predict_ensemble({
-            "moneyline_prob": 0.55,
-            "margin_pred": -0.5,
+            "moneyline_prob": 0.75,
+            "margin_pred": -1.5,   # margin strongly says away wins; disagreement ≈ 0.57
             "totals_pred": 7.8,
         })
         assert result["flagged"] is True
