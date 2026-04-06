@@ -451,6 +451,11 @@ def load_mlb_training_data(
                 f"Team log join failed for season {year} — check abbreviations"
             )
 
+        # A small number of missing matches is expected for the current season:
+        # games played today may not yet have log entries if the game is still
+        # in progress.  Rolling-window features will be NaN for those rows and
+        # will be filled from the most recent available game.  This is not a bug.
+
         # ── Join game starters (v4: all seasons) ─────────────────────────
         try:
             starters = fetch_game_starters(year, force_refresh=force_refresh)
@@ -1529,6 +1534,23 @@ def fetch_historical_weather(
     if not force_refresh and cache_path.exists():
         logger.debug("Loading historical weather from cache: %s", cache_path)
         return pd.read_parquet(cache_path)
+
+    # The archive-api.open-meteo.com endpoint only serves completed historical
+    # dates and returns 400 errors for any date in the current (in-progress)
+    # season.  Skip the fetch entirely and return empty; callers that need
+    # current-season weather should use the TTL-cached live fetch_weather().
+    if season == current_year:
+        logger.info(
+            "Skipping historical weather fetch for current season %d "
+            "— use live fetch_weather() instead",
+            season,
+        )
+        return pd.DataFrame(
+            columns=[
+                "game_id", "date", "home_team",
+                "temp_f", "wind_mph", "wind_dir", "precip_prob", "wind_out_factor",
+            ]
+        )
 
     logger.info("Fetching historical weather for season %d ...", season)
     t0 = time.time()
