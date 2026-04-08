@@ -498,6 +498,13 @@ def _sidebar():
         # A. PRIMARY CONTROLS
         # =============================================================
 
+        st.selectbox(
+            "Sport",
+            list(SPORTS.keys()),
+            key="sport_name",
+            help="Pick the league you want to track.",
+        )
+
         st.radio(
             "Page",
             [
@@ -508,40 +515,15 @@ def _sidebar():
             horizontal=True,
         )
 
-        st.selectbox(
-            "Sport",
-            list(SPORTS.keys()),
-            key="sport_name",
-            help="Pick the league you want to track.",
-        )
-
         st.number_input(
             "Bankroll ($)",
             min_value=0.0,
-            value=0.0,
+            value=1000.0,
             step=100.0,
             key="bankroll",
             help=(
                 "Enter your total bankroll to see Kelly-based "
                 "suggested stake amounts alongside recommendations."
-            ),
-        )
-
-        # API key: prefer secrets/env via config, fall back to manual input
-        _default_key = ""
-        try:
-            _default_key = get_api_key()
-        except ValueError:
-            pass
-        st.text_input(
-            "API Key",
-            value=_default_key,
-            type="password",
-            key="api_key",
-            help=(
-                "Paste your key from https://the-odds-api.com.  \n"
-                "The free plan gives you 500 requests/month.  \n"
-                "On Streamlit Cloud, add ODDS_API_KEY in Settings > Secrets."
             ),
         )
 
@@ -568,10 +550,28 @@ def _sidebar():
             except Exception as exc:
                 st.caption(f"Cycle runner unavailable: {exc}")
 
-        st.caption(
-            "Free tier: 500 requests/month.  \n"
-            "Each \"Fetch\" uses 1-3 requests."
-        )
+        with st.expander("API Key / Settings"):
+            # API key: prefer secrets/env via config, fall back to manual input
+            _default_key = ""
+            try:
+                _default_key = get_api_key()
+            except ValueError:
+                pass
+            st.text_input(
+                "API Key",
+                value=_default_key,
+                type="password",
+                key="api_key",
+                help=(
+                    "Paste your key from https://the-odds-api.com.  \n"
+                    "The free plan gives you 500 requests/month.  \n"
+                    "On Streamlit Cloud, add ODDS_API_KEY in Settings > Secrets."
+                ),
+            )
+            st.caption(
+                "Free tier: 500 requests/month.  \n"
+                "Each \"Fetch\" uses 1-3 requests."
+            )
 
         st.divider()
 
