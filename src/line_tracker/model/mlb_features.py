@@ -146,17 +146,17 @@ def compute_team_rolling_stats(game_logs: pd.DataFrame) -> pd.DataFrame:
 
         run_diff = s_scored - s_allowed
 
-        group["runs_scored_r15"] = s_scored.rolling(15, min_periods=15).mean()
-        group["runs_allowed_r15"] = s_allowed.rolling(15, min_periods=15).mean()
-        group["run_diff_r15"] = run_diff.rolling(15, min_periods=15).mean()
+        group["runs_scored_r15"] = s_scored.rolling(15, min_periods=5).mean()
+        group["runs_allowed_r15"] = s_allowed.rolling(15, min_periods=5).mean()
+        group["run_diff_r15"] = run_diff.rolling(15, min_periods=5).mean()
 
         # K% and BB% proxies using H+BB+SO as denominator
         denom = s_hits + s_walks + s_strikeouts
         safe_denom = denom.replace(0, np.nan)
-        group["k_rate_r15"] = (s_strikeouts / safe_denom).rolling(15, min_periods=15).mean()
-        group["bb_rate_r15"] = (s_walks / safe_denom).rolling(15, min_periods=15).mean()
+        group["k_rate_r15"] = (s_strikeouts / safe_denom).rolling(15, min_periods=5).mean()
+        group["bb_rate_r15"] = (s_walks / safe_denom).rolling(15, min_periods=5).mean()
 
-        group["run_diff_r10"] = run_diff.rolling(10, min_periods=10).mean()
+        group["run_diff_r10"] = run_diff.rolling(10, min_periods=4).mean()
 
         # -----------------------------------------------------------------
         # Early-season confidence blending.
@@ -195,18 +195,32 @@ def compute_team_rolling_stats(game_logs: pd.DataFrame) -> pd.DataFrame:
             r15_ra = group.at[idx, "runs_allowed_r15"]
             r15_rd = group.at[idx, "run_diff_r15"]
 
-            if pd.notna(r15_rs) and pd.notna(last_prev_rs15):
-                group.at[idx, "runs_scored_r15"] = (
-                    confidence * r15_rs + (1.0 - confidence) * last_prev_rs15
-                )
-            if pd.notna(r15_ra) and pd.notna(last_prev_ra15):
-                group.at[idx, "runs_allowed_r15"] = (
-                    confidence * r15_ra + (1.0 - confidence) * last_prev_ra15
-                )
-            if pd.notna(r15_rd) and pd.notna(last_prev_rd15):
-                group.at[idx, "run_diff_r15"] = (
-                    confidence * r15_rd + (1.0 - confidence) * last_prev_rd15
-                )
+            # Blend current year estimate with prior year anchor
+            # If current year has no estimate yet (NaN), use prior year fully
+            if pd.notna(last_prev_rs15):
+                if pd.notna(r15_rs):
+                    group.at[idx, "runs_scored_r15"] = (
+                        confidence * r15_rs + (1.0 - confidence) * last_prev_rs15
+                    )
+                else:
+                    # No current year data yet — use prior year fully
+                    group.at[idx, "runs_scored_r15"] = last_prev_rs15
+
+            if pd.notna(last_prev_ra15):
+                if pd.notna(r15_ra):
+                    group.at[idx, "runs_allowed_r15"] = (
+                        confidence * r15_ra + (1.0 - confidence) * last_prev_ra15
+                    )
+                else:
+                    group.at[idx, "runs_allowed_r15"] = last_prev_ra15
+
+            if pd.notna(last_prev_rd15):
+                if pd.notna(r15_rd):
+                    group.at[idx, "run_diff_r15"] = (
+                        confidence * r15_rd + (1.0 - confidence) * last_prev_rd15
+                    )
+                else:
+                    group.at[idx, "run_diff_r15"] = last_prev_rd15
 
         result_parts.append(group)
 
