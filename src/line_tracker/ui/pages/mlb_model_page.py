@@ -175,10 +175,13 @@ def _model_spread_pick(model_run_diff, market_spread=None):
 
     # Edge = how many runs the model beats the spread by
     edge = abs(model_run_diff) - abs(home_point)
+    def _fmt_pt(pt):
+        return f"+{pt:.1f}" if pt > 0 else f"{pt:.1f}"
+
     if model_run_diff > abs(home_point):
-        return f"Home {home_point:+.1f} ({edge:+.1f})"
+        return f"Home {_fmt_pt(home_point)} ({edge:+.1f})"
     elif model_run_diff < -abs(home_point):
-        return f"Away +{away_point:.1f} ({edge:+.1f})"
+        return f"Away {_fmt_pt(away_point)} ({edge:+.1f})"
     else:
         return f"Push zone ({model_run_diff:+.1f})"
 
@@ -265,11 +268,14 @@ def _best_bet(p):
             return ""
         return f" (+{int(o)})" if o > 0 else f" ({int(o)})"
 
+    def _fmt_pt(pt):
+        return f"+{pt:.1f}" if pt > 0 else f"{pt:.1f}"
+
     rl_play = None
     if run_diff > abs(home_point):
-        rl_play = f"{home_br} {home_point:+.1f}{fmt_spread_odds(home_spread_odds)} ({run_diff:+.1f})"
+        rl_play = f"{home_br} {_fmt_pt(home_point)}{fmt_spread_odds(home_spread_odds)} ({run_diff:+.1f})"
     elif run_diff < -abs(home_point):
-        rl_play = f"{away_br} +{away_point:.1f}{fmt_spread_odds(away_spread_odds)} ({run_diff:+.1f})"
+        rl_play = f"{away_br} {_fmt_pt(away_point)}{fmt_spread_odds(away_spread_odds)} ({run_diff:+.1f})"
 
     # Only surface ML picks where model has sufficient conviction
     # Threshold: favored team >= 57% AND edge >= 4%
@@ -750,9 +756,16 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
             if market_spread is not None:
                 home_pt = float(market_spread)
                 away_pt = -home_pt
+
+                def _fmt_pt(pt):
+                    if pt > 0:
+                        return f"+{pt:.1f}"
+                    else:
+                        return f"{pt:.1f}"
+
                 spread_str = (
-                    f"Away +{away_pt:.1f}{_fmt_odds(away_spread_odds)} / "
-                    f"Home {home_pt:+.1f}{_fmt_odds(home_spread_odds)}"
+                    f"Away {_fmt_pt(away_pt)}{_fmt_odds(away_spread_odds)} / "
+                    f"Home {_fmt_pt(home_pt)}{_fmt_odds(home_spread_odds)}"
                 )
             else:
                 spread_str = "Away +1.5 / Home -1.5" if p.get("market_total") else "—"
