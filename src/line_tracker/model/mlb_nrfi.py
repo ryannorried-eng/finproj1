@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
+
+logger = logging.getLogger(__name__)
 
 EDGE_THRESHOLD = 0.05
 BREAKEVEN_PROB = 0.524  # win rate needed to break even at -110 odds
@@ -19,6 +22,7 @@ def _per_team_yrfi(era: float | None) -> float:
 
 
 def _sp_fi_yrfi_rate(fi_history, sp_id) -> float | None:
+    """Return a starter's last-10-start first-inning YRFI rate, or None."""
     if fi_history is None or fi_history.empty or sp_id is None:
         return None
     try:
@@ -30,7 +34,7 @@ def _sp_fi_yrfi_rate(fi_history, sp_id) -> float | None:
         | (fi_history["away_sp_id"] == sp_id_int)
     )
     sp_games = fi_history[mask].sort_values("date").tail(10)
-    if len(sp_games) < 5:
+    if sp_games.empty:
         return None
     return float(sp_games["yrfi"].mean())
 
@@ -38,19 +42,21 @@ def _sp_fi_yrfi_rate(fi_history, sp_id) -> float | None:
 def predict_nrfi(target_date: date | None = None) -> list[dict]:
     """Return NRFI/YRFI probability estimates for each game on target_date.
 
-    Wraps predict_mlb_games() and estimates combined first-inning scoring
-    probability from each starter's ERA vs the league average.
+    Loads first-inning history for the prior and current season so that
+    per-SP rolling YRFI rates reflect 2026 actual starts when available,
+    falling back to 2025 data for pitchers with fewer than one 2026 start.
 
     Keys in each returned dict:
         game_pk, away_team, home_team, away_team_br, home_team_br,
         away_pitcher, home_pitcher, away_pitcher_era, home_pitcher_era,
+        away_sp_fi_yrfi_rate, home_sp_fi_yrfi_rate,
         yrfi_prob, nrfi_prob, commence_time
     """
     if target_date is None:
-        from datetime import date as _date
-        target_date = _date.today()
+        target_date = date.today()
     current_year = target_date.year
 
+    # Load first-inning history for prior + current season (resume-capable)
     fi_history = None
     try:
         from line_tracker.model.mlb_data import fetch_first_inning_data
@@ -61,7 +67,7 @@ def predict_nrfi(target_date: date | None = None) -> list[dict]:
         if df is not None and not df.empty:
             fi_history = df
     except Exception as exc:
-        pass
+        logger.debug("Could not load first-inning history: %s", exc)
 
     try:
         from line_tracker.model.mlb_predict import predict_mlb_games
@@ -79,12 +85,11 @@ def predict_nrfi(target_date: date | None = None) -> list[dict]:
         home_fi_rate = _sp_fi_yrfi_rate(fi_history, home_pid)
         away_fi_rate = _sp_fi_yrfi_rate(fi_history, away_pid)
 
-        # Blend fi_rate with ERA-based estimate (50/50) to reduce small sample noise
-        era_home = _per_team_yrfi(home_era)
-        era_away = _per_team_yrfi(away_era)
-        home_yrfi = (0.5 * home_fi_rate + 0.5 * era_home) if home_fi_rate is not None else era_home
-        away_yrfi = (0.5 * away_fi_rate + 0.5 * era_away) if away_fi_rate is not None else era_away
+        # Prefer actual first-inning rate when available; fall back to ERA formula
+        home_yrfi = home_fi_rate if home_fi_rate is not None else _per_team_yrfi(home_era)
+        away_yrfi = away_fi_rate if away_fi_rate is not None else _per_team_yrfi(away_era)
         combined_yrfi = round(1.0 - (1.0 - away_yrfi) * (1.0 - home_yrfi), 4)
+
         results.append({
             "game_pk": p.get("game_id", ""),
             "away_team": p.get("away_team", ""),
