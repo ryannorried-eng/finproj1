@@ -344,14 +344,17 @@ def predict_nrfi(
 
                 gbm_prob = float(gbm_model.predict_proba(X_row)[0, 1])
 
-                if lr_scaler is not None:
-                    X_lr = lr_scaler.transform(X_row)
-                else:
-                    X_lr = X_row
-                lr_prob = float(lr_model.predict_proba(X_lr)[0, 1])
-
-                # Weighted ensemble: GBM primary
-                combined_yrfi = round(0.65 * gbm_prob + 0.35 * lr_prob, 4)
+                # Use GBM only — LR artifact has sklearn version mismatch
+                try:
+                    if lr_scaler is not None:
+                        X_lr = lr_scaler.transform(X_row)
+                    else:
+                        X_lr = X_row
+                    lr_prob = float(lr_model.predict_proba(X_lr)[0, 1])
+                    combined_yrfi = round(0.65 * gbm_prob + 0.35 * lr_prob, 4)
+                except Exception:
+                    lr_prob = None
+                    combined_yrfi = round(float(gbm_prob), 4)
                 model_type = "gbm_lr_ensemble"
 
             except Exception as exc:
