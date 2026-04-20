@@ -898,6 +898,8 @@ def predict_mlb_games(
         away_pitcher_name: str | None = None
         home_pitcher_era: float | None = None
         away_pitcher_era: float | None = None
+        h_pid: int | None = None
+        a_pid: int | None = None
 
         if probable_row is not None and pitcher_stats_df is not None:
             # Convert pitcher IDs from float64 (parquet storage) to int,
@@ -1088,6 +1090,8 @@ def predict_mlb_games(
             # v2 fields
             "home_pitcher": home_pitcher_name,
             "away_pitcher": away_pitcher_name,
+            "home_pitcher_id": h_pid,
+            "away_pitcher_id": a_pid,
             "home_pitcher_era": round(home_pitcher_era, 2) if home_pitcher_era is not None else None,
             "away_pitcher_era": round(away_pitcher_era, 2) if away_pitcher_era is not None else None,
             "temp_f": round(weather["temp_f"], 1) if weather else None,

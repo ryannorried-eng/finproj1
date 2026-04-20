@@ -278,6 +278,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Min edge to display (default: show all)",
     )
 
+    # --- refresh-2026-fi ---
+    # Intended to be called daily via cron at 10am UTC (5am CT, before games start):
+    #   0 10 * * * python -m line_tracker refresh-2026-fi
+    sub.add_parser(
+        "refresh-2026-fi",
+        help="Refresh the 2026 first-inning cache (run daily before predictions)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -326,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_train_nrfi(args)
     if args.command == "predict-nrfi":
         return _cmd_predict_nrfi(args)
+    if args.command == "refresh-2026-fi":
+        return _cmd_refresh_2026_fi()
     return 0
 
 
@@ -986,7 +996,7 @@ def _cmd_predict_nrfi(args) -> int:
     from line_tracker.model.mlb_nrfi import predict_nrfi
 
     target = date_type.fromisoformat(args.date) if args.date else date_type.today()
-    preds = predict_nrfi(game_date=target)
+    preds = predict_nrfi(target_date=target)
 
     if not preds:
         print(f"No NRFI/YRFI predictions available for {target}.")
@@ -1014,6 +1024,33 @@ def _cmd_predict_nrfi(args) -> int:
             f"YRFI {yrfi_pct:.0f}% | Edge: {edge_str} | {bet_str}"
         )
     print()
+    return 0
+
+
+def _cmd_refresh_2026_fi() -> int:
+    """Force-refresh the 2026 first-inning cache.
+
+    Intended for daily cron execution at 10am UTC (5am CT), before
+    predictions are generated:
+        0 10 * * * python -m line_tracker refresh-2026-fi
+    """
+    from datetime import datetime as _dt
+    from line_tracker.model.mlb_data import fetch_first_inning_data
+
+    print(f"[{_dt.now():%Y-%m-%d %H:%M}] Refreshing 2026 first-inning cache...")
+    try:
+        df = fetch_first_inning_data(seasons=[2026], force_refresh=True)
+        if df is not None and not df.empty:
+            print(
+                f"  Done: {len(df)} games cached "
+                f"({df['date'].min().date()} to {df['date'].max().date()}), "
+                f"YRFI rate {df['yrfi'].mean():.3f}"
+            )
+        else:
+            print("  No 2026 data available yet (season may not have started).")
+    except Exception as exc:
+        print(f"  Failed: {exc}")
+        return 1
     return 0
 
 
