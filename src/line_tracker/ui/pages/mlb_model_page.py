@@ -152,24 +152,33 @@ def _pred_score_abbr(model_total, model_run_diff, home_prob, away_br, home_br):
     return f"{away_br} {away_score} - {home_br} {home_score}{flag}"
 
 
-def _model_spread_pick(model_run_diff):
+def _model_spread_pick(model_run_diff, market_spread=None):
     """
     Determine model's run line pick based on predicted margin.
     model_run_diff is always from the HOME team's perspective:
       positive = home team wins by that many runs
       negative = away team wins by that many runs
 
-    Returns string like "Home -1.5 (+2.2)" or "Away +1.5 (-2.2)" or "—"
+    market_spread: home team spread point (e.g. -1.5, -2.5). Defaults to -1.5.
+
+    Returns string like "Home -1.5 (+2.2 edge)" or "Away +1.5 (-2.2 edge)" or "—"
     """
     if model_run_diff is None or pd.isna(model_run_diff):
         return "—"
 
-    if model_run_diff > 1.5:
-        # Home wins by more than 1.5 → Home covers -1.5
-        return f"Home -1.5 ({model_run_diff:+.1f})"
-    elif model_run_diff < -1.5:
-        # Away wins by more than 1.5 → Away covers +1.5
-        return f"Away +1.5 ({model_run_diff:+.1f})"
+    # Use actual market spread point, defaulting to -1.5 (standard run line)
+    if market_spread is not None and not pd.isna(market_spread):
+        home_point = float(market_spread)
+    else:
+        home_point = -1.5
+    away_point = -home_point
+
+    # Edge = how many runs the model beats the spread by
+    edge = abs(model_run_diff) - abs(home_point)
+    if model_run_diff > abs(home_point):
+        return f"Home {home_point:+.1f} ({edge:+.1f})"
+    elif model_run_diff < -abs(home_point):
+        return f"Away +{away_point:.1f} ({edge:+.1f})"
     else:
         return f"Push zone ({model_run_diff:+.1f})"
 
@@ -244,12 +253,23 @@ def _best_bet(p):
     else:
         total_play = None  # Skip unders entirely
 
-    # Run line play
+    # Run line play — use actual market spread point and odds
+    market_spread = p.get("market_spread")
+    home_point = float(market_spread) if market_spread is not None else -1.5
+    away_point = -home_point
+    home_spread_odds = p.get("market_home_spread_odds")
+    away_spread_odds = p.get("market_away_spread_odds")
+
+    def fmt_spread_odds(o):
+        if o is None:
+            return ""
+        return f" (+{int(o)})" if o > 0 else f" ({int(o)})"
+
     rl_play = None
-    if run_diff > 2.0:
-        rl_play = f"{home_br} -1.5 ({run_diff:+.1f})"
-    elif run_diff < -2.0:
-        rl_play = f"{away_br} +1.5 ({run_diff:+.1f})"
+    if run_diff > abs(home_point):
+        rl_play = f"{home_br} {home_point:+.1f}{fmt_spread_odds(home_spread_odds)} ({run_diff:+.1f})"
+    elif run_diff < -abs(home_point):
+        rl_play = f"{away_br} +{away_point:.1f}{fmt_spread_odds(away_spread_odds)} ({run_diff:+.1f})"
 
     # Only surface ML picks where model has sufficient conviction
     # Threshold: favored team >= 57% AND edge >= 4%
@@ -293,6 +313,14 @@ def _find_best_bets(predictions):
 
         matchup = f"{p['away_team']} @ {p['home_team']}"
 
+        _spread_fields = {
+            "market_spread": p.get("market_spread"),
+            "market_home_spread_odds": p.get("market_home_spread_odds"),
+            "market_away_spread_odds": p.get("market_away_spread_odds"),
+            "home_team_br": p.get("home_team_br", ""),
+            "away_team_br": p.get("away_team_br", ""),
+        }
+
         # --- Moneyline bets ---
         # Only show ML bets meeting the 57% threshold
         if p.get("ml_bet_qualified", False):
@@ -324,6 +352,7 @@ def _find_best_bets(predictions):
                         "total_edge": total_edge,
                         "model_run_diff": p.get("model_run_diff"),
                         "ml_bet_qualified": True,
+                        **_spread_fields,
                     })
 
             # Away ML value
@@ -354,6 +383,7 @@ def _find_best_bets(predictions):
                         "total_edge": total_edge,
                         "model_run_diff": p.get("model_run_diff"),
                         "ml_bet_qualified": True,
+                        **_spread_fields,
                     })
 
         # --- Totals bets ---
@@ -380,6 +410,7 @@ def _find_best_bets(predictions):
                 "wind_out_factor": p.get("wind_out_factor", 0),
                 "ml_edge": ml_edge,
                 "model_run_diff": p.get("model_run_diff"),
+                **_spread_fields,
             })
 
     # Sort by value score descending, dedupe by matchup+type
@@ -708,13 +739,23 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 home_br,
             )
 
+            home_spread_odds = p.get("market_home_spread_odds")
+            away_spread_odds = p.get("market_away_spread_odds")
+
+            def _fmt_odds(o):
+                if o is None:
+                    return ""
+                return f" (+{int(o)})" if o > 0 else f" ({int(o)})"
+
             if market_spread is not None:
-                if market_spread < 0:
-                    spread_str = f"{market_spread:.1f} / +{abs(market_spread):.1f}"
-                else:
-                    spread_str = f"+{market_spread:.1f} / -{market_spread:.1f}"
+                home_pt = float(market_spread)
+                away_pt = -home_pt
+                spread_str = (
+                    f"Away +{away_pt:.1f}{_fmt_odds(away_spread_odds)} / "
+                    f"Home {home_pt:+.1f}{_fmt_odds(home_spread_odds)}"
+                )
             else:
-                spread_str = "-1.5 / +1.5" if p.get("market_total") else "—"
+                spread_str = "Away +1.5 / Home -1.5" if p.get("market_total") else "—"
 
             # Model agreement indicator
             disagreement = p.get("model_disagreement")
@@ -751,7 +792,7 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 "Away ML":       fmt_ml(away_ml),
                 "Home ML":       fmt_ml(home_ml),
                 "Mkt Spread":    spread_str,
-                "Model Spread":  _model_spread_pick(p.get("model_run_diff")),
+                "Model Spread":  _model_spread_pick(p.get("model_run_diff"), market_spread),
                 "Best Bet":      (
                     "⚠️ DATA CHECK — verify data before betting"
                     if is_flagged
