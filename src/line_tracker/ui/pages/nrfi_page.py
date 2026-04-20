@@ -12,6 +12,20 @@ import streamlit as st
 log = logging.getLogger(__name__)
 
 
+@st.cache_data(ttl=3600)
+def _cached_fi_history(current_year: int):
+    """Load first-inning history once per hour; shared across all button clicks."""
+    try:
+        from line_tracker.model.mlb_data import fetch_first_inning_data
+        df = fetch_first_inning_data(
+            seasons=[current_year - 1, current_year],
+            force_refresh=False,
+        )
+        return df if df is not None and not df.empty else None
+    except Exception:
+        return None
+
+
 def _fmt_commence(ct_str: str, tz_name: str = "America/Chicago") -> str:
     if not ct_str:
         return ""
@@ -121,7 +135,8 @@ def render_nrfi_page(conn=None) -> None:
         with st.spinner("Fetching game data and pitcher stats…"):
             try:
                 from line_tracker.model.mlb_nrfi import predict_nrfi
-                preds = predict_nrfi(target_date=pred_date)
+                fi_history = _cached_fi_history(pred_date.year)
+                preds = predict_nrfi(target_date=pred_date, fi_history=fi_history)
                 st.session_state["nrfi_predictions"] = preds
                 st.session_state["nrfi_loaded_date"] = str(pred_date)
                 st.session_state.pop("nrfi_edge_results", None)

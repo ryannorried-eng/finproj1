@@ -39,7 +39,10 @@ def _sp_fi_yrfi_rate(fi_history, sp_id) -> float | None:
     return float(sp_games["yrfi"].mean())
 
 
-def predict_nrfi(target_date: date | None = None) -> list[dict]:
+def predict_nrfi(
+    target_date: date | None = None,
+    fi_history=None,  # pre-loaded fi_history; if None, loads internally (CLI usage)
+) -> list[dict]:
     """Return NRFI/YRFI probability estimates for each game on target_date.
 
     Loads first-inning history for the prior and current season so that
@@ -56,18 +59,19 @@ def predict_nrfi(target_date: date | None = None) -> list[dict]:
         target_date = date.today()
     current_year = target_date.year
 
-    # Load first-inning history for prior + current season (resume-capable)
-    fi_history = None
-    try:
-        from line_tracker.model.mlb_data import fetch_first_inning_data
-        df = fetch_first_inning_data(
-            seasons=[current_year - 1, current_year],
-            force_refresh=False,
-        )
-        if df is not None and not df.empty:
-            fi_history = df
-    except Exception as exc:
-        logger.debug("Could not load first-inning history: %s", exc)
+    # Load first-inning history only when not pre-supplied by caller.
+    # The Streamlit page passes a cached copy to avoid reloading on every click.
+    if fi_history is None:
+        try:
+            from line_tracker.model.mlb_data import fetch_first_inning_data
+            df = fetch_first_inning_data(
+                seasons=[current_year - 1, current_year],
+                force_refresh=False,
+            )
+            if df is not None and not df.empty:
+                fi_history = df
+        except Exception as exc:
+            logger.debug("Could not load first-inning history: %s", exc)
 
     try:
         from line_tracker.model.mlb_predict import predict_mlb_games
