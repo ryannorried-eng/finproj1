@@ -173,6 +173,9 @@ def _model_spread_pick(model_run_diff, market_spread=None):
         home_point = -1.5
     away_point = -home_point
 
+    if abs(home_point) < 0.5:
+        return "Pick'em"
+
     # Edge = how many runs the model beats the spread by
     edge = abs(model_run_diff) - abs(home_point)
     def _fmt_pt(pt):
@@ -272,7 +275,9 @@ def _best_bet(p):
         return f"+{pt:.1f}" if pt > 0 else f"{pt:.1f}"
 
     rl_play = None
-    if run_diff > abs(home_point):
+    if abs(home_point) < 0.5:
+        rl_play = None  # skip spread bet for pick'em games
+    elif run_diff > abs(home_point):
         rl_play = f"{home_br} {_fmt_pt(home_point)}{fmt_spread_odds(home_spread_odds)} ({run_diff:+.1f})"
     elif run_diff < -abs(home_point):
         rl_play = f"{away_br} {_fmt_pt(away_point)}{fmt_spread_odds(away_spread_odds)} ({run_diff:+.1f})"
@@ -763,10 +768,13 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                     else:
                         return f"{pt:.1f}"
 
-                spread_str = (
-                    f"Away {_fmt_pt(away_pt)}{_fmt_odds(away_spread_odds)} / "
-                    f"Home {_fmt_pt(home_pt)}{_fmt_odds(home_spread_odds)}"
-                )
+                if abs(home_pt) < 0.5:
+                    spread_str = "Pick'em"
+                else:
+                    spread_str = (
+                        f"Away {_fmt_pt(away_pt)}{_fmt_odds(away_spread_odds)} / "
+                        f"Home {_fmt_pt(home_pt)}{_fmt_odds(home_spread_odds)}"
+                    )
             else:
                 spread_str = "Away +1.5 / Home -1.5" if p.get("market_total") else "—"
 
