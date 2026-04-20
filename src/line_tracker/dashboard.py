@@ -91,6 +91,7 @@ from line_tracker.ui.components.diagnostics import (
 from line_tracker.ui.components.explainability import render_pick_explanation
 from line_tracker.ui.pages.model_page import render_model_picks_page
 from line_tracker.ui.pages.mlb_model_page import render_mlb_model_page
+from line_tracker.ui.pages.nrfi_page import render_nrfi_page
 
 # Toggle to show EV Math Debug expander on slate / shopping pages.
 SHOW_EV_DEBUG = False
@@ -510,6 +511,7 @@ def _sidebar():
             [
                 "Dashboard", "Best Lines to Shop",
                 "Daily Slate", "Performance", "Model Picks", "⚾ MLB Model",
+                "🎯 NRFI/YRFI",
             ],
             key="nav_page",
             horizontal=True,
@@ -3997,6 +3999,8 @@ def main():
         elif nav == "⚾ MLB Model":
             with LineStore(DB_PATH) as _mlb_store:
                 render_mlb_model_page(_mlb_store._conn)
+        elif nav == "🎯 NRFI/YRFI":
+            render_nrfi_page()
         else:
             _page_dashboard()
 

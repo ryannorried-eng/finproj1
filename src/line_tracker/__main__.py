@@ -245,6 +245,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Parallel workers (default: 12)",
     )
 
+    # --- train-nrfi ---
+    train_nrfi_p = sub.add_parser(
+        "train-nrfi",
+        help="Train NRFI/YRFI first-inning prediction models",
+    )
+    train_nrfi_p.add_argument(
+        "--seasons",
+        default="2022,2023,2024,2025",
+        help="Comma-separated seasons (default: 2022,2023,2024,2025)",
+    )
+    train_nrfi_p.add_argument(
+        "--models-dir", default=None,
+        help="Directory to save model artifacts",
+    )
+    train_nrfi_p.add_argument(
+        "--force-refresh", action="store_true",
+        help="Re-download cached data",
+    )
+
+    # --- predict-nrfi ---
+    predict_nrfi_p = sub.add_parser(
+        "predict-nrfi",
+        help="Generate NRFI/YRFI predictions for today's MLB slate",
+    )
+    predict_nrfi_p.add_argument(
+        "--date", default=None,
+        help="Date YYYY-MM-DD (default: today)",
+    )
+    predict_nrfi_p.add_argument(
+        "--min-edge", type=float, default=0.0,
+        help="Min edge to display (default: show all)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -289,6 +322,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_predict_mlb_ensemble(args)
     if args.command == "backfill-weather":
         return _cmd_backfill_weather(args)
+    if args.command == "train-nrfi":
+        return _cmd_train_nrfi(args)
+    if args.command == "predict-nrfi":
+        return _cmd_predict_nrfi(args)
     return 0
 
 
@@ -922,6 +959,62 @@ def _print_lines_table(lines) -> None:
             f"{ln.home_value:<8} {ln.away_value:<8} "
             f"{hp:<8} {ap:<8}"
         )
+
+
+def _cmd_train_nrfi(args) -> int:
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+
+    from pathlib import Path as _Path
+    from line_tracker.model.mlb_nrfi import train_nrfi_model
+
+    seasons = [int(s.strip()) for s in args.seasons.split(",")]
+    models_dir = _Path(args.models_dir) if args.models_dir else None
+    train_nrfi_model(
+        seasons=seasons,
+        models_dir=models_dir,
+        force_refresh=args.force_refresh,
+    )
+    return 0
+
+
+def _cmd_predict_nrfi(args) -> int:
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+
+    from datetime import date as date_type
+    from line_tracker.model.mlb_nrfi import predict_nrfi
+
+    target = date_type.fromisoformat(args.date) if args.date else date_type.today()
+    preds = predict_nrfi(game_date=target)
+
+    if not preds:
+        print(f"No NRFI/YRFI predictions available for {target}.")
+        return 0
+
+    min_edge = getattr(args, "min_edge", 0.0)
+    displayed = [
+        p for p in preds
+        if min_edge == 0.0 or (p.get("edge") or 0) >= min_edge
+    ]
+
+    print(f"\n⚾ NRFI/YRFI Predictions for {target}:\n")
+    for p in displayed:
+        away = p["away_team"]
+        home = p["home_team"]
+        h_sp = p.get("home_sp", "TBD")
+        a_sp = p.get("away_sp", "TBD")
+        yrfi_pct = p["yrfi_prob"] * 100
+        side = p.get("bet") or "—"
+        edge_val = p.get("edge")
+        edge_str = f"+{edge_val*100:.1f}%" if edge_val else "—"
+        bet_str = f"BET: {side} ✓" if side != "—" else "No edge"
+        print(
+            f"  {away} @ {home} | {a_sp} vs {h_sp} | "
+            f"YRFI {yrfi_pct:.0f}% | Edge: {edge_str} | {bet_str}"
+        )
+    print()
+    return 0
 
 
 if __name__ == "__main__":
