@@ -791,7 +791,13 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
                 agreement_str = f"🟢 {disagreement:.3f}"
 
             ensemble_prob = p.get("ensemble_prob")
-            ensemble_str = f"{ensemble_prob:.1%}" if ensemble_prob is not None else "—"
+            if ensemble_prob is not None:
+                if ensemble_prob >= 0.5:
+                    ensemble_str = f"{p.get('home_team_br','HOM')} {ensemble_prob:.1%}"
+                else:
+                    ensemble_str = f"{p.get('away_team_br','AWY')} {1-ensemble_prob:.1%}"
+            else:
+                ensemble_str = "—"
 
             rows.append({
                 "Matchup":       f"{p['away_team']} @ {p['home_team']}",
