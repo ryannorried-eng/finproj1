@@ -86,8 +86,10 @@ def predict_nrfi(target_date: date | None = None) -> list[dict]:
         away_fi_rate = _sp_fi_yrfi_rate(fi_history, away_pid)
 
         # Prefer actual first-inning rate when available; fall back to ERA formula
-        home_yrfi = home_fi_rate if home_fi_rate is not None else _per_team_yrfi(home_era)
-        away_yrfi = away_fi_rate if away_fi_rate is not None else _per_team_yrfi(away_era)
+        era_home = _per_team_yrfi(home_era)
+        era_away = _per_team_yrfi(away_era)
+        home_yrfi = (0.25 * home_fi_rate + 0.75 * era_home) if home_fi_rate is not None else era_home
+        away_yrfi = (0.25 * away_fi_rate + 0.75 * era_away) if away_fi_rate is not None else era_away
         combined_yrfi = round(1.0 - (1.0 - away_yrfi) * (1.0 - home_yrfi), 4)
 
         results.append({
