@@ -678,10 +678,14 @@ def _fetch_mlb_odds() -> list[dict]:
                 "market_home_ml": None,
                 "market_away_ml": None,
                 "market_spread": None,
+                "market_home_spread_odds": None,
+                "market_away_spread_odds": None,
                 "market_total": None,
                 "_home_ml_list": [],
                 "_away_ml_list": [],
                 "_spread_list": [],
+                "_home_spread_price_list": [],
+                "_away_spread_price_list": [],
                 "_total_list": [],
             }
         g = games[key]
@@ -693,6 +697,10 @@ def _fetch_mlb_odds() -> list[dict]:
         elif ln.bet_type == BetType.SPREAD:
             if ln.home_value is not None:
                 g["_spread_list"].append(float(ln.home_value))
+            if ln.home_price is not None:
+                g["_home_spread_price_list"].append(float(ln.home_price))
+            if ln.away_price is not None:
+                g["_away_spread_price_list"].append(float(ln.away_price))
         elif ln.bet_type == BetType.TOTAL:
             if ln.home_value is not None:
                 g["_total_list"].append(float(ln.home_value))
@@ -706,10 +714,17 @@ def _fetch_mlb_odds() -> list[dict]:
             g["market_away_ml"] = int(round(float(np.median(g["_away_ml_list"]))))
         if g["_spread_list"]:
             g["market_spread"] = float(np.median(g["_spread_list"]))
+        if g["_home_spread_price_list"]:
+            g["market_home_spread_odds"] = int(round(float(np.median(g["_home_spread_price_list"]))))
+        if g["_away_spread_price_list"]:
+            g["market_away_spread_odds"] = int(round(float(np.median(g["_away_spread_price_list"]))))
         if g["_total_list"]:
             g["market_total"] = float(np.median(g["_total_list"]))
         # Clean up internal lists
-        for k in ("_home_ml_list", "_away_ml_list", "_spread_list", "_total_list"):
+        for k in (
+            "_home_ml_list", "_away_ml_list", "_spread_list",
+            "_home_spread_price_list", "_away_spread_price_list", "_total_list",
+        ):
             del g[k]
         result.append(g)
 
@@ -982,6 +997,8 @@ def predict_mlb_games(
         market_home_ml = g.get("market_home_ml")
         market_away_ml = g.get("market_away_ml")
         market_spread = g.get("market_spread")
+        market_home_spread_odds = g.get("market_home_spread_odds")
+        market_away_spread_odds = g.get("market_away_spread_odds")
         market_total = g.get("market_total")
 
         # Edges
@@ -1058,6 +1075,8 @@ def predict_mlb_games(
             "market_home_ml": market_home_ml,
             "market_away_ml": market_away_ml,
             "market_spread": market_spread,
+            "market_home_spread_odds": market_home_spread_odds,
+            "market_away_spread_odds": market_away_spread_odds,
             "market_total": market_total,
             "ml_edge": round(ml_edge, 4),
             "total_edge": round(total_edge, 2),
