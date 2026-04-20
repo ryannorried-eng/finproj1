@@ -1094,6 +1094,8 @@ def predict_mlb_games(
             "away_pitcher_id": a_pid,
             "home_pitcher_era": round(home_pitcher_era, 2) if home_pitcher_era is not None else None,
             "away_pitcher_era": round(away_pitcher_era, 2) if away_pitcher_era is not None else None,
+            "home_pitcher_id": h_pid,
+            "away_pitcher_id": a_pid,
             "temp_f": round(weather["temp_f"], 1) if weather else None,
             "wind_mph": round(weather["wind_mph"], 1) if weather else None,
             "wind_out_factor": round(weather["wind_out_factor"], 2) if weather else None,
