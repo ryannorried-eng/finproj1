@@ -1,12 +1,10 @@
-"""NRFI/YRFI Predictions Streamlit page.
-
-Shows model predictions for first-inning scoring with edge calculations.
-"""
+"""NRFI/YRFI Streamlit page — first-inning props with manual odds input."""
 
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -14,123 +12,265 @@ import streamlit as st
 log = logging.getLogger(__name__)
 
 
-def _color_edge(edge: float | None) -> str:
+def _fmt_commence(ct_str: str, tz_name: str = "America/Chicago") -> str:
+    if not ct_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ct_str.replace("Z", "+00:00"))
+        local = dt.astimezone(ZoneInfo(tz_name))
+        suffix = tz_name.split("/")[-1][:2].upper() + "T"
+        return local.strftime(f"%-I:%M %p {suffix}")
+    except Exception:
+        return ct_str
+
+
+def _american_to_implied(odds: int) -> float | None:
+    """Convert American odds integer to raw implied probability (with vig)."""
+    if odds == 0:
+        return None
+    if odds < 0:
+        return abs(odds) / (abs(odds) + 100)
+    return 100 / (odds + 100)
+
+
+def _calc_edge(yrfi_prob: float, nrfi_prob: float, yrfi_odds: int, nrfi_odds: int) -> dict | None:
+    """Devig and calculate edges for a single game. Returns None if odds are 0."""
+    yrfi_implied = _american_to_implied(yrfi_odds)
+    nrfi_implied = _american_to_implied(nrfi_odds)
+    if yrfi_implied is None or nrfi_implied is None:
+        return None
+
+    total = yrfi_implied + nrfi_implied
+    if total <= 0:
+        return None
+
+    market_yrfi = yrfi_implied / total
+    market_nrfi = nrfi_implied / total
+
+    yrfi_edge = yrfi_prob - market_yrfi
+    nrfi_edge = nrfi_prob - market_nrfi
+
+    from line_tracker.model.mlb_nrfi import EDGE_THRESHOLD
+    if yrfi_edge >= EDGE_THRESHOLD:
+        bet, edge = "YRFI", yrfi_edge
+    elif nrfi_edge >= EDGE_THRESHOLD:
+        bet, edge = "NRFI", nrfi_edge
+    else:
+        bet, edge = None, None
+
+    confidence = None
+    if edge is not None:
+        if edge >= 0.08:
+            confidence = "High"
+        elif edge >= 0.05:
+            confidence = "Medium"
+        else:
+            confidence = "Low"
+
+    return {
+        "market_yrfi_prob": market_yrfi,
+        "market_nrfi_prob": market_nrfi,
+        "yrfi_edge": yrfi_edge,
+        "nrfi_edge": nrfi_edge,
+        "bet": bet,
+        "edge": edge,
+        "confidence": confidence,
+    }
+
+
+def _fmt_era(era: float | None) -> str:
+    return f"{era:.2f}" if era is not None else "---"
+
+
+def _edge_cell(edge: float | None) -> str:
     if edge is None:
-        return "color: gray"
+        return "—"
+    edge_str = f"{edge:+.1%}"
     if edge > 0.05:
-        return "color: green; font-weight: bold"
+        return f"🟢 {edge_str}"
     if edge < 0:
-        return "color: red"
-    return "color: gray"
+        return f"🔴 {edge_str}"
+    return f"⬜ {edge_str}"
 
 
-def render_nrfi_page() -> None:
-    """Render the NRFI/YRFI predictions Streamlit page."""
-    st.title("🎯 NRFI/YRFI Predictions")
+def render_nrfi_page(conn=None) -> None:
+    """Render the NRFI/YRFI page."""
+    st.header("🎯 NRFI / YRFI")
     st.caption(
-        "Predicts whether at least one run will score in the first inning "
-        "(YRFI) or no runs will score (NRFI)."
+        "First-inning runs props · Model estimates YRFI probability from starter ERA · "
+        "Enter market odds to calculate edge"
     )
 
-    # Date picker + refresh
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        selected_date = st.date_input(
-            "Date",
-            value=date.today(),
-            min_value=date.today() - timedelta(days=7),
-            max_value=date.today() + timedelta(days=3),
-        )
-    with col2:
-        refresh = st.button("🔄 Refresh", use_container_width=True)
+    # -----------------------------------------------------------------------
+    # Date selector
+    # -----------------------------------------------------------------------
+    pred_date = st.date_input("Date", value=date.today(), key="nrfi_pred_date")
 
-    # Cache key
-    cache_key = f"nrfi_preds_{selected_date}"
-    if refresh and cache_key in st.session_state:
-        del st.session_state[cache_key]
+    # Clear per-game odds when the date changes
+    last_loaded = st.session_state.get("nrfi_loaded_date")
+    if last_loaded is not None and last_loaded != str(pred_date):
+        for k in list(st.session_state.keys()):
+            if k.startswith("yrfi_odds_") or k.startswith("nrfi_odds_"):
+                del st.session_state[k]
+        st.session_state.pop("nrfi_edge_results", None)
+        st.session_state.pop("nrfi_predictions", None)
 
-    # Load predictions
-    if cache_key not in st.session_state:
-        with st.spinner("Loading NRFI/YRFI predictions..."):
+    load_btn = st.button("Load Predictions", key="nrfi_load_btn", type="primary")
+
+    if load_btn:
+        with st.spinner("Fetching game data and pitcher stats…"):
             try:
                 from line_tracker.model.mlb_nrfi import predict_nrfi
-                preds = predict_nrfi(game_date=selected_date)
-                st.session_state[cache_key] = preds
-            except FileNotFoundError:
-                st.warning(
-                    "NRFI model not trained yet. "
-                    "Run `python -m line_tracker train-nrfi` first."
-                )
-                return
+                preds = predict_nrfi(target_date=pred_date)
+                st.session_state["nrfi_predictions"] = preds
+                st.session_state["nrfi_loaded_date"] = str(pred_date)
+                st.session_state.pop("nrfi_edge_results", None)
+                if preds:
+                    st.success(f"Loaded {len(preds)} games for {pred_date}.")
+                else:
+                    st.info(f"No MLB games found for {pred_date}.")
+            except FileNotFoundError as exc:
+                st.error(str(exc))
+                st.session_state["nrfi_predictions"] = []
             except Exception as exc:
-                log.exception("NRFI prediction error")
-                st.error(f"Prediction error: {exc}")
-                return
+                st.error(f"Error loading predictions: {exc}")
+                log.exception("nrfi_page load error")
+                st.session_state["nrfi_predictions"] = []
 
-    preds = st.session_state.get(cache_key, [])
-
+    preds = st.session_state.get("nrfi_predictions")
     if not preds:
-        st.info(f"No NRFI/YRFI predictions available for {selected_date}.")
+        if preds is not None:
+            st.info("No games found. Try a different date or check that the MLB model is trained.")
         return
 
-    # Build DataFrame for display
+    edge_results: dict = st.session_state.get("nrfi_edge_results", {})
+
+    # -----------------------------------------------------------------------
+    # Predictions table (updates after edge calculation)
+    # -----------------------------------------------------------------------
+    st.subheader("📊 Predictions")
+
     rows = []
     for p in preds:
-        edge = p.get("edge")
-        bet  = p.get("bet") or "—"
-        rows.append({
-            "Game":           p["game"],
-            "Home SP":        p.get("home_sp", "TBD"),
-            "Away SP":        p.get("away_sp", "TBD"),
-            "YRFI%":          f"{p['yrfi_prob']:.1%}",
-            "Bet":            bet,
-            "Edge":           f"{edge*100:+.1f}%" if edge else "—",
-            "Confidence":     p.get("confidence") or "—",
-            # Hidden numeric for sorting
-            "_edge_num":      edge or 0.0,
-            "_yrfi_prob_num": p["yrfi_prob"],
-        })
+        game_pk = p["game_pk"]
+        away_br = p.get("away_team_br") or p["away_team"][:3].upper()
+        home_br = p.get("home_team_br") or p["home_team"][:3].upper()
+        label = f"{away_br} @ {home_br}"
+        time_str = _fmt_commence(p.get("commence_time", ""))
 
-    df = pd.DataFrame(rows).sort_values("_edge_num", ascending=False)
-    display_df = df.drop(columns=["_edge_num", "_yrfi_prob_num"])
+        row: dict = {
+            "Game": label,
+            "Time": time_str,
+            "Away SP": f"{p['away_pitcher']} ({_fmt_era(p['away_pitcher_era'])})",
+            "Home SP": f"{p['home_pitcher']} ({_fmt_era(p['home_pitcher_era'])})",
+            "YRFI%": f"{p['yrfi_prob']:.1%}",
+        }
 
-    # Apply edge coloring
-    def _style_row(row):
-        styles = [""] * len(row)
-        edge_col_idx = list(display_df.columns).index("Edge")
-        raw = df.loc[row.name, "_edge_num"]
-        if raw > 0.05:
-            styles[edge_col_idx] = "color: green; font-weight: bold"
-        elif raw < 0:
-            styles[edge_col_idx] = "color: red"
+        er = edge_results.get(game_pk)
+        if er:
+            row["Market YRFI%"] = f"{er['market_yrfi_prob']:.1%}"
+            bet = er.get("bet")
+            edge = er.get("edge")
+            row["Bet"] = bet if bet else "—"
+            row["Edge"] = _edge_cell(edge)
+            row["Confidence"] = er.get("confidence") or "—"
         else:
-            styles[edge_col_idx] = "color: gray"
-        return styles
+            row["Market YRFI%"] = "—"
+            row["Bet"] = "—"
+            row["Edge"] = "—"
+            row["Confidence"] = "—"
 
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
     st.dataframe(
-        display_df.style.apply(_style_row, axis=1),
+        df,
+        hide_index=True,
         use_container_width=True,
-        height=min(400, 40 + 35 * len(display_df)),
+        column_config={
+            "YRFI%": st.column_config.TextColumn(
+                "YRFI%",
+                help="Model estimate: probability that at least one run scores in the 1st inning",
+            ),
+            "Market YRFI%": st.column_config.TextColumn(
+                "Market YRFI%",
+                help="Devigged market probability derived from entered American odds",
+            ),
+            "Edge": st.column_config.TextColumn(
+                "Edge",
+                help="🟢 > +5% edge  ⬜ < 5% edge  🔴 negative edge",
+            ),
+        },
     )
 
-    # Expandable detail per game
-    st.subheader("Game Details")
-    for p in preds:
-        with st.expander(p["game"]):
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("YRFI%",  f"{p['yrfi_prob']:.1%}")
-            c2.metric("NRFI%",  f"{p['nrfi_prob']:.1%}")
-            edge = p.get("edge")
-            c3.metric("Edge",   f"{edge*100:+.1f}%" if edge else "—")
-            c4.metric("Bet",    p.get("bet") or "No edge")
+    if edge_results:
+        n_bets = sum(1 for er in edge_results.values() if er.get("bet"))
+        st.caption(
+            f"Edge calculated for {len(edge_results)} games · "
+            f"{n_bets} bet{'s' if n_bets != 1 else ''} flagged (edge ≥ 5%)"
+        )
 
-            st.markdown("**Pitcher stats**")
-            pc1, pc2 = st.columns(2)
-            with pc1:
-                st.write(f"**Home SP:** {p.get('home_sp','TBD')}")
-                st.write(f"FI YRFI rate: {p.get('home_sp_fi_yrfi_rate', 0):.1%}")
-                st.write(f"Top-3 OBP: {p.get('home_top3_obp', 0):.3f}")
-            with pc2:
-                st.write(f"**Away SP:** {p.get('away_sp','TBD')}")
-                st.write(f"FI YRFI rate: {p.get('away_sp_fi_yrfi_rate', 0):.1%}")
-                st.write(f"Top-3 OBP: {p.get('away_top3_obp', 0):.3f}")
+    # -----------------------------------------------------------------------
+    # Manual odds input
+    # -----------------------------------------------------------------------
+    st.subheader("📥 Enter Market Odds")
+    st.caption(
+        "Enter American odds from your sportsbook (e.g. -120 for YRFI, +100 for NRFI). "
+        "Leave at 0 to skip a game."
+    )
+
+    # Header row
+    hc1, hc2, hc3 = st.columns([2, 1, 1])
+    hc1.markdown("**Game**")
+    hc2.markdown("**YRFI Odds**")
+    hc3.markdown("**NRFI Odds**")
+
+    for p in preds:
+        game_pk = p["game_pk"]
+        away_br = p.get("away_team_br") or p["away_team"][:3].upper()
+        home_br = p.get("home_team_br") or p["home_team"][:3].upper()
+        label = f"{away_br} @ {home_br}"
+
+        c1, c2, c3 = st.columns([2, 1, 1])
+        c1.write(label)
+        c2.number_input(
+            f"YRFI odds for {label}",
+            value=0,
+            step=5,
+            min_value=-10000,
+            max_value=10000,
+            key=f"yrfi_odds_{game_pk}",
+            label_visibility="collapsed",
+        )
+        c3.number_input(
+            f"NRFI odds for {label}",
+            value=0,
+            step=5,
+            min_value=-10000,
+            max_value=10000,
+            key=f"nrfi_odds_{game_pk}",
+            label_visibility="collapsed",
+        )
+
+    st.divider()
+
+    if st.button("⚡ Calculate Edge", key="nrfi_calc_edge_btn", type="primary"):
+        results: dict = {}
+        n_entered = 0
+        for p in preds:
+            game_pk = p["game_pk"]
+            yrfi_odds = int(st.session_state.get(f"yrfi_odds_{game_pk}", 0))
+            nrfi_odds = int(st.session_state.get(f"nrfi_odds_{game_pk}", 0))
+            if yrfi_odds == 0 or nrfi_odds == 0:
+                continue
+            n_entered += 1
+            er = _calc_edge(p["yrfi_prob"], p["nrfi_prob"], yrfi_odds, nrfi_odds)
+            if er is not None:
+                results[game_pk] = er
+
+        st.session_state["nrfi_edge_results"] = results
+
+        if n_entered == 0:
+            st.warning("Enter odds for at least one game first.")
+        else:
+            st.rerun()
