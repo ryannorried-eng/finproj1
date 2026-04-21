@@ -899,9 +899,9 @@ def predict_mlb_games(
         current_year = target_date.year
         starters_df = fetch_game_starters(current_year, force_refresh=False)
         if not starters_df.empty and "home_lineup" in starters_df.columns:
-            starters_df["_date_str"] = pd.to_datetime(starters_df["date"]).dt.strftime("%Y-%m-%d")
+            starters_df["date_str"] = pd.to_datetime(starters_df["date"]).dt.strftime("%Y-%m-%d")
             for row in starters_df.itertuples(index=False):
-                key = (str(row.home_team), str(row.away_team), str(row._date_str))
+                key = (str(row.home_team), str(row.away_team), str(row.date_str))
                 starters_lookup[key] = row
     except Exception as exc:
         logger.warning("Could not load starters cache: %s", exc)
