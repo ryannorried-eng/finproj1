@@ -901,12 +901,13 @@ def build_feature_matrix(
             a_k9   = row.get("away_rotation_k9",   LEAGUE_AVG_K9)
 
         # v4 — lineup strength
-        btd    = batter_to_date_by_season.get(season, pd.DataFrame())
+        # Use empty btd — the to-date OPS formula computes (H+BB)/AB which
+        # is ~0.33, half of real OPS. Always use season stats instead.
         bss    = batter_season_stats_by_season.get(season, pd.DataFrame())
         ptlogs = pitcher_logs_by_season.get(season, pd.DataFrame())
 
-        home_lineup = _compute_lineup_strength(row.get("home_lineup"), date, btd, bss)
-        away_lineup = _compute_lineup_strength(row.get("away_lineup"), date, btd, bss)
+        home_lineup = _compute_lineup_strength(row.get("home_lineup"), date, pd.DataFrame(), bss)
+        away_lineup = _compute_lineup_strength(row.get("away_lineup"), date, pd.DataFrame(), bss)
 
         # v4 — SP workload
         home_workload = _compute_sp_workload(row.get("home_sp_id"), date, ptlogs)
