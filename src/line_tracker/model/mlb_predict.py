@@ -835,7 +835,31 @@ def predict_mlb_games(
 
     pitcher_stats_df: pd.DataFrame | None = None
     try:
-        pitcher_stats_df = fetch_pitcher_season_stats(2025)
+        import time as _time
+        from line_tracker.model.mlb_data import CACHE_DIR
+
+        pitcher_stats_2025 = fetch_pitcher_season_stats(2025)
+
+        cache_path_2026 = CACHE_DIR / "pitcher_stats_2026.parquet"
+        force_refresh_2026 = False
+        if cache_path_2026.exists():
+            age_hours = (_time.time() - cache_path_2026.stat().st_mtime) / 3600
+            if age_hours > 24:
+                force_refresh_2026 = True
+
+        pitcher_stats_2026 = fetch_pitcher_season_stats(2026, force_refresh=force_refresh_2026)
+
+        if not pitcher_stats_2026.empty:
+            pitcher_stats_df = pitcher_stats_2025.copy()
+            pitcher_stats_df.update(pitcher_stats_2026)
+            new_pitchers = pitcher_stats_2026.index.difference(pitcher_stats_2025.index)
+            if len(new_pitchers) > 0:
+                pitcher_stats_df = pd.concat([
+                    pitcher_stats_df,
+                    pitcher_stats_2026.loc[new_pitchers],
+                ])
+        else:
+            pitcher_stats_df = pitcher_stats_2025
     except Exception as exc:
         logger.warning("Could not fetch pitcher stats: %s", exc)
 
