@@ -741,6 +741,62 @@ def _fetch_mlb_odds() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _fetch_and_cache_today_lineups(target_date, probables_df: pd.DataFrame) -> None:
+    """Fetch pre-game lineups from MLB boxscore endpoint and cache to disk.
+    
+    Skips if cache already exists and is less than 30 minutes old.
+    """
+    import json, time, requests as _requests
+    from line_tracker.model.mlb_data import CACHE_DIR
+    
+    cache_path = CACHE_DIR / f"today_lineups_{target_date}.json"
+    
+    # Skip if cache is fresh (< 30 min old)
+    if cache_path.exists():
+        age_min = (time.time() - cache_path.stat().st_mtime) / 60
+        if age_min < 30:
+            return
+    
+    if probables_df is None or probables_df.empty:
+        return
+    
+    today_lineups = {}
+    for _, row in probables_df.iterrows():
+        game_pk = row.get("game_pk")
+        home = row.get("home_team")
+        away = row.get("away_team")
+        if not game_pk or not home or not away:
+            continue
+        try:
+            url = f"https://statsapi.mlb.com/api/v1/game/{int(game_pk)}/boxscore"
+            resp = _requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            team_key = f"team_{home}_{away}"
+            for side in ["home", "away"]:
+                order = data.get("teams",{}).get(side,{}).get("battingOrder",[])
+                players = data.get("teams",{}).get(side,{}).get("players",{})
+                if not order:
+                    continue
+                lineup = []
+                for i, pid in enumerate(order, 1):
+                    player = players.get(f"ID{pid}", {})
+                    name = player.get("person",{}).get("fullName","Unknown")
+                    pos = player.get("position",{}).get("abbreviation","?")
+                    lineup.append({"id": pid, "name": name, 
+                                  "batting_order": i, "position": pos})
+                today_lineups[f"{team_key}_{side}"] = json.dumps(lineup)
+            time.sleep(0.05)
+        except Exception as exc:
+            logger.debug("Lineup fetch failed for game_pk %s: %s", game_pk, exc)
+    
+    if today_lineups:
+        with open(cache_path, "w") as f:
+            json.dump(today_lineups, f)
+        logger.info("Cached %d lineup entries for %s", len(today_lineups), target_date)
+
+
 def predict_mlb_games(
     target_date: date | None = None,
     models_dir: Path | None = None,
@@ -838,6 +894,14 @@ def predict_mlb_games(
         probables_df = fetch_probable_pitchers(target_date)
     except Exception as exc:
         logger.warning("Could not fetch probable pitchers: %s", exc)
+
+    # Fetch and cache today's lineups from MLB boxscore endpoint
+    try:
+        from line_tracker.model.mlb_data import fetch_probable_pitchers as _fp
+        _prob_for_lineups = _fp(target_date)
+        _fetch_and_cache_today_lineups(target_date, _prob_for_lineups)
+    except Exception as exc:
+        logger.debug("Lineup cache update failed: %s", exc)
 
 
     pitcher_stats_df: pd.DataFrame | None = None
