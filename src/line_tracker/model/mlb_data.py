@@ -653,7 +653,7 @@ def fetch_pitcher_season_stats(
             records.append({
                 "pitcher_id": int(pitcher_id),
                 "pitcher_name": player.get("fullName", ""),
-                "team": _to_canonical(team_info.get("abbreviation", "")),
+                "team": _to_canonical(_mlb_team_name_to_abbrev(team_info.get("name", ""))),
                 "era": _safe_float(stat.get("era")),
                 "whip": _safe_float(stat.get("whip")),
                 "k9": _safe_float(stat.get("strikeoutsPer9Inn")),
@@ -688,6 +688,29 @@ ROTOWIRE_TO_BR: dict[str, str] = {
     "San Francisco": "SFG", "St. Louis": "STL", "Tampa Bay": "TBR",
     "Texas": "TEX", "Toronto": "TOR", "Washington": "WSN",
 }
+
+# Map MLB Stats API team name -> abbreviation
+_MLB_TEAM_NAME_TO_ABBREV: dict[str, str] = {
+    'Arizona Diamondbacks': 'ARI', 'Atlanta Braves': 'ATL',
+    'Baltimore Orioles': 'BAL', 'Boston Red Sox': 'BOS',
+    'Chicago Cubs': 'CHC', 'Chicago White Sox': 'CHW',
+    'Cincinnati Reds': 'CIN', 'Cleveland Guardians': 'CLE',
+    'Colorado Rockies': 'COL', 'Detroit Tigers': 'DET',
+    'Houston Astros': 'HOU', 'Kansas City Royals': 'KCR',
+    'Los Angeles Angels': 'LAA', 'Los Angeles Dodgers': 'LAD',
+    'Miami Marlins': 'MIA', 'Milwaukee Brewers': 'MIL',
+    'Minnesota Twins': 'MIN', 'New York Mets': 'NYM',
+    'New York Yankees': 'NYY', 'Oakland Athletics': 'OAK',
+    'Athletics': 'OAK', 'Philadelphia Phillies': 'PHI',
+    'Pittsburgh Pirates': 'PIT', 'San Diego Padres': 'SDP',
+    'Seattle Mariners': 'SEA', 'San Francisco Giants': 'SFG',
+    'St. Louis Cardinals': 'STL', 'Tampa Bay Rays': 'TBR',
+    'Texas Rangers': 'TEX', 'Toronto Blue Jays': 'TOR',
+    'Washington Nationals': 'WSN',
+}
+
+def _mlb_team_name_to_abbrev(name: str) -> str:
+    return _MLB_TEAM_NAME_TO_ABBREV.get(name, '')
 
 _PROBABLE_EMPTY_COLS = [
     "game_pk", "home_team", "away_team",
@@ -1377,7 +1400,7 @@ def fetch_batter_season_stats(
             records.append({
                 "batter_id": int(batter_id),
                 "batter_name": player.get("fullName", ""),
-                "team": _to_canonical(team_info.get("abbreviation", "")),
+                "team": _to_canonical(_mlb_team_name_to_abbrev(team_info.get("name", ""))),
                 "ops": ops,
                 "obp": obp,
                 "slg": slg,

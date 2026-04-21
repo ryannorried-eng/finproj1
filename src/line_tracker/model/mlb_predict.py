@@ -967,15 +967,46 @@ def predict_mlb_games(
                 home_lineup_json = getattr(_sr, "home_lineup", None) or None
                 away_lineup_json = getattr(_sr, "away_lineup", None) or None
 
-        # Compute lineup strength (returns league-avg defaults when lineup_json is None)
+        # Compute lineup strength — use actual lineup when posted,
+        # fall back to team roster average when not yet available
         from line_tracker.model.mlb_features import _compute_lineup_strength
         _empty_btd = pd.DataFrame()
+
+        def _team_roster_lineup(team_br: str) -> dict | None:
+            """Build synthetic lineup stats from team roster batting averages."""
+            if batter_stats_df.empty or not team_br:
+                return None
+            team_batters = batter_stats_df[
+                (batter_stats_df["team"] == team_br) &
+                (batter_stats_df["plate_appearances"] >= 50)
+            ]
+            if len(team_batters) < 3:
+                return None
+            avg_ops = float(team_batters["ops"].mean())
+            avg_wrc = float(team_batters["wrc_plus_proxy"].mean())
+            return {
+                "lineup_wrc_weighted": avg_wrc,
+                "lineup_top3_ops": float(team_batters.nlargest(3, "ops")["ops"].mean()),
+                "lineup_depth_ops": float(team_batters.nlargest(9, "ops").iloc[3:]["ops"].mean()) if len(team_batters) >= 4 else avg_ops,
+            }
+
         home_lineup_stats = _compute_lineup_strength(
             home_lineup_json, target_date, _empty_btd, batter_stats_df
         )
         away_lineup_stats = _compute_lineup_strength(
             away_lineup_json, target_date, _empty_btd, batter_stats_df
         )
+
+        # Override with roster averages when lineup not posted
+        if home_lineup_json is None:
+            roster_stats = _team_roster_lineup(home_br)
+            if roster_stats:
+                home_lineup_stats = roster_stats
+
+        if away_lineup_json is None:
+            roster_stats = _team_roster_lineup(away_br)
+            if roster_stats:
+                away_lineup_stats = roster_stats
 
         # v2 — look up probable pitchers for this game
         probable_row = probables_index.get((home_br, away_br))
