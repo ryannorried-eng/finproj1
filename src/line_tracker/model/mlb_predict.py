@@ -957,11 +957,32 @@ def predict_mlb_games(
             logger.warning("Unknown away team: %r — skipping", away_full)
             continue
 
-        # Look up lineup from starters cache
-        _starter_key = (home_br, away_br, date_str)
+        # Look up lineup — try today's live cache first, then starters cache
         home_lineup_json: str | None = None
         away_lineup_json: str | None = None
-        if starters_lookup:
+
+        # Today's live lineups from boxscore endpoint
+        # Cache is keyed by home_team/away_team since Odds API uses different IDs
+        _today_cache_path = CACHE_DIR / f"today_lineups_{target_date}.json"
+        if _today_cache_path.exists():
+            try:
+                import json as _json
+                with open(_today_cache_path) as _f:
+                    _today_lineups = _json.load(_f)
+                # Look up by team key
+                _team_key = f"team_{home_br}_{away_br}"
+                _h_key = _team_key + "_home"
+                _a_key = _team_key + "_away"
+                if _h_key in _today_lineups:
+                    home_lineup_json = _today_lineups[_h_key]
+                if _a_key in _today_lineups:
+                    away_lineup_json = _today_lineups[_a_key]
+            except Exception:
+                pass
+
+        # Fall back to starters cache for historical games
+        if home_lineup_json is None and starters_lookup:
+            _starter_key = (home_br, away_br, date_str)
             _sr = starters_lookup.get(_starter_key)
             if _sr is not None:
                 home_lineup_json = getattr(_sr, "home_lineup", None) or None
