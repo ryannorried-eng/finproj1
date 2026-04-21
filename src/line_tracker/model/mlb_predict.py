@@ -440,6 +440,8 @@ def build_prediction_features(
     home_bullpen_era: float | None = None,
     away_bullpen_era: float | None = None,
     weather: dict | None = None,
+    home_lineup_stats: dict | None = None,
+    away_lineup_stats: dict | None = None,
 ) -> pd.DataFrame:
     """Build a single-row feature DataFrame for a game prediction.
 
@@ -600,13 +602,16 @@ def build_prediction_features(
         "wind_out_factor": wind_out_factor,
         "temp_f": temp_f,
         "precip_prob": precip_prob,
-        # v4 — lineup strength (neutral defaults for prediction; real lineups not yet integrated)
-        "home_lineup_wrc":       LEAGUE_AVG_WRC_PLUS,
-        "away_lineup_wrc":       LEAGUE_AVG_WRC_PLUS,
-        "home_lineup_top3_ops":  LEAGUE_AVG_OPS,
-        "away_lineup_top3_ops":  LEAGUE_AVG_OPS,
-        "lineup_wrc_diff":       0.0,
-        "home_lineup_depth_ops": LEAGUE_AVG_OPS,
+        # v4 — lineup strength (real stats when available; league avg fallback)
+        "home_lineup_wrc":       (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS),
+        "away_lineup_wrc":       (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS),
+        "home_lineup_top3_ops":  (home_lineup_stats or {}).get("lineup_top3_ops", LEAGUE_AVG_OPS),
+        "away_lineup_top3_ops":  (away_lineup_stats or {}).get("lineup_top3_ops", LEAGUE_AVG_OPS),
+        "lineup_wrc_diff":       (
+            (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) -
+            (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS)
+        ),
+        "home_lineup_depth_ops": (home_lineup_stats or {}).get("lineup_depth_ops", LEAGUE_AVG_OPS),
         # v4 — SP workload (neutral defaults)
         "home_sp_rest_days": 5.0,
         "away_sp_rest_days": 5.0,
@@ -821,6 +826,8 @@ def predict_mlb_games(
     from line_tracker.model.mlb_data import (
         fetch_probable_pitchers,
         fetch_pitcher_season_stats,
+        fetch_batter_season_stats,
+        fetch_game_starters,
         fetch_bullpen_stats,
         fetch_weather,
     )
@@ -862,6 +869,42 @@ def predict_mlb_games(
             pitcher_stats_df = pitcher_stats_2025
     except Exception as exc:
         logger.warning("Could not fetch pitcher stats: %s", exc)
+
+    # Load batter stats — 2026 priority, 2025 fallback
+    batter_stats_df: pd.DataFrame = pd.DataFrame()
+    try:
+        batter_stats_2025 = fetch_batter_season_stats(2025)
+        try:
+            batter_stats_2026 = fetch_batter_season_stats(2026)
+        except Exception:
+            batter_stats_2026 = pd.DataFrame()
+
+        if not batter_stats_2026.empty:
+            batter_stats_df = batter_stats_2025.copy()
+            batter_stats_df.update(batter_stats_2026)
+            new_batters = batter_stats_2026.index.difference(batter_stats_2025.index)
+            if len(new_batters) > 0:
+                batter_stats_df = pd.concat([
+                    batter_stats_df,
+                    batter_stats_2026.loc[new_batters],
+                ])
+        else:
+            batter_stats_df = batter_stats_2025
+    except Exception as exc:
+        logger.warning("Could not load batter stats: %s", exc)
+
+    # Load starters cache for lineup data — keyed by (home_team, away_team, date_str)
+    starters_lookup: dict = {}
+    try:
+        current_year = target_date.year
+        starters_df = fetch_game_starters(current_year, force_refresh=False)
+        if not starters_df.empty and "home_lineup" in starters_df.columns:
+            starters_df["_date_str"] = pd.to_datetime(starters_df["date"]).dt.strftime("%Y-%m-%d")
+            for row in starters_df.itertuples(index=False):
+                key = (str(row.home_team), str(row.away_team), str(row._date_str))
+                starters_lookup[key] = row
+    except Exception as exc:
+        logger.warning("Could not load starters cache: %s", exc)
 
     rotation_lookup: dict = {}
     try:
@@ -913,6 +956,26 @@ def predict_mlb_games(
         if away_br is None:
             logger.warning("Unknown away team: %r — skipping", away_full)
             continue
+
+        # Look up lineup from starters cache
+        _starter_key = (home_br, away_br, date_str)
+        home_lineup_json: str | None = None
+        away_lineup_json: str | None = None
+        if starters_lookup:
+            _sr = starters_lookup.get(_starter_key)
+            if _sr is not None:
+                home_lineup_json = getattr(_sr, "home_lineup", None) or None
+                away_lineup_json = getattr(_sr, "away_lineup", None) or None
+
+        # Compute lineup strength (returns league-avg defaults when lineup_json is None)
+        from line_tracker.model.mlb_features import _compute_lineup_strength
+        _empty_btd = pd.DataFrame()
+        home_lineup_stats = _compute_lineup_strength(
+            home_lineup_json, target_date, _empty_btd, batter_stats_df
+        )
+        away_lineup_stats = _compute_lineup_strength(
+            away_lineup_json, target_date, _empty_btd, batter_stats_df
+        )
 
         # v2 — look up probable pitchers for this game
         probable_row = probables_index.get((home_br, away_br))
@@ -973,6 +1036,8 @@ def predict_mlb_games(
             home_bullpen_era=bullpen_lookup.get(home_br),
             away_bullpen_era=bullpen_lookup.get(away_br),
             weather=weather,
+            home_lineup_stats=home_lineup_stats,
+            away_lineup_stats=away_lineup_stats,
         )
 
         # --- Moneyline ---
@@ -1123,6 +1188,11 @@ def predict_mlb_games(
             "temp_f": round(weather["temp_f"], 1) if weather else None,
             "wind_mph": round(weather["wind_mph"], 1) if weather else None,
             "wind_out_factor": round(weather["wind_out_factor"], 2) if weather else None,
+            "home_lineup_wrc": round(home_lineup_stats["lineup_wrc_weighted"], 1),
+            "away_lineup_wrc": round(away_lineup_stats["lineup_wrc_weighted"], 1),
+            "home_top3_ops": round(home_lineup_stats["lineup_top3_ops"], 3),
+            "away_top3_ops": round(away_lineup_stats["lineup_top3_ops"], 3),
+            "lineup_data_available": home_lineup_json is not None,
         }
 
         # ------------------------------------------------------------------
