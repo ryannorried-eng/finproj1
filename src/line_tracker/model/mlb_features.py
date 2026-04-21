@@ -809,9 +809,12 @@ def build_feature_matrix(
         try:
             b_logs = fetch_batter_game_logs(s)
             batter_to_date_by_season[s] = _build_batter_to_date_stats(b_logs)
-            batter_season_stats_by_season[s] = fetch_batter_season_stats(s)
         except Exception:
             batter_to_date_by_season[s] = pd.DataFrame()
+        try:
+            # fetch_batter_season_stats falls back to synthetic stats on API failure
+            batter_season_stats_by_season[s] = fetch_batter_season_stats(s)
+        except Exception:
             batter_season_stats_by_season[s] = pd.DataFrame()
         try:
             pitcher_logs_by_season[s] = fetch_pitcher_game_logs(s)
@@ -820,9 +823,13 @@ def build_feature_matrix(
 
     # ---------------------------------------------------------------------------
     # Step 4d: v6 — join high-resolution historical weather
+    # Skip if df already has pre-populated weather columns (synthetic data path)
     # ---------------------------------------------------------------------------
-    logger.info("Joining historical weather to training games...")
-    df = _add_weather_features(df, home_team_col="home_team", date_col="date")
+    if "weather_temp_f" not in df.columns or df["weather_temp_f"].isna().all():
+        logger.info("Joining historical weather to training games...")
+        df = _add_weather_features(df, home_team_col="home_team", date_col="date")
+    else:
+        logger.info("Skipping weather join — weather columns already present in training data.")
 
     # ---------------------------------------------------------------------------
     # Step 5: Assemble matchup feature rows
