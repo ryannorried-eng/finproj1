@@ -180,7 +180,11 @@ def predict_hr_props_for_pitcher(
         if pa < 50:
             continue
 
-        hr_rate = float(row.get("hr_rate") or 0.0)
+        hr_rate_raw = row.get("hr_rate")
+        import math as _math
+        if hr_rate_raw is None or (isinstance(hr_rate_raw, float) and _math.isnan(hr_rate_raw)):
+            continue
+        hr_rate = float(hr_rate_raw)
         if hr_rate <= 0:
             continue
 

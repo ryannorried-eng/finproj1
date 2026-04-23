@@ -923,10 +923,10 @@ def predict_mlb_games(
         if not pitcher_stats_2026.empty:
             pitcher_stats_df = pitcher_stats_2026.copy()
             only_in_2025_p = pitcher_stats_2025.index.difference(pitcher_stats_2026.index)
-            if len(new_pitchers) > 0:
+            if len(only_in_2025_p) > 0:
                 pitcher_stats_df = pd.concat([
                     pitcher_stats_df,
-                    pitcher_stats_2026.loc[new_pitchers],
+                    pitcher_stats_2025.loc[only_in_2025_p],
                 ])
         else:
             pitcher_stats_df = pitcher_stats_2025
@@ -949,8 +949,15 @@ def predict_mlb_games(
             if len(only_in_2025) > 0:
                 batter_stats_df = pd.concat([
                     batter_stats_df,
-                    batter_stats_2026.loc[only_in_2025],
+                    batter_stats_2025.loc[only_in_2025],
                 ])
+                # Fill NaN derived cols for 2025-only batters
+                for col in ["hr_rate","k_rate","bb_rate","tb_rate","hr_per_air"]:
+                    if col not in batter_stats_df.columns:
+                        batter_stats_df[col] = float("nan")
+                batter_stats_df["hr_rate"] = batter_stats_df["hr_rate"].fillna(0.03)
+                batter_stats_df["k_rate"] = batter_stats_df["k_rate"].fillna(0.22)
+                batter_stats_df["tb_rate"] = batter_stats_df["tb_rate"].fillna(0.35)
         else:
             batter_stats_df = batter_stats_2025
     except Exception as exc:
