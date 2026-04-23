@@ -1267,6 +1267,50 @@ def predict_mlb_games(
         else:
             data_source = "2025_trailing"
 
+        # --- Player props ---
+        hr_props: list = []
+        home_tb: list = []
+        away_tb: list = []
+        home_k_props: dict = {}
+        away_k_props: dict = {}
+        try:
+            from line_tracker.model.mlb_props import (
+                predict_hr_props_for_pitcher,
+                predict_total_bases_props,
+                predict_pitcher_k_props,
+            )
+            from line_tracker.model.mlb_features import PARK_FACTORS as _PF
+
+            _park_hr = _PF.get(home_br, {"hr": 100})["hr"] / 100.0
+
+            home_hr = predict_hr_props_for_pitcher(
+                home_lineup_json, batter_stats_df,
+                a_pid, pitcher_stats_df,
+                weather, park_factor=_park_hr,
+            )
+            away_hr = predict_hr_props_for_pitcher(
+                away_lineup_json, batter_stats_df,
+                h_pid, pitcher_stats_df,
+                weather, park_factor=_park_hr,
+            )
+            hr_props = (away_hr[:3] + home_hr[:3])
+
+            home_tb = predict_total_bases_props(
+                home_lineup_json, batter_stats_df, a_pid, pitcher_stats_df, weather
+            )
+            away_tb = predict_total_bases_props(
+                away_lineup_json, batter_stats_df, h_pid, pitcher_stats_df, weather
+            )
+
+            home_k_props = predict_pitcher_k_props(
+                h_pid, pitcher_stats_df, away_lineup_json, batter_stats_df
+            )
+            away_k_props = predict_pitcher_k_props(
+                a_pid, pitcher_stats_df, home_lineup_json, batter_stats_df
+            )
+        except Exception as _props_exc:
+            logger.debug("Props computation failed: %s", _props_exc)
+
         pred = {
             "game_id": g["game_id"],
             "game_date": date_str,
@@ -1309,6 +1353,12 @@ def predict_mlb_games(
             "home_top3_ops": round(home_lineup_stats["lineup_top3_ops"], 3),
             "away_top3_ops": round(away_lineup_stats["lineup_top3_ops"], 3),
             "lineup_data_available": home_lineup_json is not None,
+            # player props
+            "hr_props":      hr_props,
+            "home_tb_props": home_tb,
+            "away_tb_props": away_tb,
+            "home_k_props":  home_k_props,
+            "away_k_props":  away_k_props,
         }
 
         # ------------------------------------------------------------------
