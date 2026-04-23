@@ -921,9 +921,8 @@ def predict_mlb_games(
         pitcher_stats_2026 = fetch_pitcher_season_stats(2026, force_refresh=force_refresh_2026)
 
         if not pitcher_stats_2026.empty:
-            pitcher_stats_df = pitcher_stats_2025.copy()
-            pitcher_stats_df.update(pitcher_stats_2026)
-            new_pitchers = pitcher_stats_2026.index.difference(pitcher_stats_2025.index)
+            pitcher_stats_df = pitcher_stats_2026.copy()
+            only_in_2025_p = pitcher_stats_2025.index.difference(pitcher_stats_2026.index)
             if len(new_pitchers) > 0:
                 pitcher_stats_df = pd.concat([
                     pitcher_stats_df,
@@ -944,13 +943,13 @@ def predict_mlb_games(
             batter_stats_2026 = pd.DataFrame()
 
         if not batter_stats_2026.empty:
-            batter_stats_df = batter_stats_2025.copy()
-            batter_stats_df.update(batter_stats_2026)
-            new_batters = batter_stats_2026.index.difference(batter_stats_2025.index)
-            if len(new_batters) > 0:
+            # Use 2026 as base to preserve new columns (hr_rate, k_rate etc)
+            batter_stats_df = batter_stats_2026.copy()
+            only_in_2025 = batter_stats_2025.index.difference(batter_stats_2026.index)
+            if len(only_in_2025) > 0:
                 batter_stats_df = pd.concat([
                     batter_stats_df,
-                    batter_stats_2026.loc[new_batters],
+                    batter_stats_2026.loc[only_in_2025],
                 ])
         else:
             batter_stats_df = batter_stats_2025
