@@ -2470,3 +2470,228 @@ def fetch_first_inning_data(
         len(result), seasons,
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Odds API — player prop lines
+# ---------------------------------------------------------------------------
+
+_ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+_PROPS_CACHE_DIR = CACHE_DIR / "props"
+_PROPS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_PROPS_CACHE_TTL_HOURS = 2.0
+_ODDS_API_REMAINING_FLOOR = 50  # refuse to fetch below this threshold
+
+
+def _normalize_name(name: str) -> str:
+    """Lowercase, strip accents, remove Jr/Sr/III suffixes for fuzzy matching."""
+    import unicodedata
+    nfkd = unicodedata.normalize("NFKD", name)
+    ascii_name = nfkd.encode("ascii", "ignore").decode("ascii")
+    ascii_name = ascii_name.lower().strip()
+    for suffix in (" jr", " sr", " iii", " ii", " iv"):
+        if ascii_name.endswith(suffix):
+            ascii_name = ascii_name[: -len(suffix)].strip()
+    return ascii_name
+
+
+def match_prop_to_prediction(
+    odds_name: str,
+    candidate_names: list[str],
+    threshold: float = 0.85,
+) -> str | None:
+    """Fuzzy-match an Odds API player name to our internal name list.
+
+    Returns the best match if similarity >= threshold, else None.
+    """
+    import difflib
+
+    norm_odds = _normalize_name(odds_name)
+    best_match: str | None = None
+    best_ratio = 0.0
+    for candidate in candidate_names:
+        ratio = difflib.SequenceMatcher(
+            None, norm_odds, _normalize_name(candidate)
+        ).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = candidate
+    if best_ratio >= threshold:
+        return best_match
+    return None
+
+
+def fetch_prop_lines(
+    event_ids: list[str],
+    markets: list[str],
+    api_key: str,
+    force_refresh: bool = False,
+) -> dict[str, dict]:
+    """Fetch player prop lines from The Odds API.
+
+    Costs 1 API call per event per market.
+    Markets: batter_home_runs, batter_total_bases, pitcher_strikeouts
+
+    Returns: {event_id: {market: [{player, line, over_price, under_price}]}}
+    Cache: props_{date}_{market}.json, 2hr staleness check.
+    """
+    today = time.strftime("%Y-%m-%d")
+    result: dict[str, dict] = {}
+
+    for market in markets:
+        cache_path = _PROPS_CACHE_DIR / f"props_{today}_{market}.json"
+
+        cached_data: dict[str, list] = {}
+        if not force_refresh and cache_path.exists():
+            age_hours = (time.time() - cache_path.stat().st_mtime) / 3600.0
+            if age_hours < _PROPS_CACHE_TTL_HOURS:
+                try:
+                    with cache_path.open() as fh:
+                        cached_data = json.load(fh)
+                    logger.debug("Props cache hit for market %s", market)
+                except Exception:
+                    cached_data = {}
+
+        fresh_data: dict[str, list] = dict(cached_data)
+
+        for event_id in event_ids:
+            if event_id in cached_data:
+                for eid, mdata in result.items():
+                    pass  # already in cached_data, will merge below
+                continue
+
+            url = (
+                f"{_ODDS_API_BASE}/sports/baseball_mlb/events/{event_id}/odds"
+            )
+            params = {
+                "apiKey": api_key,
+                "regions": "us",
+                "markets": market,
+                "oddsFormat": "american",
+                "bookmakers": "draftkings,fanduel,pinnacle",
+            }
+            try:
+                resp = requests.get(url, params=params, timeout=20)
+
+                remaining = resp.headers.get("x-requests-remaining")
+                if remaining is not None:
+                    logger.info(
+                        "Odds API remaining calls: %s", remaining
+                    )
+                    try:
+                        if int(remaining) < _ODDS_API_REMAINING_FLOOR:
+                            logger.warning(
+                                "Odds API remaining calls (%s) below floor (%d) — aborting prop fetch",
+                                remaining, _ODDS_API_REMAINING_FLOOR,
+                            )
+                            return result
+                    except ValueError:
+                        pass
+
+                if resp.status_code == 422:
+                    logger.warning("Odds API 422 for event %s market %s", event_id, market)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                logger.warning("Odds API fetch failed for %s/%s: %s", event_id, market, exc)
+                continue
+
+            bookmakers = data.get("bookmakers") or []
+            player_lines: dict[str, dict] = {}
+
+            for bm in bookmakers:
+                for mkt in bm.get("markets") or []:
+                    if mkt.get("key") != market:
+                        continue
+                    for outcome in mkt.get("outcomes") or []:
+                        player = outcome.get("description") or outcome.get("name", "")
+                        name_lower = outcome.get("name", "").lower()
+                        price = int(outcome.get("price", 0))
+                        line = float(outcome.get("point") or 0.5)
+
+                        if player not in player_lines:
+                            player_lines[player] = {
+                                "player": player,
+                                "line": line,
+                                "over_prices": [],
+                                "under_prices": [],
+                            }
+
+                        if "over" in name_lower:
+                            player_lines[player]["over_prices"].append(price)
+                        elif "under" in name_lower:
+                            player_lines[player]["under_prices"].append(price)
+
+            summarised: list[dict] = []
+            for pdata in player_lines.values():
+                over_prices = pdata["over_prices"]
+                under_prices = pdata["under_prices"]
+                # Best over = lowest juice (closest to 0 from negative side, or lowest positive)
+                best_over = min(over_prices, key=lambda p: abs(p)) if over_prices else None
+                best_under = min(under_prices, key=lambda p: abs(p)) if under_prices else None
+                summarised.append({
+                    "player": pdata["player"],
+                    "line": pdata["line"],
+                    "over_price": best_over,
+                    "under_price": best_under,
+                })
+
+            fresh_data[event_id] = summarised
+
+        # Persist updated cache
+        try:
+            with cache_path.open("w") as fh:
+                json.dump(fresh_data, fh)
+        except Exception as exc:
+            logger.warning("Could not write props cache: %s", exc)
+
+        # Merge this market into result
+        for event_id in event_ids:
+            if event_id not in result:
+                result[event_id] = {}
+            if event_id in fresh_data:
+                result[event_id][market] = fresh_data[event_id]
+
+    return result
+
+
+def fetch_today_mlb_event_ids(api_key: str) -> list[str]:
+    """Fetch today's MLB event IDs from The Odds API (costs 1 API call).
+
+    Returns list of event_id strings for today's games.
+    """
+    today = time.strftime("%Y-%m-%d")
+    cache_path = _PROPS_CACHE_DIR / f"event_ids_{today}.json"
+
+    if cache_path.exists():
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600.0
+        if age_hours < _PROPS_CACHE_TTL_HOURS:
+            try:
+                with cache_path.open() as fh:
+                    return json.load(fh)
+            except Exception:
+                pass
+
+    url = f"{_ODDS_API_BASE}/sports/baseball_mlb/events"
+    params = {"apiKey": api_key}
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        remaining = resp.headers.get("x-requests-remaining")
+        if remaining is not None:
+            logger.info("Odds API remaining calls: %s", remaining)
+        resp.raise_for_status()
+        events = resp.json()
+    except Exception as exc:
+        logger.warning("Could not fetch MLB event IDs: %s", exc)
+        return []
+
+    event_ids = [e["id"] for e in events if isinstance(e, dict) and "id" in e]
+
+    try:
+        with cache_path.open("w") as fh:
+            json.dump(event_ids, fh)
+    except Exception:
+        pass
+
+    return event_ids
