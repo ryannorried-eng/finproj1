@@ -839,6 +839,14 @@ def fetch_pitcher_season_stats(
             if games_started < 1:
                 continue
 
+            strikeouts    = int(stat.get("strikeOuts", 0))
+            batters_faced = int(stat.get("battersFaced", 0))
+            air_outs_p    = int(stat.get("airOuts", 0))
+            ground_outs_p = int(stat.get("groundOuts", 0))
+
+            k_rate_p    = strikeouts / batters_faced if batters_faced > 0 else 0.0
+            gb_fb_ratio = ground_outs_p / air_outs_p if air_outs_p > 0 else 1.0
+
             records.append({
                 "pitcher_id": int(pitcher_id),
                 "pitcher_name": player.get("fullName", ""),
@@ -851,6 +859,14 @@ def fetch_pitcher_season_stats(
                 "wins": int(stat.get("wins", 0)),
                 "losses": int(stat.get("losses", 0)),
                 "games_started": games_started,
+                "strikeouts":    strikeouts,
+                "batters_faced": batters_faced,
+                "hr_per9":       _safe_float(stat.get("homeRunsPer9")),
+                "hits_per9":     _safe_float(stat.get("hitsPer9Inn")),
+                "air_outs":      air_outs_p,
+                "ground_outs":   ground_outs_p,
+                "k_rate":        k_rate_p,
+                "gb_fb_ratio":   gb_fb_ratio,
             })
         except Exception as exc:
             logger.debug("Skipping pitcher split: %s", exc)
@@ -1589,6 +1605,19 @@ def fetch_batter_season_stats(
             else:
                 wrc_plus_proxy = np.nan
 
+            home_runs   = int(stat.get("homeRuns", 0))
+            at_bats     = int(stat.get("atBats", 0))
+            strikeouts  = int(stat.get("strikeOuts", 0))
+            walks       = int(stat.get("baseOnBalls", 0))
+            total_bases = int(stat.get("totalBases", 0))
+            air_outs    = int(stat.get("airOuts", 0))
+
+            hr_rate      = home_runs / plate_appearances if plate_appearances > 0 else 0.0
+            k_rate       = strikeouts / plate_appearances if plate_appearances > 0 else 0.0
+            bb_rate      = walks / plate_appearances if plate_appearances > 0 else 0.0
+            tb_rate      = total_bases / plate_appearances if plate_appearances > 0 else 0.0
+            hr_per_air   = home_runs / air_outs if air_outs > 0 else 0.0
+
             records.append({
                 "batter_id": int(batter_id),
                 "batter_name": player.get("fullName", ""),
@@ -1597,8 +1626,22 @@ def fetch_batter_season_stats(
                 "obp": obp,
                 "slg": slg,
                 "plate_appearances": plate_appearances,
-                "home_runs": int(stat.get("homeRuns", 0)),
+                "home_runs": home_runs,
                 "wrc_plus_proxy": wrc_plus_proxy,
+                "at_bats":      at_bats,
+                "strikeouts":   strikeouts,
+                "walks":        walks,
+                "total_bases":  total_bases,
+                "ab_per_hr":    _safe_float(stat.get("atBatsPerHomeRun")),
+                "air_outs":     air_outs,
+                "babip":        _safe_float(stat.get("babip")),
+                "doubles":      int(stat.get("doubles", 0)),
+                "triples":      int(stat.get("triples", 0)),
+                "hr_rate":      hr_rate,
+                "k_rate":       k_rate,
+                "bb_rate":      bb_rate,
+                "tb_rate":      tb_rate,
+                "hr_per_air":   hr_per_air,
             })
         except Exception as exc:
             logger.debug("Skipping batter split: %s", exc)
