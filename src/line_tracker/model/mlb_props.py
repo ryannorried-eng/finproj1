@@ -191,8 +191,29 @@ def predict_hr_props_for_pitcher(
         order   = batter["batting_order"]
         exp_pas = _PA_BY_ORDER.get(order, _DEFAULT_PA)
 
-        expected_hrs = hr_rate * exp_pas * pitcher_mod * park_factor * wind_mod * temp_mod
+        # Attempt Statcast-based simulator; fall back to binomial if unavailable
+        sim_used = False
         hr_prob = 1.0 - (1.0 - hr_rate) ** exp_pas
+        expected_hrs = hr_rate * exp_pas * pitcher_mod * park_factor * wind_mod * temp_mod
+
+        try:
+            from line_tracker.model.mlb_simulator import (
+                fetch_statcast_batter_profile,
+                simulate_game_props,
+            )
+            statcast_profile = fetch_statcast_batter_profile(bid, season=2026)
+            if statcast_profile and statcast_profile.get("pa_count", 0) >= 20 and pitcher_id:
+                sim_result = simulate_game_props(
+                    batter_id=bid,
+                    pitcher_id=pitcher_id,
+                    expected_pas=exp_pas,
+                    n_simulations=5000,
+                )
+                hr_prob = sim_result["hr_prob"]
+                expected_hrs = sim_result["expected_tb"] / 4.0
+                sim_used = True
+        except Exception as _sim_exc:
+            logger.debug("Simulator unavailable for batter %d: %s", bid, _sim_exc)
 
         results.append({
             "batter_name":    batter["name"] or str(row.get("batter_name", "")),
@@ -203,6 +224,7 @@ def predict_hr_props_for_pitcher(
             "hr_rate_2026":   round(hr_rate, 5),
             "ab_per_hr":      float(row.get("ab_per_hr") or 0.0),
             "vs_pitcher_adj": round(pitcher_mod, 3),
+            "sim_used":       sim_used,
         })
 
     results.sort(key=lambda x: x["hr_prob"], reverse=True)
