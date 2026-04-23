@@ -314,6 +314,7 @@ def predict_pitcher_k_props(
         "expected_innings": 0.0,
         "vs_lineup_k_rate": 0.0,
         "prop_lines": {
+            "over_3.5": 0.0,
             "over_4.5": 0.0,
             "over_5.5": 0.0,
             "over_6.5": 0.0,
@@ -330,10 +331,14 @@ def predict_pitcher_k_props(
     p_row = pitcher_stats.loc[pitcher_id]
 
     pitcher_k_rate = float(p_row.get("k_rate") or 0.0)
-    if pitcher_k_rate <= 0:
+    import math as _math2
+    if pitcher_k_rate <= 0 or _math2.isnan(pitcher_k_rate):
         # Fall back to k9 / (27 batters/9inn) approximation
         k9 = float(p_row.get("k9") or 0.0)
-        pitcher_k_rate = k9 / 27.0 if k9 > 0 else 0.20
+        if k9 > 0 and not _math2.isnan(k9):
+            pitcher_k_rate = k9 / 27.0
+        else:
+            pitcher_k_rate = 0.20  # league average
 
     innings_pitched = float(p_row.get("innings") or 0.0)
     games_started   = max(int(p_row.get("games_started") or 1), 1)
@@ -355,13 +360,25 @@ def predict_pitcher_k_props(
         if k_rates:
             lineup_k_rate = float(np.mean(k_rates))
 
-    # Combined K probability per PA: geometric mean of pitcher and batter K rates
-    k_prob_per_pa = math.sqrt(pitcher_k_rate * lineup_k_rate)
+    # Combined K probability per PA: weighted average (pitcher-driven stat)
+    # Pitcher gets 70% weight since Ks are primarily pitcher-controlled
+    k_prob_per_pa = 0.70 * pitcher_k_rate + 0.30 * lineup_k_rate
 
     expected_batters_faced = expected_innings * 3.3
     expected_ks = k_prob_per_pa * expected_batters_faced
 
     # Poisson CDF for prop lines
+    import math as _math
+    if expected_ks is None or _math.isnan(expected_ks) or expected_ks <= 0:
+        return {
+            "pitcher_name": str(p_row.get("pitcher_name", "")),
+            "team":         str(p_row.get("team", "")),
+            "expected_ks":  0.0,
+            "k_prob_per_pa": 0.0,
+            "expected_innings": expected_innings,
+            "vs_lineup_k_rate": lineup_k_rate,
+            "prop_lines": {"over_3.5": 0.0, "over_4.5": 0.0, "over_5.5": 0.0, "over_6.5": 0.0, "over_7.5": 0.0},
+        }
     lam = max(expected_ks, 1e-6)
 
     def _poisson_over(line: float) -> float:
@@ -380,6 +397,7 @@ def predict_pitcher_k_props(
         "expected_innings": round(expected_innings, 1),
         "vs_lineup_k_rate": round(lineup_k_rate, 4),
         "prop_lines": {
+            "over_3.5": _poisson_over(3.5),
             "over_4.5": _poisson_over(4.5),
             "over_5.5": _poisson_over(5.5),
             "over_6.5": _poisson_over(6.5),

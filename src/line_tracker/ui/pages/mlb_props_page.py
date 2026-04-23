@@ -92,7 +92,12 @@ def _render_prop_lines_section(
                             # Use nearest line
                             if line is not None:
                                 key = f"over_{line}"
-                                model_prob = lines_dict.get(key) or lines_dict.get("over_4.5")
+                                model_prob = lines_dict.get(key)
+                                if model_prob is None:
+                                    # Find nearest available line
+                                    available = [3.5, 4.5, 5.5, 6.5, 7.5]
+                                    nearest = min(available, key=lambda x: abs(x - float(line)))
+                                    model_prob = lines_dict.get(f"over_{nearest}")
                             break
 
                 edge = None
@@ -268,6 +273,7 @@ def render_mlb_props_page() -> None:
                             "K prob / PA",
                             "Exp innings",
                             "Opp lineup K%",
+                            "Over 3.5",
                             "Over 4.5",
                             "Over 5.5",
                             "Over 6.5",
@@ -278,6 +284,7 @@ def render_mlb_props_page() -> None:
                             _pct(k_props.get("k_prob_per_pa")),
                             _fmt(k_props.get("expected_innings"), 1),
                             _pct(k_props.get("vs_lineup_k_rate")),
+                            _pct(lines.get("over_3.5")),
                             _pct(lines.get("over_4.5")),
                             _pct(lines.get("over_5.5")),
                             _pct(lines.get("over_6.5")),
