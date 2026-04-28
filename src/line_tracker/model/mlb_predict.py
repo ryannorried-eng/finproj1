@@ -1417,4 +1417,26 @@ def predict_mlb_games(
         predictions.append(pred)
 
     logger.info("Generated %d MLB predictions for %s", len(predictions), date_str)
+
+    # Auto-save predictions to DB every run
+    try:
+        import sqlite3 as _sq
+        from pathlib import Path as _Path
+        _db = _Path(__file__).parents[4] / "lines.db"
+        if not _db.exists():
+            _db = _Path.cwd() / "lines.db"
+        if _db.exists():
+            from line_tracker.db.repos.mlb_predictions_repo import upsert_prediction
+            _conn = _sq.connect(str(_db))
+            _conn.row_factory = _sq.Row
+            for _p in predictions:
+                try:
+                    upsert_prediction(_conn, _p)
+                except Exception:
+                    pass
+            _conn.close()
+            logger.info("Auto-saved %d predictions to DB", len(predictions))
+    except Exception as _exc:
+        logger.debug("Auto-save to DB failed: %s", _exc)
+
     return predictions
