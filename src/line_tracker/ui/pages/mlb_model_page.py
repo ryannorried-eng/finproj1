@@ -698,6 +698,14 @@ def render_mlb_model_page(conn: sqlite3.Connection) -> None:
     # ------------------------------------------------------------------
     # Predictions table
     # ------------------------------------------------------------------
+    # Auto-expire session state after 30 minutes to match lineup cache TTL
+    fetched_at = st.session_state.get("mlb_odds_fetched_at")
+    if fetched_at:
+        age_minutes = (datetime.now() - fetched_at).seconds // 60
+        if age_minutes >= 30:
+            del st.session_state["mlb_predictions"]
+            del st.session_state["mlb_odds_fetched_at"]
+
     preds = st.session_state.get("mlb_predictions")
     if preds is None:
         pass  # Haven't loaded yet
