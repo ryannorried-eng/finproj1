@@ -28,7 +28,7 @@ def upsert_prediction(conn: sqlite3.Connection, pred: dict) -> None:
             "home_team": pred.get("home_team", ""),
             "away_team": pred.get("away_team", ""),
             "commence_time": pred.get("commence_time"),
-            "model_home_win_prob": pred.get("model_home_win_prob"),
+            "model_home_win_prob": pred.get("recommended_prob") or pred.get("model_home_win_prob"),
             "model_run_diff": pred.get("model_run_diff"),
             "model_total_runs": pred.get("model_total_runs"),
             "model_implied_home_odds": pred.get("model_implied_home_odds"),
@@ -84,7 +84,7 @@ def settle_prediction(
     if row is None:
         return
 
-    model_prob = row["model_home_win_prob"] or 0.5
+    model_prob = row["model_home_win_prob"] or 0.5  # stores recommended_prob (ensemble-adjusted)
     model_total = row["model_total_runs"] or 0.0
     market_total = row["market_total"]
 
