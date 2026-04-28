@@ -157,8 +157,13 @@ def predict_hr_props_for_pitcher(
     pitcher_mod = 1.0
     if p_row is not None:
         hr9 = float(p_row.get("hr_per9") or 0.0)
-        if hr9 > 0:
-            pitcher_mod = hr9 / _LEAGUE_AVG_HR_PER9
+        innings = float(p_row.get("innings") or 0.0)
+        if hr9 >= 0:
+            # Regress hr9 toward league average weighted by sample size.
+            # confidence=1.0 at 50 IP; below that, blends toward _LEAGUE_AVG_HR_PER9.
+            confidence = min(innings / 50.0, 1.0)
+            blended_hr9 = confidence * hr9 + (1.0 - confidence) * _LEAGUE_AVG_HR_PER9
+            pitcher_mod = blended_hr9 / _LEAGUE_AVG_HR_PER9
 
     lineup = _parse_lineup(game_lineup)
     if not lineup or batter_stats.empty:
