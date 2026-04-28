@@ -558,8 +558,8 @@ def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
         if len(home_only) > 0:
             sh_scored = home_only["runs_scored"].clip(upper=CAP_RUNS).shift(1)
             sh_allowed = home_only["runs_allowed"].clip(upper=CAP_RUNS).shift(1)
-            home_only["rs_home_r15"] = sh_scored.rolling(15, min_periods=15).mean()
-            home_only["ra_home_r15"] = sh_allowed.rolling(15, min_periods=15).mean()
+            home_only["rs_home_r15"] = sh_scored.rolling(15, min_periods=5).mean()
+            home_only["ra_home_r15"] = sh_allowed.rolling(15, min_periods=5).mean()
         else:
             home_only["rs_home_r15"] = np.nan
             home_only["ra_home_r15"] = np.nan
@@ -569,8 +569,8 @@ def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
         if len(away_only) > 0:
             sa_scored = away_only["runs_scored"].clip(upper=CAP_RUNS).shift(1)
             sa_allowed = away_only["runs_allowed"].clip(upper=CAP_RUNS).shift(1)
-            away_only["rs_away_r15"] = sa_scored.rolling(15, min_periods=15).mean()
-            away_only["ra_away_r15"] = sa_allowed.rolling(15, min_periods=15).mean()
+            away_only["rs_away_r15"] = sa_scored.rolling(15, min_periods=5).mean()
+            away_only["ra_away_r15"] = sa_allowed.rolling(15, min_periods=5).mean()
         else:
             away_only["rs_away_r15"] = np.nan
             away_only["ra_away_r15"] = np.nan

@@ -993,17 +993,64 @@ def predict_mlb_games(
 
     bullpen_lookup: dict = {}  # team → era_r7
     try:
-        bp_df = fetch_bullpen_stats(2025)
-        # Use the most recent era_r7 per team
-        latest_bp = (
-            bp_df.sort_values("date")
-            .groupby("team")
-            .last()
-            .reset_index()
-        )
-        for row in latest_bp.itertuples(index=False):
-            era = float(row.era_r7) if pd.notna(row.era_r7) else 4.20
-            bullpen_lookup[str(row.team)] = era
+        # Try 2026 first, fall back to 2025 if insufficient data
+        bp_df_2026 = pd.DataFrame()
+        try:
+            bp_df_2026 = fetch_bullpen_stats(2026, force_refresh=False)
+        except Exception:
+            pass
+
+        bp_df_2025 = pd.DataFrame()
+        try:
+            bp_df_2025 = fetch_bullpen_stats(2025, force_refresh=False)
+        except Exception:
+            pass
+
+        # Build lookup: prefer 2026 if team has 7+ games, else blend with 2025
+        teams_2026 = set()
+        if not bp_df_2026.empty:
+            latest_2026 = (
+                bp_df_2026.sort_values("date")
+                .groupby("team")
+                .last()
+                .reset_index()
+            )
+            counts_2026 = bp_df_2026.groupby("team").size()
+            for row in latest_2026.itertuples(index=False):
+                n = counts_2026.get(row.team, 0)
+                era_2026 = float(row.era_r7) if pd.notna(row.era_r7) else None
+                if era_2026 is not None and n >= 7:
+                    bullpen_lookup[str(row.team)] = era_2026
+                    teams_2026.add(str(row.team))
+                elif era_2026 is not None and n >= 3:
+                    # Blend with 2025
+                    w26 = n / 10.0
+                    w25 = 1 - w26
+                    era_2025 = 4.20
+                    if not bp_df_2025.empty:
+                        latest_25 = bp_df_2025[bp_df_2025["team"] == row.team]
+                        if not latest_25.empty:
+                            e25 = latest_25.sort_values("date").iloc[-1].get("era_r7")
+                            if pd.notna(e25):
+                                era_2025 = float(e25)
+                    bullpen_lookup[str(row.team)] = w26 * era_2026 + w25 * era_2025
+                    teams_2026.add(str(row.team))
+
+        # Fill remaining teams from 2025
+        if not bp_df_2025.empty:
+            latest_2025 = (
+                bp_df_2025.sort_values("date")
+                .groupby("team")
+                .last()
+                .reset_index()
+            )
+            for row in latest_2025.itertuples(index=False):
+                if str(row.team) not in bullpen_lookup:
+                    era = float(row.era_r7) if pd.notna(row.era_r7) else 4.20
+                    bullpen_lookup[str(row.team)] = era
+
+        logger.info("Bullpen lookup: %d teams (%d from 2026 data)", 
+                    len(bullpen_lookup), len(teams_2026))
     except Exception as exc:
         logger.warning("Could not fetch bullpen stats: %s", exc)
 
