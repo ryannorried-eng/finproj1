@@ -410,7 +410,7 @@ def get_trailing_stats(base_season: int = 2025) -> dict[str, dict]:
 
 def _league_avg_trailing_stats() -> dict[str, dict]:
     """Return league-average trailing stats as a fallback."""
-    from line_tracker.model.mlb_data import MLB_TEAMS
+    from line_tracker.model.mlb_data import _MLB_TEAMS_ORDERED
     avg = {
         "runs_scored_r15": 4.5,
         "runs_allowed_r15": 4.5,
@@ -419,7 +419,7 @@ def _league_avg_trailing_stats() -> dict[str, dict]:
         "bb_rate_r15": 0.09,
         "run_diff_r10": 0.0,
     }
-    return {team: avg.copy() for team in MLB_TEAMS}
+    return {team: avg.copy() for team in _MLB_TEAMS_ORDERED}
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +616,15 @@ def build_prediction_features(
         "home_sp_rest_days": 5.0,
         "away_sp_rest_days": 5.0,
         "home_sp_avg_ip":    5.5,
+        # v5 — bullpen exposure (derived from SP avg IP; 9 - avg_ip = expected bullpen innings)
+        "home_bullpen_exposure": 9.0 - 5.5,
+        "away_bullpen_exposure": 9.0 - 5.5,
+        "bullpen_exposure_diff": 0.0,
+        # v6 — high-resolution weather (use v2 values when available, else reasonable defaults)
+        "weather_temp_f":          float((weather or {}).get("temp_f", 72.0)),
+        "weather_wind_mph":        float((weather or {}).get("wind_mph", 8.0)),
+        "weather_wind_out_factor": float((weather or {}).get("wind_out_factor", 0.0)),
+        "weather_precip":          float((weather or {}).get("precip", 0.0)),
     }
     return pd.DataFrame([feat], columns=FEATURE_COLUMNS)
 
@@ -1349,8 +1358,6 @@ def predict_mlb_games(
             "away_pitcher_id": a_pid,
             "home_pitcher_era": round(home_pitcher_era, 2) if home_pitcher_era is not None else None,
             "away_pitcher_era": round(away_pitcher_era, 2) if away_pitcher_era is not None else None,
-            "home_pitcher_id": h_pid,
-            "away_pitcher_id": a_pid,
             "temp_f": round(weather["temp_f"], 1) if weather else None,
             "wind_mph": round(weather["wind_mph"], 1) if weather else None,
             "wind_out_factor": round(weather["wind_out_factor"], 2) if weather else None,

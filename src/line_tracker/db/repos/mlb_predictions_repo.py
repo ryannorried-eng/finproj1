@@ -77,7 +77,7 @@ def settle_prediction(
     """Record the actual result and compute correctness flags."""
     # Fetch existing prediction to compare
     row = conn.execute(
-        "SELECT model_home_win_prob, model_total_runs FROM mlb_model_predictions WHERE game_id = ?",
+        "SELECT model_home_win_prob, model_total_runs, market_total FROM mlb_model_predictions WHERE game_id = ?",
         (game_id,),
     ).fetchone()
 
@@ -86,13 +86,22 @@ def settle_prediction(
 
     model_prob = row["model_home_win_prob"] or 0.5
     model_total = row["model_total_runs"] or 0.0
+    market_total = row["market_total"]
 
     actual_home_win = home_score > away_score
     model_home_win = model_prob > 0.5
     home_win_correct = 1 if actual_home_win == model_home_win else 0
 
     actual_total = home_score + away_score
-    total_correct = 1 if abs(model_total - actual_total) <= 0.5 else 0
+    # Grade totals as over/under direction vs the market line, not as exact prediction.
+    # A model total > market total = model predicts OVER; correct if actual also went over.
+    if market_total is not None and market_total > 0:
+        model_over = model_total > market_total
+        actual_over = actual_total > market_total
+        total_correct = 1 if model_over == actual_over else 0
+    else:
+        # No market total available; fall back to within-1-run accuracy
+        total_correct = 1 if abs(model_total - actual_total) <= 1.0 else 0
 
     settled_at = datetime.now(timezone.utc).isoformat()
 
