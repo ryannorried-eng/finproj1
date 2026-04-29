@@ -106,8 +106,8 @@ def settle_prediction(
         actual_over = actual_total > market_total
         total_correct = 1 if model_over == actual_over else 0
     else:
-        # No market total available; fall back to within-1-run accuracy
-        total_correct = 1 if abs(model_total - actual_total) <= 1.0 else 0
+        # No market total available — cannot grade reliably, exclude from metric
+        total_correct = None
 
     settled_at = datetime.now(timezone.utc).isoformat()
 
@@ -139,13 +139,18 @@ def get_model_accuracy(conn: sqlite3.Connection) -> dict:
 
     n = len(rows)
     if n == 0:
-        return {"moneyline_acc": 0.0, "total_acc": 0.0, "n_settled": 0}
+        return {"moneyline_acc": 0.0, "total_acc": 0.0, "n_settled": 0, "n_totals_graded": 0}
 
     ml_correct = sum(r["home_win_correct"] or 0 for r in rows)
-    tot_correct = sum(r["total_correct"] or 0 for r in rows)
+
+    # Only count totals where market_total was available (total_correct IS NOT NULL)
+    totals_graded = [r for r in rows if r["total_correct"] is not None]
+    n_totals = len(totals_graded)
+    tot_correct = sum(r["total_correct"] for r in totals_graded)
 
     return {
         "moneyline_acc": ml_correct / n,
-        "total_acc": tot_correct / n,
+        "total_acc": tot_correct / n_totals if n_totals > 0 else 0.0,
         "n_settled": n,
+        "n_totals_graded": n_totals,
     }

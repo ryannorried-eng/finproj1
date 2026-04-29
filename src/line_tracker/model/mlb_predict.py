@@ -894,6 +894,7 @@ def predict_mlb_games(
         fetch_batter_season_stats,
         fetch_game_starters,
         fetch_bullpen_stats,
+        fetch_bullpen_only_stats,
         fetch_weather,
     )
     from line_tracker.model.mlb_features import _compute_rotation_quality
@@ -991,68 +992,67 @@ def predict_mlb_games(
     except Exception as exc:
         logger.warning("Could not compute rotation quality: %s", exc)
 
-    bullpen_lookup: dict = {}  # team → era_r7
+    bullpen_lookup: dict = {}  # team → bullpen-only era_r7
     try:
-        # Try 2026 first, fall back to 2025 if insufficient data
-        bp_df_2026 = pd.DataFrame()
+        # Use bullpen-only ERA (SP innings subtracted) — true relief ERA
+        bp_only = pd.DataFrame()
         try:
-            bp_df_2026 = fetch_bullpen_stats(2026, force_refresh=False)
+            bp_only = fetch_bullpen_only_stats(2026, force_refresh=False)
         except Exception:
             pass
 
-        bp_df_2025 = pd.DataFrame()
+        # Fall back to total team ERA if bullpen-only unavailable
+        bp_fallback = pd.DataFrame()
         try:
-            bp_df_2025 = fetch_bullpen_stats(2025, force_refresh=False)
+            bp_fallback = fetch_bullpen_stats(2025, force_refresh=False)
         except Exception:
             pass
 
-        # Build lookup: prefer 2026 if team has 7+ games, else blend with 2025
-        teams_2026 = set()
-        if not bp_df_2026.empty:
-            latest_2026 = (
-                bp_df_2026.sort_values("date")
+        teams_with_data = set()
+        if not bp_only.empty:
+            latest = (
+                bp_only.sort_values("date")
                 .groupby("team")
                 .last()
                 .reset_index()
             )
-            counts_2026 = bp_df_2026.groupby("team").size()
-            for row in latest_2026.itertuples(index=False):
-                n = counts_2026.get(row.team, 0)
-                era_2026 = float(row.era_r7) if pd.notna(row.era_r7) else None
-                if era_2026 is not None and n >= 7:
-                    bullpen_lookup[str(row.team)] = era_2026
-                    teams_2026.add(str(row.team))
-                elif era_2026 is not None and n >= 3:
-                    # Blend with 2025
-                    w26 = n / 10.0
-                    w25 = 1 - w26
+            counts = bp_only.groupby("team").size()
+            for row in latest.itertuples(index=False):
+                n = counts.get(row.team, 0)
+                era = float(row.bp_era_r7) if pd.notna(row.bp_era_r7) else None
+                if era is not None and n >= 7:
+                    bullpen_lookup[str(row.team)] = era
+                    teams_with_data.add(str(row.team))
+                elif era is not None and n >= 3:
+                    # Blend with 2025 fallback
+                    w = n / 10.0
                     era_2025 = 4.20
-                    if not bp_df_2025.empty:
-                        latest_25 = bp_df_2025[bp_df_2025["team"] == row.team]
-                        if not latest_25.empty:
-                            e25 = latest_25.sort_values("date").iloc[-1].get("era_r7")
-                            if pd.notna(e25):
-                                era_2025 = float(e25)
-                    bullpen_lookup[str(row.team)] = w26 * era_2026 + w25 * era_2025
-                    teams_2026.add(str(row.team))
+                    if not bp_fallback.empty:
+                        fb = bp_fallback[bp_fallback["team"] == row.team]
+                        if not fb.empty:
+                            e = fb.sort_values("date").iloc[-1].get("era_r7")
+                            if pd.notna(e):
+                                era_2025 = float(e)
+                    bullpen_lookup[str(row.team)] = w * era + (1 - w) * era_2025
+                    teams_with_data.add(str(row.team))
 
-        # Fill remaining teams from 2025
-        if not bp_df_2025.empty:
-            latest_2025 = (
-                bp_df_2025.sort_values("date")
+        # Fill remaining from 2025 total ERA fallback
+        if not bp_fallback.empty:
+            latest_fb = (
+                bp_fallback.sort_values("date")
                 .groupby("team")
                 .last()
                 .reset_index()
             )
-            for row in latest_2025.itertuples(index=False):
+            for row in latest_fb.itertuples(index=False):
                 if str(row.team) not in bullpen_lookup:
                     era = float(row.era_r7) if pd.notna(row.era_r7) else 4.20
                     bullpen_lookup[str(row.team)] = era
 
-        logger.info("Bullpen lookup: %d teams (%d from 2026 data)", 
-                    len(bullpen_lookup), len(teams_2026))
+        logger.info("Bullpen-only lookup: %d teams (%d from 2026 data)",
+                    len(bullpen_lookup), len(teams_with_data))
     except Exception as exc:
-        logger.warning("Could not fetch bullpen stats: %s", exc)
+        logger.warning("Could not fetch bullpen-only stats: %s", exc)
 
     # Build probables index: {(home_team, away_team): row}
     probables_index: dict = {}
@@ -1240,13 +1240,15 @@ def predict_mlb_games(
             X_df = X.astype(float).fillna(0.0)
             run_diff = float(mg_art["model"].predict(X_df)[0])
 
-        # Resolve large contradictions: when |run_diff| > 1.0 and the two models
-        # disagree directionally, trust the margin model and nudge home_win_prob.
+        # Keep raw moneyline model output immutable for ensemble and disagreement calc.
+        # Compute a nudged diagnostic value separately but do NOT use it downstream.
+        _nudged_prob = home_win_prob
         if abs(run_diff) > 1.0:
             if run_diff > 0 and home_win_prob < 0.5:
-                home_win_prob = max(home_win_prob, 0.5 + abs(run_diff) * 0.02)
+                _nudged_prob = max(home_win_prob, 0.5 + abs(run_diff) * 0.02)
             elif run_diff < 0 and home_win_prob > 0.5:
-                home_win_prob = min(home_win_prob, 0.5 - abs(run_diff) * 0.02)
+                _nudged_prob = min(home_win_prob, 0.5 - abs(run_diff) * 0.02)
+        # home_win_prob remains raw — nudge stored in _nudged_prob for diagnostics only
 
         # --- Totals ---
         tot_art = artifacts["totals"]

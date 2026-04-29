@@ -1269,6 +1269,143 @@ def fetch_bullpen_stats(
     return df
 
 
+def fetch_bullpen_only_stats(
+    season: int, force_refresh: bool = False
+) -> pd.DataFrame:
+    """Compute rolling bullpen-only ERA per team by subtracting SP innings from team totals.
+
+    Uses pitcher game logs to identify the starter (highest IP per game per team),
+    then subtracts their contribution from team totals to get true bullpen ERA.
+
+    Returns
+    -------
+    DataFrame with columns: team, date, bp_era_r7, bp_era_r15.
+    """
+    cache_path = CACHE_DIR / f"bullpen_only_stats_{season}.parquet"
+    if not force_refresh and cache_path.exists():
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        if age_hours < 6:
+            logger.debug("Loading bullpen-only stats from cache: %s", cache_path)
+            return pd.read_parquet(cache_path)
+
+    logger.info("Computing bullpen-only stats for %d ...", season)
+
+    # Load pitcher game logs and starters
+    pitcher_logs = fetch_pitcher_game_logs(season, force_refresh=force_refresh)
+    starters_df = fetch_game_starters(season, force_refresh=force_refresh)
+    team_logs = fetch_team_game_logs(season, force_refresh=force_refresh)
+
+    if pitcher_logs.empty or starters_df.empty or team_logs.empty:
+        raise ValueError(f"Insufficient data for bullpen-only stats season {season}")
+
+    # Build set of (game_pk, pitcher_id) for starters
+    starter_pairs = set()
+    for _, row in starters_df.iterrows():
+        if pd.notna(row.get("home_sp_id")):
+            starter_pairs.add((int(row["game_pk"]), int(row["home_sp_id"])))
+        if pd.notna(row.get("away_sp_id")):
+            starter_pairs.add((int(row["game_pk"]), int(row["away_sp_id"])))
+
+    # Tag each pitcher appearance as starter or reliever
+    pitcher_logs = pitcher_logs.copy()
+    pitcher_logs["game_pk"] = pitcher_logs["game_pk"].astype(int)
+    pitcher_logs["pitcher_id"] = pitcher_logs["pitcher_id"].astype(int)
+    pitcher_logs["is_starter"] = pitcher_logs.apply(
+        lambda r: (r["game_pk"], r["pitcher_id"]) in starter_pairs, axis=1
+    )
+
+    # Sum SP innings/runs per game per team using game_pk → team mapping from starters_df
+    game_team_map = {}
+    for _, row in starters_df.iterrows():
+        game_team_map[(int(row["game_pk"]), "home")] = row["home_team"]
+        game_team_map[(int(row["game_pk"]), "away")] = row["away_team"]
+
+    # For each game, identify SP stats per team
+    sp_logs = pitcher_logs[pitcher_logs["is_starter"]].copy()
+
+    # Build per-game SP summary — match pitcher to their team via starters_df
+    sp_summary = {}  # (team, date) -> (sp_ip, sp_er)
+    for _, row in sp_logs.iterrows():
+        gp = int(row["game_pk"])
+        pid = int(row["pitcher_id"])
+        # Find which team this SP pitched for
+        home_sp = None
+        away_sp = None
+        starter_row = starters_df[starters_df["game_pk"] == gp]
+        if starter_row.empty:
+            continue
+        sr = starter_row.iloc[0]
+        home_sp_id = int(sr["home_sp_id"]) if pd.notna(sr.get("home_sp_id")) else None
+        away_sp_id = int(sr["away_sp_id"]) if pd.notna(sr.get("away_sp_id")) else None
+        date = str(sr["date"])[:10]
+
+        if pid == home_sp_id:
+            key = (sr["home_team"], date)
+        elif pid == away_sp_id:
+            key = (sr["away_team"], date)
+        else:
+            continue
+
+        sp_summary[key] = (
+            float(row["innings_pitched"] or 0),
+            float(row["earned_runs"] or 0),
+        )
+
+    # Build bullpen stats per team per game from team logs minus SP
+    team_logs = team_logs.copy()
+    team_logs["date_str"] = pd.to_datetime(team_logs["date"]).dt.strftime("%Y-%m-%d")
+    team_logs["runs_allowed"] = pd.to_numeric(team_logs["runs_allowed"], errors="coerce").fillna(0)
+    team_logs["innings_pitched"] = pd.to_numeric(team_logs["innings_pitched"], errors="coerce").fillna(9.0)
+
+    result_parts = []
+    for team, group in team_logs.groupby("team"):
+        group = group.sort_values("date").copy()
+        bp_runs = []
+        bp_innings = []
+
+        def _to_decimal_ip(ip: float) -> float:
+            """Convert baseball IP notation (5.2 = 5⅔) to decimal innings."""
+            whole = int(ip)
+            outs = round((ip - whole) * 10)  # .1 → 1 out, .2 → 2 outs
+            return whole + outs / 3.0
+
+        for _, row in group.iterrows():
+            date = str(row["date_str"])
+            key = (team, date)
+            sp_ip_raw, sp_er = sp_summary.get(key, (0.0, 0.0))
+            sp_ip = _to_decimal_ip(sp_ip_raw)
+            team_ip = float(row["innings_pitched"])  # team logs already decimal
+            team_er = float(row["runs_allowed"])
+
+            bp_ip = max(0.0, team_ip - sp_ip)
+            bp_er = max(0.0, team_er - sp_er)
+            bp_runs.append(bp_er)
+            bp_innings.append(bp_ip)
+
+        group["bp_runs"] = bp_runs
+        group["bp_innings"] = bp_innings
+
+        # Shift 1 to prevent leakage
+        s_runs = group["bp_runs"].shift(1)
+        s_innings = group["bp_innings"].shift(1)
+
+        runs_r7 = s_runs.rolling(7, min_periods=3).sum()
+        inn_r7 = s_innings.rolling(7, min_periods=3).sum().replace(0, np.nan)
+        runs_r15 = s_runs.rolling(15, min_periods=5).sum()
+        inn_r15 = s_innings.rolling(15, min_periods=5).sum().replace(0, np.nan)
+
+        group["bp_era_r7"] = (runs_r7 * 9) / inn_r7
+        group["bp_era_r15"] = (runs_r15 * 9) / inn_r15
+
+        result_parts.append(group[["team", "date", "bp_era_r7", "bp_era_r15"]])
+
+    df = pd.concat(result_parts, ignore_index=True)
+    df = df.sort_values(["team", "date"]).reset_index(drop=True)
+    df.to_parquet(cache_path, index=False)
+    logger.info("Cached bullpen-only stats: %d rows for season %d", len(df), season)
+    return df
+
+
 def fetch_game_starters(season: int, force_refresh: bool = False) -> pd.DataFrame:
     """
     Fetch the actual starting pitcher for every completed regular-season
