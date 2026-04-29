@@ -1303,7 +1303,7 @@ def predict_mlb_games(
         # ML bet qualified: favored team >= 57% AND |ml_edge| >= 0.04
         away_win_prob = 1 - home_win_prob
         favored_prob = max(home_win_prob, away_win_prob)
-        ml_bet_qualified = favored_prob >= 0.57 and abs(ml_edge) >= 0.04
+        ml_bet_qualified = favored_prob >= 0.58 and abs(ml_edge) >= 0.04
 
         # Blind spot check
         matchup_set = frozenset([home_br, away_br])
@@ -1454,7 +1454,7 @@ def predict_mlb_games(
                     away_win_prob_ens = 1 - rec_prob
                     favored_prob_ens = max(rec_prob, away_win_prob_ens)
                     pred["ml_bet_qualified"] = (
-                        favored_prob_ens >= 0.57 and abs_new_ml >= 0.04
+                        favored_prob_ens >= 0.58 and abs_new_ml >= 0.04
                     )
 
             except Exception as exc:

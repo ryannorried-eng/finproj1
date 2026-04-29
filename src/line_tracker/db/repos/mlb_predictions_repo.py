@@ -14,13 +14,15 @@ def upsert_prediction(conn: sqlite3.Connection, pred: dict) -> None:
             model_home_win_prob, model_run_diff, model_total_runs,
             model_implied_home_odds,
             market_home_ml, market_away_ml, market_spread, market_total,
-            ml_edge, total_edge, model_spread_pick, confidence, data_source
+            ml_edge, total_edge, model_spread_pick, confidence, data_source,
+            recommended_prob, model_disagreement, flagged, ensemble_prob
         ) VALUES (
             :game_id, :game_date, :home_team, :away_team, :commence_time,
             :model_home_win_prob, :model_run_diff, :model_total_runs,
             :model_implied_home_odds,
             :market_home_ml, :market_away_ml, :market_spread, :market_total,
-            :ml_edge, :total_edge, :model_spread_pick, :confidence, :data_source
+            :ml_edge, :total_edge, :model_spread_pick, :confidence, :data_source,
+            :recommended_prob, :model_disagreement, :flagged, :ensemble_prob
         )""",
         {
             "game_id": pred.get("game_id", ""),
@@ -41,6 +43,10 @@ def upsert_prediction(conn: sqlite3.Connection, pred: dict) -> None:
             "model_spread_pick": pred.get("model_spread_pick"),
             "confidence": pred.get("confidence"),
             "data_source": pred.get("data_source"),
+            "recommended_prob": pred.get("recommended_prob"),
+            "model_disagreement": pred.get("model_disagreement"),
+            "flagged": 1 if pred.get("flagged") else 0,
+            "ensemble_prob": pred.get("ensemble_prob"),
         },
     )
     conn.commit()
