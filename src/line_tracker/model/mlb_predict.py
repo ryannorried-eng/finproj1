@@ -992,6 +992,29 @@ def predict_mlb_games(
     except Exception as exc:
         logger.warning("Could not compute rotation quality: %s", exc)
 
+    # Build pitcher last-3-starts ERA lookup
+    pitcher_last3_lookup: dict = {}  # pitcher_id → last3_era
+    try:
+        from line_tracker.model.mlb_data import fetch_pitcher_game_logs
+        plogs = fetch_pitcher_game_logs(2026, force_refresh=False)
+        if not plogs.empty:
+            plogs = plogs.sort_values("date")
+            for pid, group in plogs.groupby("pitcher_id"):
+                last3 = group.tail(3)
+                total_ip = last3["innings_pitched"].sum()
+                total_er = last3["earned_runs"].sum()
+                if total_ip > 0:
+                    # Convert baseball IP notation to decimal
+                    def _ip_to_dec(ip):
+                        whole = int(ip)
+                        outs = round((ip - whole) * 10)
+                        return whole + outs / 3.0
+                    ip_dec = sum(_ip_to_dec(float(x)) for x in last3["innings_pitched"])
+                    pitcher_last3_lookup[int(pid)] = min((total_er * 9) / ip_dec if ip_dec > 0 else 4.50, 20.0)
+        logger.info("Pitcher last3 lookup: %d pitchers", len(pitcher_last3_lookup))
+    except Exception as exc:
+        logger.warning("Could not build pitcher last3 lookup: %s", exc)
+
     bullpen_lookup: dict = {}  # team → bullpen-only era_r7
     try:
         # Use bullpen-only ERA (SP innings subtracted) — true relief ERA
@@ -1182,6 +1205,7 @@ def predict_mlb_games(
                     "era": row_p.get("era") if pd.notna(row_p.get("era")) else None,
                     "k9": row_p.get("k9") if pd.notna(row_p.get("k9")) else None,
                     "whip": row_p.get("whip") if pd.notna(row_p.get("whip")) else None,
+                    "last3_era": pitcher_last3_lookup.get(h_pid),
                 }
                 home_pitcher_era = home_pitcher_stats["era"]
 
@@ -1191,6 +1215,7 @@ def predict_mlb_games(
                     "era": row_p.get("era") if pd.notna(row_p.get("era")) else None,
                     "k9": row_p.get("k9") if pd.notna(row_p.get("k9")) else None,
                     "whip": row_p.get("whip") if pd.notna(row_p.get("whip")) else None,
+                    "last3_era": pitcher_last3_lookup.get(a_pid),
                 }
                 away_pitcher_era = away_pitcher_stats["era"]
 

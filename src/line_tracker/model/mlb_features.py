@@ -59,6 +59,9 @@ FEATURE_COLUMNS = [
     "away_k_rate_r15",
     "away_bb_rate_r15",
     "away_run_diff_r10",
+    "home_win_pct_l10",
+    "away_win_pct_l10",
+    "win_pct_l10_diff",
     "offense_diff",
     "defense_diff",
     "form_diff",
@@ -76,10 +79,16 @@ FEATURE_COLUMNS = [
     "home_sp_k9",
     "away_sp_k9",
     "sp_era_diff",
+    "home_sp_last3_era",
+    "away_sp_last3_era",
+    "sp_last3_era_diff",
     # v2 — bullpen ERA proxy (3 features)
     "home_bullpen_era_r7",
     "away_bullpen_era_r7",
     "bullpen_era_diff",
+    "home_blowup_risk",
+    "away_blowup_risk",
+    "blowup_risk_diff",
     # v2 — home/away splits (4 features)
     "home_team_runs_scored_home_r15",
     "away_team_runs_scored_away_r15",
@@ -157,6 +166,10 @@ def compute_team_rolling_stats(game_logs: pd.DataFrame) -> pd.DataFrame:
         group["bb_rate_r15"] = (s_walks / safe_denom).rolling(15, min_periods=5).mean()
 
         group["run_diff_r10"] = run_diff.rolling(10, min_periods=4).mean()
+
+        # L10 win% — shift(1) to prevent leakage
+        wins = (s_scored > s_allowed).astype(float)
+        group["win_pct_l10"] = wins.rolling(10, min_periods=4).mean()
 
         # -----------------------------------------------------------------
         # Early-season confidence blending.
@@ -751,7 +764,7 @@ def build_feature_matrix(
 
     stat_cols = [
         "runs_scored_r15", "runs_allowed_r15", "run_diff_r15",
-        "k_rate_r15", "bb_rate_r15", "run_diff_r10",
+        "k_rate_r15", "bb_rate_r15", "run_diff_r10", "win_pct_l10",
     ]
 
     # ---------------------------------------------------------------------------
@@ -856,6 +869,7 @@ def build_feature_matrix(
         home_k15 = home_stats["k_rate_r15"]
         home_bb15 = home_stats["bb_rate_r15"]
         home_rd10 = home_stats["run_diff_r10"]
+        home_win_l10 = home_stats.get("win_pct_l10", 0.5)
 
         # Away rolling stats (v1)
         away_rs15 = away_stats["runs_scored_r15"]
@@ -864,6 +878,7 @@ def build_feature_matrix(
         away_k15 = away_stats["k_rate_r15"]
         away_bb15 = away_stats["bb_rate_r15"]
         away_rd10 = away_stats["run_diff_r10"]
+        away_win_l10 = away_stats.get("win_pct_l10", 0.5)
 
         # Days rest (v1)
         try:
@@ -947,6 +962,9 @@ def build_feature_matrix(
             "away_k_rate_r15": away_k15,
             "away_bb_rate_r15": away_bb15,
             "away_run_diff_r10": away_rd10,
+            "home_win_pct_l10": float(home_win_l10) if pd.notna(home_win_l10) else 0.5,
+            "away_win_pct_l10": float(away_win_l10) if pd.notna(away_win_l10) else 0.5,
+            "win_pct_l10_diff": (float(home_win_l10) if pd.notna(home_win_l10) else 0.5) - (float(away_win_l10) if pd.notna(away_win_l10) else 0.5),
             "offense_diff": home_rs15 - away_rs15,
             "defense_diff": home_ra15 - away_ra15,
             "form_diff": home_rd10 - away_rd10,
@@ -968,6 +986,10 @@ def build_feature_matrix(
             "home_bullpen_era_r7": home_bullpen_era_r7,
             "away_bullpen_era_r7": away_bullpen_era_r7,
             "bullpen_era_diff": bullpen_era_diff,
+            # sp last 3 starts ERA (placeholder — uses season ERA until last3 computed)
+            "home_sp_last3_era": min(float(home_pitcher_stats.get("last3_era") or h_era), 20.0) if home_pitcher_stats else min(float(h_era), 20.0),
+            "away_sp_last3_era": min(float(away_pitcher_stats.get("last3_era") or a_era), 20.0) if away_pitcher_stats else min(float(a_era), 20.0),
+            "sp_last3_era_diff": (min(float(away_pitcher_stats.get("last3_era") or a_era), 20.0) if away_pitcher_stats else min(float(a_era), 20.0)) - (min(float(home_pitcher_stats.get("last3_era") or h_era), 20.0) if home_pitcher_stats else min(float(h_era), 20.0)),
             # v2 — home/away splits
             "home_team_runs_scored_home_r15": home_rs_home_r15,
             "away_team_runs_scored_away_r15": away_rs_away_r15,
@@ -984,6 +1006,10 @@ def build_feature_matrix(
             "away_lineup_top3_ops":  away_lineup["lineup_top3_ops"],
             "lineup_wrc_diff":       home_lineup["lineup_wrc_weighted"] - away_lineup["lineup_wrc_weighted"],
             "home_lineup_depth_ops": home_lineup["lineup_depth_ops"],
+            # blowup risk — bullpen ERA x opponent wRC+ (computed after lineup)
+            "home_blowup_risk": float(home_bullpen_era_r7) * float(home_lineup["lineup_wrc_weighted"]) / 100.0,
+            "away_blowup_risk": float(away_bullpen_era_r7) * float(away_lineup["lineup_wrc_weighted"]) / 100.0,
+            "blowup_risk_diff": (float(away_bullpen_era_r7) * float(away_lineup["lineup_wrc_weighted"]) / 100.0) - (float(home_bullpen_era_r7) * float(home_lineup["lineup_wrc_weighted"]) / 100.0),
             # v4 — SP workload
             "home_sp_rest_days": home_workload["sp_rest_days"],
             "away_sp_rest_days": away_workload["sp_rest_days"],
@@ -1021,6 +1047,9 @@ def build_feature_matrix(
         "home_sp_whip", "away_sp_whip",
         "home_sp_k9", "away_sp_k9",
         "sp_era_diff",
+    "home_sp_last3_era",
+    "away_sp_last3_era",
+    "sp_last3_era_diff",
         "home_lineup_wrc", "away_lineup_wrc",
         "home_lineup_top3_ops", "away_lineup_top3_ops",
         "lineup_wrc_diff", "home_lineup_depth_ops",
