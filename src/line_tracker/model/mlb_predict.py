@@ -629,13 +629,13 @@ def build_prediction_features(
             (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS)
         ),
         "home_lineup_depth_ops": (home_lineup_stats or {}).get("lineup_depth_ops", LEAGUE_AVG_OPS),
-        # v4 — SP workload (neutral defaults)
+        # v4 — SP workload (use last3 avg IP if available, else 5.5 default)
         "home_sp_rest_days": 5.0,
         "away_sp_rest_days": 5.0,
         "home_sp_avg_ip":    5.5,
         # v5 — bullpen exposure (derived from SP avg IP; 9 - avg_ip = expected bullpen innings)
-        "home_bullpen_exposure": 9.0 - 5.5,
-        "away_bullpen_exposure": 9.0 - 5.5,
+        "home_bullpen_exposure": 3.5,
+        "away_bullpen_exposure": 3.5,
         "bullpen_exposure_diff": 0.0,
         # v6 — high-resolution weather (use v2 values when available, else reasonable defaults)
         "weather_temp_f":          float((weather or {}).get("temp_f", 72.0)),
