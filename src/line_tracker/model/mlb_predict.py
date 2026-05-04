@@ -360,6 +360,10 @@ def get_trailing_stats(base_season: int = 2025) -> dict[str, dict]:
             ra10 = pd.to_numeric(last10["runs_allowed"], errors="coerce").fillna(0)
             run_diff_r10 = float((rs10 - ra10).mean())
 
+            # L10 win%
+            wins10 = (rs10 > ra10).astype(float)
+            win_pct_l10 = float(wins10.mean()) if len(wins10) >= 4 else 0.5
+
             if source == "2026_blend" and team in stats_2025:
                 s25 = stats_2025[team]
                 # Gradual blend capped at 50% until full 15-game window
@@ -382,6 +386,7 @@ def get_trailing_stats(base_season: int = 2025) -> dict[str, dict]:
                 "k_rate_r15":             k_rate_r15,
                 "bb_rate_r15":            bb_rate_r15,
                 "run_diff_r10":           run_diff_r10,
+                "win_pct_l10":            win_pct_l10,
                 "runs_scored_home_r15":   s_base.get("runs_scored_home_r15", runs_scored_r15),
                 "runs_allowed_home_r15":  s_base.get("runs_allowed_home_r15", runs_allowed_r15),
                 "runs_scored_away_r15":   s_base.get("runs_scored_away_r15", runs_scored_r15),
@@ -473,6 +478,7 @@ def build_prediction_features(
         "runs_scored_r15": 4.5, "runs_allowed_r15": 4.5,
         "run_diff_r15": 0.0, "k_rate_r15": 0.20,
         "bb_rate_r15": 0.09, "run_diff_r10": 0.0,
+        "win_pct_l10": 0.5,
         "runs_scored_home_r15": 4.5, "runs_allowed_home_r15": 4.5,
         "runs_scored_away_r15": 4.5, "runs_allowed_away_r15": 4.5,
     }
@@ -566,12 +572,15 @@ def build_prediction_features(
         "home_k_rate_r15": home_stats["k_rate_r15"],
         "home_bb_rate_r15": home_stats["bb_rate_r15"],
         "home_run_diff_r10": home_stats["run_diff_r10"],
+        "home_win_pct_l10": float(home_stats.get("win_pct_l10") or 0.5),
         "away_runs_scored_r15": away_stats["runs_scored_r15"],
         "away_runs_allowed_r15": away_stats["runs_allowed_r15"],
         "away_run_diff_r15": away_stats["run_diff_r15"],
         "away_k_rate_r15": away_stats["k_rate_r15"],
         "away_bb_rate_r15": away_stats["bb_rate_r15"],
         "away_run_diff_r10": away_stats["run_diff_r10"],
+        "away_win_pct_l10": float(away_stats.get("win_pct_l10") or 0.5),
+        "win_pct_l10_diff": float(home_stats.get("win_pct_l10") or 0.5) - float(away_stats.get("win_pct_l10") or 0.5),
         "offense_diff": home_stats["runs_scored_r15"] - away_stats["runs_scored_r15"],
         "defense_diff": home_stats["runs_allowed_r15"] - away_stats["runs_allowed_r15"],
         "form_diff": home_stats["run_diff_r10"] - away_stats["run_diff_r10"],
@@ -593,6 +602,14 @@ def build_prediction_features(
         "home_bullpen_era_r7": h_bp_era,
         "away_bullpen_era_r7": a_bp_era,
         "bullpen_era_diff": bullpen_era_diff,
+        # blowup risk — bullpen ERA x opponent wRC+
+        "home_blowup_risk": h_bp_era * (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0,
+        "away_blowup_risk": a_bp_era * (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0,
+        "blowup_risk_diff": (a_bp_era * (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0) - (h_bp_era * (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0),
+        # sp last 3 starts ERA
+        "home_sp_last3_era": min(float((home_pitcher_stats or {}).get("last3_era") or home_sp_era), 20.0),
+        "away_sp_last3_era": min(float((away_pitcher_stats or {}).get("last3_era") or away_sp_era), 20.0),
+        "sp_last3_era_diff": min(float((away_pitcher_stats or {}).get("last3_era") or away_sp_era), 20.0) - min(float((home_pitcher_stats or {}).get("last3_era") or home_sp_era), 20.0),
         # v2 — splits
         "home_team_runs_scored_home_r15": home_rs_home,
         "away_team_runs_scored_away_r15": away_rs_away,

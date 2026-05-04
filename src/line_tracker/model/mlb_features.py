@@ -869,7 +869,8 @@ def build_feature_matrix(
         home_k15 = home_stats["k_rate_r15"]
         home_bb15 = home_stats["bb_rate_r15"]
         home_rd10 = home_stats["run_diff_r10"]
-        home_win_l10 = home_stats.get("win_pct_l10", 0.5)
+        _hwl = home_stats.get("win_pct_l10")
+        home_win_l10 = float(_hwl) if _hwl is not None and pd.notna(_hwl) else 0.5
 
         # Away rolling stats (v1)
         away_rs15 = away_stats["runs_scored_r15"]
@@ -878,7 +879,8 @@ def build_feature_matrix(
         away_k15 = away_stats["k_rate_r15"]
         away_bb15 = away_stats["bb_rate_r15"]
         away_rd10 = away_stats["run_diff_r10"]
-        away_win_l10 = away_stats.get("win_pct_l10", 0.5)
+        _awl = away_stats.get("win_pct_l10")
+        away_win_l10 = float(_awl) if _awl is not None and pd.notna(_awl) else 0.5
 
         # Days rest (v1)
         try:
@@ -987,9 +989,9 @@ def build_feature_matrix(
             "away_bullpen_era_r7": away_bullpen_era_r7,
             "bullpen_era_diff": bullpen_era_diff,
             # sp last 3 starts ERA (placeholder — uses season ERA until last3 computed)
-            "home_sp_last3_era": min(float(home_pitcher_stats.get("last3_era") or h_era), 20.0) if home_pitcher_stats else min(float(h_era), 20.0),
-            "away_sp_last3_era": min(float(away_pitcher_stats.get("last3_era") or a_era), 20.0) if away_pitcher_stats else min(float(a_era), 20.0),
-            "sp_last3_era_diff": (min(float(away_pitcher_stats.get("last3_era") or a_era), 20.0) if away_pitcher_stats else min(float(a_era), 20.0)) - (min(float(home_pitcher_stats.get("last3_era") or h_era), 20.0) if home_pitcher_stats else min(float(h_era), 20.0)),
+            "home_sp_last3_era": min(float(home_pitcher_stats.get("last3_era") if home_pitcher_stats and home_pitcher_stats.get("last3_era") is not None else h_era), 20.0),
+            "away_sp_last3_era": min(float(away_pitcher_stats.get("last3_era") if away_pitcher_stats and away_pitcher_stats.get("last3_era") is not None else a_era), 20.0),
+            "sp_last3_era_diff": min(float(away_pitcher_stats.get("last3_era") if away_pitcher_stats and away_pitcher_stats.get("last3_era") is not None else a_era), 20.0) - min(float(home_pitcher_stats.get("last3_era") if home_pitcher_stats and home_pitcher_stats.get("last3_era") is not None else h_era), 20.0),
             # v2 — home/away splits
             "home_team_runs_scored_home_r15": home_rs_home_r15,
             "away_team_runs_scored_away_r15": away_rs_away_r15,
@@ -1007,9 +1009,9 @@ def build_feature_matrix(
             "lineup_wrc_diff":       home_lineup["lineup_wrc_weighted"] - away_lineup["lineup_wrc_weighted"],
             "home_lineup_depth_ops": home_lineup["lineup_depth_ops"],
             # blowup risk — bullpen ERA x opponent wRC+ (computed after lineup)
-            "home_blowup_risk": float(home_bullpen_era_r7) * float(home_lineup["lineup_wrc_weighted"]) / 100.0,
-            "away_blowup_risk": float(away_bullpen_era_r7) * float(away_lineup["lineup_wrc_weighted"]) / 100.0,
-            "blowup_risk_diff": (float(away_bullpen_era_r7) * float(away_lineup["lineup_wrc_weighted"]) / 100.0) - (float(home_bullpen_era_r7) * float(home_lineup["lineup_wrc_weighted"]) / 100.0),
+            "home_blowup_risk": float(home_bullpen_era_r7) * (float(home_lineup["lineup_wrc_weighted"]) if home_lineup["lineup_wrc_weighted"] else 100.0) / 100.0,
+            "away_blowup_risk": float(away_bullpen_era_r7) * (float(away_lineup["lineup_wrc_weighted"]) if away_lineup["lineup_wrc_weighted"] else 100.0) / 100.0,
+            "blowup_risk_diff": (float(away_bullpen_era_r7) * (float(away_lineup["lineup_wrc_weighted"]) if away_lineup["lineup_wrc_weighted"] else 100.0) / 100.0) - (float(home_bullpen_era_r7) * (float(home_lineup["lineup_wrc_weighted"]) if home_lineup["lineup_wrc_weighted"] else 100.0) / 100.0),
             # v4 — SP workload
             "home_sp_rest_days": home_workload["sp_rest_days"],
             "away_sp_rest_days": away_workload["sp_rest_days"],
