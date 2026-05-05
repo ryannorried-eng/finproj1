@@ -641,7 +641,7 @@ def build_prediction_features(
         "weather_temp_f":          float((weather or {}).get("temp_f", 72.0)),
         "weather_wind_mph":        float((weather or {}).get("wind_mph", 8.0)),
         "weather_wind_out_factor": float((weather or {}).get("wind_out_factor", 0.0)),
-        "weather_precip":          float((weather or {}).get("precip", 0.0)),
+        "weather_precip":          float((weather or {}).get("precip_prob", 0.0)),
     }
     return pd.DataFrame([feat], columns=FEATURE_COLUMNS)
 
@@ -1452,6 +1452,7 @@ def predict_mlb_games(
             "temp_f": round(weather["temp_f"], 1) if weather else None,
             "wind_mph": round(weather["wind_mph"], 1) if weather else None,
             "wind_out_factor": round(weather["wind_out_factor"], 2) if weather else None,
+            "precip_prob": round(weather["precip_prob"], 1) if weather else None,
             "home_lineup_wrc": round(home_lineup_stats["lineup_wrc_weighted"], 1),
             "away_lineup_wrc": round(away_lineup_stats["lineup_wrc_weighted"], 1),
             "home_top3_ops": round(home_lineup_stats["lineup_top3_ops"], 3),
