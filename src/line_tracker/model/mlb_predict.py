@@ -1322,6 +1322,17 @@ def predict_mlb_games(
                 _nudged_prob = min(home_win_prob, 0.5 - abs(run_diff) * 0.02)
         # home_win_prob remains raw — nudge stored in _nudged_prob for diagnostics only
 
+        # SP ERA adjustment — boost model signal where ERA gap is meaningful.
+        # Each 1-run ERA gap shifts win prob by 2.5%, capped at 10%.
+        # away_sp_era > home_sp_era = home advantage = push toward home.
+        # home_sp_era > away_sp_era = away advantage = push toward away.
+        if home_pitcher_stats is not None or away_pitcher_stats is not None:
+            _h_era = float((home_pitcher_stats or {}).get("era") or 4.20)
+            _a_era = float((away_pitcher_stats or {}).get("era") or 4.20)
+            era_gap = _a_era - _h_era  # positive = home advantage
+            era_nudge = max(-0.10, min(0.10, era_gap * 0.025))
+            home_win_prob = max(0.05, min(0.95, home_win_prob + era_nudge))
+
         # --- Totals ---
         tot_art = artifacts["totals"]
         tot_scaler = tot_art["scaler"]
