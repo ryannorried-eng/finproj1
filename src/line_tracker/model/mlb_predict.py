@@ -498,20 +498,35 @@ def build_prediction_features(
         home_rot = _ROT_DEFAULTS.copy()
         away_rot = _ROT_DEFAULTS.copy()
 
+    import math as _math
+
+    def _ps(stats: dict | None, key: str, fallback: float) -> float:
+        """Get pitcher stat, falling back only on None or NaN (not on 0.0)."""
+        if stats is None:
+            return fallback
+        v = stats.get(key)
+        if v is None:
+            return fallback
+        try:
+            f = float(v)
+            return fallback if _math.isnan(f) else f
+        except (TypeError, ValueError):
+            return fallback
+
     # Override rotation with actual probable pitcher if available
     if home_pitcher_stats is not None:
-        home_rotation_era = float(home_pitcher_stats.get("era") or home_rot["rotation_era"])
-        home_rotation_k9 = float(home_pitcher_stats.get("k9") or home_rot["rotation_k9"])
-        home_rotation_whip = float(home_pitcher_stats.get("whip") or home_rot["rotation_whip"])
+        home_rotation_era = _ps(home_pitcher_stats, "era", home_rot["rotation_era"])
+        home_rotation_k9 = _ps(home_pitcher_stats, "k9", home_rot["rotation_k9"])
+        home_rotation_whip = _ps(home_pitcher_stats, "whip", home_rot["rotation_whip"])
     else:
         home_rotation_era = home_rot["rotation_era"]
         home_rotation_k9 = home_rot["rotation_k9"]
         home_rotation_whip = home_rot["rotation_whip"]
 
     if away_pitcher_stats is not None:
-        away_rotation_era = float(away_pitcher_stats.get("era") or away_rot["rotation_era"])
-        away_rotation_k9 = float(away_pitcher_stats.get("k9") or away_rot["rotation_k9"])
-        away_rotation_whip = float(away_pitcher_stats.get("whip") or away_rot["rotation_whip"])
+        away_rotation_era = _ps(away_pitcher_stats, "era", away_rot["rotation_era"])
+        away_rotation_k9 = _ps(away_pitcher_stats, "k9", away_rot["rotation_k9"])
+        away_rotation_whip = _ps(away_pitcher_stats, "whip", away_rot["rotation_whip"])
     else:
         away_rotation_era = away_rot["rotation_era"]
         away_rotation_k9 = away_rot["rotation_k9"]
@@ -541,20 +556,20 @@ def build_prediction_features(
         precip_prob = 0.0
 
     # v3 — per-game SP stats: use pitcher_stats if available, else rotation avg,
-    # else league average
+    # else league average. Use _ps() so 0.0 ERA is treated as valid (not falsy).
     if home_pitcher_stats is not None:
-        home_sp_era  = float(home_pitcher_stats.get("era")  or home_rotation_era or LEAGUE_AVG_ERA)
-        home_sp_whip = float(home_pitcher_stats.get("whip") or home_rotation_whip or LEAGUE_AVG_WHIP)
-        home_sp_k9   = float(home_pitcher_stats.get("k9")   or home_rotation_k9  or LEAGUE_AVG_K9)
+        home_sp_era  = _ps(home_pitcher_stats, "era",  home_rotation_era  or LEAGUE_AVG_ERA)
+        home_sp_whip = _ps(home_pitcher_stats, "whip", home_rotation_whip or LEAGUE_AVG_WHIP)
+        home_sp_k9   = _ps(home_pitcher_stats, "k9",   home_rotation_k9   or LEAGUE_AVG_K9)
     else:
         home_sp_era  = home_rotation_era  if home_rotation_era  else LEAGUE_AVG_ERA
         home_sp_whip = home_rotation_whip if home_rotation_whip else LEAGUE_AVG_WHIP
         home_sp_k9   = home_rotation_k9   if home_rotation_k9   else LEAGUE_AVG_K9
 
     if away_pitcher_stats is not None:
-        away_sp_era  = float(away_pitcher_stats.get("era")  or away_rotation_era or LEAGUE_AVG_ERA)
-        away_sp_whip = float(away_pitcher_stats.get("whip") or away_rotation_whip or LEAGUE_AVG_WHIP)
-        away_sp_k9   = float(away_pitcher_stats.get("k9")   or away_rotation_k9  or LEAGUE_AVG_K9)
+        away_sp_era  = _ps(away_pitcher_stats, "era",  away_rotation_era  or LEAGUE_AVG_ERA)
+        away_sp_whip = _ps(away_pitcher_stats, "whip", away_rotation_whip or LEAGUE_AVG_WHIP)
+        away_sp_k9   = _ps(away_pitcher_stats, "k9",   away_rotation_k9   or LEAGUE_AVG_K9)
     else:
         away_sp_era  = away_rotation_era  if away_rotation_era  else LEAGUE_AVG_ERA
         away_sp_whip = away_rotation_whip if away_rotation_whip else LEAGUE_AVG_WHIP
@@ -563,6 +578,23 @@ def build_prediction_features(
     sp_era_diff_v3 = away_sp_era - home_sp_era
 
     from line_tracker.model.mlb_features import LEAGUE_AVG_OPS, LEAGUE_AVG_WRC_PLUS
+    import math as _math
+
+    def _ls(stats: dict | None, key: str, default: float) -> float:
+        """Get lineup stat, falling back to default on missing, None, or NaN."""
+        if stats is None:
+            return default
+        v = stats.get(key)
+        if v is None:
+            return default
+        try:
+            f = float(v)
+            return default if _math.isnan(f) else f
+        except (TypeError, ValueError):
+            return default
+
+    _h_wrc = _ls(home_lineup_stats, "lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS)
+    _a_wrc = _ls(away_lineup_stats, "lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS)
 
     feat = {
         # v1
@@ -603,9 +635,9 @@ def build_prediction_features(
         "away_bullpen_era_r7": a_bp_era,
         "bullpen_era_diff": bullpen_era_diff,
         # blowup risk — bullpen ERA x opponent wRC+
-        "home_blowup_risk": h_bp_era * (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0,
-        "away_blowup_risk": a_bp_era * (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0,
-        "blowup_risk_diff": (a_bp_era * (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0) - (h_bp_era * (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) / 100.0),
+        "home_blowup_risk": h_bp_era * _h_wrc / 100.0,
+        "away_blowup_risk": a_bp_era * _a_wrc / 100.0,
+        "blowup_risk_diff": (a_bp_era * _a_wrc / 100.0) - (h_bp_era * _h_wrc / 100.0),
         # sp last 3 starts ERA
         "home_sp_last3_era": min(float((home_pitcher_stats or {}).get("last3_era") or home_sp_era), 20.0),
         "away_sp_last3_era": min(float((away_pitcher_stats or {}).get("last3_era") or away_sp_era), 20.0),
@@ -620,15 +652,12 @@ def build_prediction_features(
         "temp_f": temp_f,
         "precip_prob": precip_prob,
         # v4 — lineup strength (real stats when available; league avg fallback)
-        "home_lineup_wrc":       (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS),
-        "away_lineup_wrc":       (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS),
-        "home_lineup_top3_ops":  (home_lineup_stats or {}).get("lineup_top3_ops", LEAGUE_AVG_OPS),
-        "away_lineup_top3_ops":  (away_lineup_stats or {}).get("lineup_top3_ops", LEAGUE_AVG_OPS),
-        "lineup_wrc_diff":       (
-            (home_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS) -
-            (away_lineup_stats or {}).get("lineup_wrc_weighted", LEAGUE_AVG_WRC_PLUS)
-        ),
-        "home_lineup_depth_ops": (home_lineup_stats or {}).get("lineup_depth_ops", LEAGUE_AVG_OPS),
+        "home_lineup_wrc":       _h_wrc,
+        "away_lineup_wrc":       _a_wrc,
+        "home_lineup_top3_ops":  _ls(home_lineup_stats, "lineup_top3_ops", LEAGUE_AVG_OPS),
+        "away_lineup_top3_ops":  _ls(away_lineup_stats, "lineup_top3_ops", LEAGUE_AVG_OPS),
+        "lineup_wrc_diff":       _h_wrc - _a_wrc,
+        "home_lineup_depth_ops": _ls(home_lineup_stats, "lineup_depth_ops", LEAGUE_AVG_OPS),
         # v4 — SP workload (use last3 avg IP if available, else 5.5 default)
         "home_sp_rest_days": 5.0,
         "away_sp_rest_days": 5.0,
@@ -1169,12 +1198,13 @@ def predict_mlb_games(
             ]
             if len(team_batters) < 3:
                 return None
-            avg_ops = float(team_batters["ops"].mean())
-            avg_wrc = float(team_batters["wrc_plus_proxy"].mean())
+            from line_tracker.model.mlb_features import LEAGUE_AVG_WRC_PLUS as _LWP, LEAGUE_AVG_OPS as _LOPS
+            avg_ops = float(team_batters["ops"].fillna(_LOPS).mean())
+            avg_wrc = float(team_batters["wrc_plus_proxy"].fillna(_LWP).mean())
             return {
                 "lineup_wrc_weighted": avg_wrc,
-                "lineup_top3_ops": float(team_batters.nlargest(3, "ops")["ops"].mean()),
-                "lineup_depth_ops": float(team_batters.nlargest(9, "ops").iloc[3:]["ops"].mean()) if len(team_batters) >= 4 else avg_ops,
+                "lineup_top3_ops": float(team_batters.nlargest(3, "ops")["ops"].fillna(_LOPS).mean()),
+                "lineup_depth_ops": float(team_batters.nlargest(9, "ops").iloc[3:]["ops"].fillna(_LOPS).mean()) if len(team_batters) >= 4 else avg_ops,
             }
 
         home_lineup_stats = _compute_lineup_strength(
