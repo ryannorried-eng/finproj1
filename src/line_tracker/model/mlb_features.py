@@ -79,9 +79,6 @@ FEATURE_COLUMNS = [
     "home_sp_k9",
     "away_sp_k9",
     "sp_era_diff",
-    "home_sp_last3_era",
-    "away_sp_last3_era",
-    "sp_last3_era_diff",
     # v2 — bullpen ERA proxy (3 features)
     "home_bullpen_era_r7",
     "away_bullpen_era_r7",
@@ -988,10 +985,6 @@ def build_feature_matrix(
             "home_bullpen_era_r7": home_bullpen_era_r7,
             "away_bullpen_era_r7": away_bullpen_era_r7,
             "bullpen_era_diff": bullpen_era_diff,
-            # sp last 3 starts ERA (placeholder — uses season ERA until last3 computed)
-            "home_sp_last3_era": min(float(home_pitcher_stats.get("last3_era") if home_pitcher_stats and home_pitcher_stats.get("last3_era") is not None else h_era), 20.0),
-            "away_sp_last3_era": min(float(away_pitcher_stats.get("last3_era") if away_pitcher_stats and away_pitcher_stats.get("last3_era") is not None else a_era), 20.0),
-            "sp_last3_era_diff": min(float(away_pitcher_stats.get("last3_era") if away_pitcher_stats and away_pitcher_stats.get("last3_era") is not None else a_era), 20.0) - min(float(home_pitcher_stats.get("last3_era") if home_pitcher_stats and home_pitcher_stats.get("last3_era") is not None else h_era), 20.0),
             # v2 — home/away splits
             "home_team_runs_scored_home_r15": home_rs_home_r15,
             "away_team_runs_scored_away_r15": away_rs_away_r15,
@@ -1049,9 +1042,6 @@ def build_feature_matrix(
         "home_sp_whip", "away_sp_whip",
         "home_sp_k9", "away_sp_k9",
         "sp_era_diff",
-    "home_sp_last3_era",
-    "away_sp_last3_era",
-    "sp_last3_era_diff",
         "home_lineup_wrc", "away_lineup_wrc",
         "home_lineup_top3_ops", "away_lineup_top3_ops",
         "lineup_wrc_diff", "home_lineup_depth_ops",
