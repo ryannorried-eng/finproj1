@@ -59,9 +59,6 @@ FEATURE_COLUMNS = [
     "away_k_rate_r15",
     "away_bb_rate_r15",
     "away_run_diff_r10",
-    "home_win_pct_l10",
-    "away_win_pct_l10",
-    "win_pct_l10_diff",
     "offense_diff",
     "defense_diff",
     "form_diff",
@@ -83,9 +80,6 @@ FEATURE_COLUMNS = [
     "home_bullpen_era_r7",
     "away_bullpen_era_r7",
     "bullpen_era_diff",
-    "home_blowup_risk",
-    "away_blowup_risk",
-    "blowup_risk_diff",
     # v2 — home/away splits (4 features)
     "home_team_runs_scored_home_r15",
     "away_team_runs_scored_away_r15",
@@ -163,10 +157,6 @@ def compute_team_rolling_stats(game_logs: pd.DataFrame) -> pd.DataFrame:
         group["bb_rate_r15"] = (s_walks / safe_denom).rolling(15, min_periods=5).mean()
 
         group["run_diff_r10"] = run_diff.rolling(10, min_periods=4).mean()
-
-        # L10 win% — shift(1) to prevent leakage
-        wins = (s_scored > s_allowed).astype(float)
-        group["win_pct_l10"] = wins.rolling(10, min_periods=4).mean()
 
         # -----------------------------------------------------------------
         # Early-season confidence blending.
@@ -276,8 +266,6 @@ def _compute_bullpen_index(seasons: list) -> dict:
     """Build (team_str, pd.Timestamp) → {era_r7, era_r15} lookup.
 
     Falls back to league-average ERA on missing data.
-    Kept for backward compatibility; build_feature_matrix now uses
-    _compute_bullpen_index_from_logs instead.
     """
     from line_tracker.model.mlb_data import fetch_bullpen_stats
 
@@ -293,51 +281,11 @@ def _compute_bullpen_index(seasons: list) -> dict:
         bp_df["era_r15"] = pd.to_numeric(bp_df["era_r15"], errors="coerce").fillna(_BP_DEFAULT_ERA)
 
         for row in bp_df.itertuples(index=False):
-            # Normalize date to midnight Timestamp to ensure key matches game dates
-            key = (str(row.team), pd.Timestamp(row.date).normalize())
+            key = (str(row.team), row.date)
             result[key] = {
                 "era_r7": float(row.era_r7),
                 "era_r15": float(row.era_r15),
             }
-    return result
-
-
-def _compute_bullpen_index_from_logs(game_logs: pd.DataFrame) -> dict:
-    """Build (team_str, pd.Timestamp) → {era_r7, era_r15} lookup from in-memory logs.
-
-    Computes rolling team ERA directly from the game_logs DataFrame already
-    built in build_feature_matrix — no API calls required, works with both
-    real and synthetic data.
-    """
-    result: dict = {}
-
-    logs = game_logs.copy()
-    logs["runs_allowed"] = pd.to_numeric(logs["runs_allowed"], errors="coerce")
-    logs["innings_pitched"] = pd.to_numeric(
-        logs.get("innings_pitched", pd.Series(9.0, index=logs.index)), errors="coerce"
-    ).fillna(9.0)
-
-    for team, group in logs.groupby("team"):
-        group = group.sort_values("date").copy()
-
-        # Shift 1 to prevent leakage (stats from games BEFORE this date)
-        s_runs = group["runs_allowed"].shift(1)
-        s_innings = group["innings_pitched"].shift(1)
-
-        runs_r7 = s_runs.rolling(7, min_periods=3).sum()
-        inn_r7 = s_innings.rolling(7, min_periods=3).sum().replace(0, np.nan)
-        runs_r15 = s_runs.rolling(15, min_periods=5).sum()
-        inn_r15 = s_innings.rolling(15, min_periods=5).sum().replace(0, np.nan)
-
-        group["era_r7"] = (runs_r7 * 9) / inn_r7
-        group["era_r15"] = (runs_r15 * 9) / inn_r15
-
-        for row in group.itertuples(index=False):
-            era_r7 = float(row.era_r7) if pd.notna(row.era_r7) else _BP_DEFAULT_ERA
-            era_r15 = float(row.era_r15) if pd.notna(row.era_r15) else _BP_DEFAULT_ERA
-            key = (str(team), pd.Timestamp(row.date).normalize())
-            result[key] = {"era_r7": era_r7, "era_r15": era_r15}
-
     return result
 
 
@@ -396,11 +344,10 @@ def _lookup_sp_to_date_stats(pitcher_id, game_date, pitcher_to_date_df):
     """
     Look up leakage-safe ERA/WHIP/K9 for a pitcher as of game_date.
     Uses the most recent row strictly BEFORE game_date.
-    Returns (era, whip, k9) or (None, None, None) if no prior data exists.
-    Callers must apply fallback (season stats or league averages) when None is returned.
+    Returns (era, whip, k9) — falls back to league averages if missing.
     """
     if pitcher_to_date_df.empty or pitcher_id is None or pd.isna(pitcher_id):
-        return None, None, None
+        return LEAGUE_AVG_ERA, LEAGUE_AVG_WHIP, LEAGUE_AVG_K9
 
     pid = int(pitcher_id)
     subset = pitcher_to_date_df[
@@ -409,35 +356,13 @@ def _lookup_sp_to_date_stats(pitcher_id, game_date, pitcher_to_date_df):
     ]
 
     if subset.empty:
-        return None, None, None
+        return LEAGUE_AVG_ERA, LEAGUE_AVG_WHIP, LEAGUE_AVG_K9
 
     row = subset.sort_values("date").iloc[-1]
-    era  = float(row["era_to_date"])  if pd.notna(row["era_to_date"])  else None
-    whip = float(row["whip_to_date"]) if pd.notna(row["whip_to_date"]) else None
-    k9   = float(row["k9_to_date"])   if pd.notna(row["k9_to_date"])   else None
+    era  = float(row["era_to_date"])  if pd.notna(row["era_to_date"])  else LEAGUE_AVG_ERA
+    whip = float(row["whip_to_date"]) if pd.notna(row["whip_to_date"]) else LEAGUE_AVG_WHIP
+    k9   = float(row["k9_to_date"])   if pd.notna(row["k9_to_date"])   else LEAGUE_AVG_K9
 
-    return era, whip, k9
-
-
-def _lookup_sp_season_stats(pitcher_id, season, pitcher_season_stats_by_season: dict):
-    """Look up full-season ERA/WHIP/K9 for a pitcher from season aggregate stats.
-
-    Returns (era, whip, k9) or (None, None, None) if not found.
-    Note: uses full-season stats (slight future leakage for early-season games),
-    but provides real signal when game-log to-date stats are unavailable.
-    """
-    if pitcher_id is None or pd.isna(pitcher_id):
-        return None, None, None
-    pss = pitcher_season_stats_by_season.get(int(season), pd.DataFrame())
-    if pss.empty:
-        return None, None, None
-    pid = int(pitcher_id)
-    if pid not in pss.index:
-        return None, None, None
-    ps = pss.loc[pid]
-    era  = float(ps["era"])  if pd.notna(ps.get("era"))  else None
-    whip = float(ps["whip"]) if pd.notna(ps.get("whip")) else None
-    k9   = float(ps["k9"])   if pd.notna(ps.get("k9"))   else None
     return era, whip, k9
 
 
@@ -633,8 +558,8 @@ def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
         if len(home_only) > 0:
             sh_scored = home_only["runs_scored"].clip(upper=CAP_RUNS).shift(1)
             sh_allowed = home_only["runs_allowed"].clip(upper=CAP_RUNS).shift(1)
-            home_only["rs_home_r15"] = sh_scored.rolling(15, min_periods=5).mean()
-            home_only["ra_home_r15"] = sh_allowed.rolling(15, min_periods=5).mean()
+            home_only["rs_home_r15"] = sh_scored.rolling(15, min_periods=15).mean()
+            home_only["ra_home_r15"] = sh_allowed.rolling(15, min_periods=15).mean()
         else:
             home_only["rs_home_r15"] = np.nan
             home_only["ra_home_r15"] = np.nan
@@ -644,8 +569,8 @@ def _compute_home_away_splits(game_logs: pd.DataFrame) -> dict:
         if len(away_only) > 0:
             sa_scored = away_only["runs_scored"].clip(upper=CAP_RUNS).shift(1)
             sa_allowed = away_only["runs_allowed"].clip(upper=CAP_RUNS).shift(1)
-            away_only["rs_away_r15"] = sa_scored.rolling(15, min_periods=5).mean()
-            away_only["ra_away_r15"] = sa_allowed.rolling(15, min_periods=5).mean()
+            away_only["rs_away_r15"] = sa_scored.rolling(15, min_periods=15).mean()
+            away_only["ra_away_r15"] = sa_allowed.rolling(15, min_periods=15).mean()
         else:
             away_only["rs_away_r15"] = np.nan
             away_only["ra_away_r15"] = np.nan
@@ -784,8 +709,7 @@ def build_feature_matrix(
     # ---------------------------------------------------------------------------
     # Step 1: Build per-team per-game view for rolling stats (v1)
     # ---------------------------------------------------------------------------
-    # Use schedule scores for runs (most reliable); fill from game logs if present.
-    # Include innings_pitched so bullpen ERA can be computed directly from these logs.
+    # Use schedule scores for runs (most reliable); fill from game logs if present
     home_view = pd.DataFrame({
         "team": df["home_team"],
         "date": df["date"],
@@ -795,7 +719,6 @@ def build_feature_matrix(
         "hits": df.get("home_hits", pd.Series(np.nan, index=df.index)),
         "walks": df.get("home_walks", pd.Series(np.nan, index=df.index)),
         "strikeouts": df.get("home_strikeouts", pd.Series(np.nan, index=df.index)),
-        "innings_pitched": df.get("home_innings_pitched", pd.Series(9.0, index=df.index)),
     })
 
     away_view = pd.DataFrame({
@@ -807,7 +730,6 @@ def build_feature_matrix(
         "hits": df.get("away_hits", pd.Series(np.nan, index=df.index)),
         "walks": df.get("away_walks", pd.Series(np.nan, index=df.index)),
         "strikeouts": df.get("away_strikeouts", pd.Series(np.nan, index=df.index)),
-        "innings_pitched": df.get("away_innings_pitched", pd.Series(9.0, index=df.index)),
     })
 
     game_logs = pd.concat([home_view, away_view], ignore_index=True)
@@ -829,7 +751,7 @@ def build_feature_matrix(
 
     stat_cols = [
         "runs_scored_r15", "runs_allowed_r15", "run_diff_r15",
-        "k_rate_r15", "bb_rate_r15", "run_diff_r10", "win_pct_l10",
+        "k_rate_r15", "bb_rate_r15", "run_diff_r10",
     ]
 
     # ---------------------------------------------------------------------------
@@ -851,25 +773,20 @@ def build_feature_matrix(
 
     # ---------------------------------------------------------------------------
     # Step 4: v2 — precompute bullpen ERA and home/away splits
-    # Bullpen ERA is computed directly from game_logs (in-memory) rather than
-    # via a separate API call, so it works with both real and synthetic data.
     # ---------------------------------------------------------------------------
-    bullpen_index = _compute_bullpen_index_from_logs(game_logs)
+    bullpen_index = _compute_bullpen_index(unique_seasons)
     splits_index = _compute_home_away_splits(game_logs)
 
     # ---------------------------------------------------------------------------
     # Step 4b: v3 — load pitcher game logs and build leakage-safe to-date stats
-    # Also load season stats as fallback when to-date logs are unavailable.
     # ---------------------------------------------------------------------------
     from line_tracker.model.mlb_data import (
         fetch_pitcher_game_logs,
-        fetch_pitcher_season_stats,
         fetch_batter_game_logs,
         fetch_batter_season_stats,
     )
 
     pitcher_to_date_by_season: dict = {}
-    pitcher_season_stats_by_season_sp: dict = {}
     for season_val in df["season"].dropna().unique():
         s = int(season_val)
         try:
@@ -879,10 +796,6 @@ def build_feature_matrix(
             pitcher_to_date_by_season[s] = pd.DataFrame(
                 columns=["pitcher_id", "date", "era_to_date", "whip_to_date", "k9_to_date"]
             )
-        try:
-            pitcher_season_stats_by_season_sp[s] = fetch_pitcher_season_stats(s)
-        except Exception:
-            pitcher_season_stats_by_season_sp[s] = pd.DataFrame()
 
     # ---------------------------------------------------------------------------
     # Step 4c: v4 — load batter game logs and season stats for lineup strength
@@ -943,8 +856,6 @@ def build_feature_matrix(
         home_k15 = home_stats["k_rate_r15"]
         home_bb15 = home_stats["bb_rate_r15"]
         home_rd10 = home_stats["run_diff_r10"]
-        _hwl = home_stats.get("win_pct_l10")
-        home_win_l10 = float(_hwl) if _hwl is not None and pd.notna(_hwl) else 0.5
 
         # Away rolling stats (v1)
         away_rs15 = away_stats["runs_scored_r15"]
@@ -953,8 +864,6 @@ def build_feature_matrix(
         away_k15 = away_stats["k_rate_r15"]
         away_bb15 = away_stats["bb_rate_r15"]
         away_rd10 = away_stats["run_diff_r10"]
-        _awl = away_stats.get("win_pct_l10")
-        away_win_l10 = float(_awl) if _awl is not None and pd.notna(_awl) else 0.5
 
         # Days rest (v1)
         try:
@@ -971,24 +880,13 @@ def build_feature_matrix(
         park_runs = pf["runs"] / 100.0
         park_hr = pf["hr"] / 100.0
 
-        # v3 — per-game SP stats
-        # Lookup order: (1) leakage-safe cumulative to-date stats from game logs,
-        # (2) full-season stats from pitcher_season_stats (slight leakage for early
-        #     season games but provides real signal vs. constant 4.20 fallback),
-        # (3) league average as last resort.
+        # v3 — per-game SP stats (leakage-safe, all seasons)
         game_date = date
         ptd = pitcher_to_date_by_season.get(season, pd.DataFrame())
 
         home_sp_id = row.get("home_sp_id")
         if pd.notna(home_sp_id):
             h_era, h_whip, h_k9 = _lookup_sp_to_date_stats(home_sp_id, game_date, ptd)
-            if h_era is None or h_whip is None or h_k9 is None:
-                fs_era, fs_whip, fs_k9 = _lookup_sp_season_stats(
-                    home_sp_id, season, pitcher_season_stats_by_season_sp
-                )
-                if h_era is None: h_era = fs_era if fs_era is not None else LEAGUE_AVG_ERA
-                if h_whip is None: h_whip = fs_whip if fs_whip is not None else LEAGUE_AVG_WHIP
-                if h_k9 is None: h_k9 = fs_k9 if fs_k9 is not None else LEAGUE_AVG_K9
         else:
             h_era  = row.get("home_rotation_era",  LEAGUE_AVG_ERA)
             h_whip = row.get("home_rotation_whip", LEAGUE_AVG_WHIP)
@@ -997,13 +895,6 @@ def build_feature_matrix(
         away_sp_id = row.get("away_sp_id")
         if pd.notna(away_sp_id):
             a_era, a_whip, a_k9 = _lookup_sp_to_date_stats(away_sp_id, game_date, ptd)
-            if a_era is None or a_whip is None or a_k9 is None:
-                fs_era, fs_whip, fs_k9 = _lookup_sp_season_stats(
-                    away_sp_id, season, pitcher_season_stats_by_season_sp
-                )
-                if a_era is None: a_era = fs_era if fs_era is not None else LEAGUE_AVG_ERA
-                if a_whip is None: a_whip = fs_whip if fs_whip is not None else LEAGUE_AVG_WHIP
-                if a_k9 is None: a_k9 = fs_k9 if fs_k9 is not None else LEAGUE_AVG_K9
         else:
             a_era  = row.get("away_rotation_era",  LEAGUE_AVG_ERA)
             a_whip = row.get("away_rotation_whip", LEAGUE_AVG_WHIP)
@@ -1027,10 +918,9 @@ def build_feature_matrix(
         away_bp_exposure = 9.0 - away_workload["sp_avg_ip"]
         bp_exposure_diff = home_bp_exposure - away_bp_exposure
 
-        # v2 — bullpen ERA (use normalized date to match index keys)
-        date_norm = pd.Timestamp(date).normalize()
-        home_bp = bullpen_index.get((home, date_norm), {})
-        away_bp = bullpen_index.get((away, date_norm), {})
+        # v2 — bullpen ERA
+        home_bp = bullpen_index.get((home, date), {})
+        away_bp = bullpen_index.get((away, date), {})
         home_bullpen_era_r7 = home_bp.get("era_r7", _BP_DEFAULT_ERA)
         away_bullpen_era_r7 = away_bp.get("era_r7", _BP_DEFAULT_ERA)
         bullpen_era_diff = away_bullpen_era_r7 - home_bullpen_era_r7
@@ -1057,9 +947,6 @@ def build_feature_matrix(
             "away_k_rate_r15": away_k15,
             "away_bb_rate_r15": away_bb15,
             "away_run_diff_r10": away_rd10,
-            "home_win_pct_l10": float(home_win_l10) if pd.notna(home_win_l10) else 0.5,
-            "away_win_pct_l10": float(away_win_l10) if pd.notna(away_win_l10) else 0.5,
-            "win_pct_l10_diff": (float(home_win_l10) if pd.notna(home_win_l10) else 0.5) - (float(away_win_l10) if pd.notna(away_win_l10) else 0.5),
             "offense_diff": home_rs15 - away_rs15,
             "defense_diff": home_ra15 - away_ra15,
             "form_diff": home_rd10 - away_rd10,
@@ -1097,10 +984,6 @@ def build_feature_matrix(
             "away_lineup_top3_ops":  away_lineup["lineup_top3_ops"],
             "lineup_wrc_diff":       home_lineup["lineup_wrc_weighted"] - away_lineup["lineup_wrc_weighted"],
             "home_lineup_depth_ops": home_lineup["lineup_depth_ops"],
-            # blowup risk — bullpen ERA x opponent wRC+ (computed after lineup)
-            "home_blowup_risk": float(home_bullpen_era_r7) * (float(home_lineup["lineup_wrc_weighted"]) if home_lineup["lineup_wrc_weighted"] else 100.0) / 100.0,
-            "away_blowup_risk": float(away_bullpen_era_r7) * (float(away_lineup["lineup_wrc_weighted"]) if away_lineup["lineup_wrc_weighted"] else 100.0) / 100.0,
-            "blowup_risk_diff": (float(away_bullpen_era_r7) * (float(away_lineup["lineup_wrc_weighted"]) if away_lineup["lineup_wrc_weighted"] else 100.0) / 100.0) - (float(home_bullpen_era_r7) * (float(home_lineup["lineup_wrc_weighted"]) if home_lineup["lineup_wrc_weighted"] else 100.0) / 100.0),
             # v4 — SP workload
             "home_sp_rest_days": home_workload["sp_rest_days"],
             "away_sp_rest_days": away_workload["sp_rest_days"],
