@@ -84,7 +84,7 @@ def settle(game_date: str) -> None:
 
     cur.execute(
         "SELECT id, game_id, home_team, away_team, model_home_win_prob, "
-        "market_total, model_total_runs "
+        "market_total, model_total_runs, ensemble_prob "
         "FROM mlb_model_predictions WHERE game_date = ? AND settled_at IS NULL",
         (game_date,)
     )
@@ -98,7 +98,7 @@ def settle(game_date: str) -> None:
     print(f"Found {len(rows)} unsettled predictions")
     settled = 0
 
-    for row_id, game_id, home_team, away_team, home_win_prob, market_total, model_total in rows:
+    for row_id, game_id, home_team, away_team, home_win_prob, market_total, model_total, ensemble_prob in rows:
         home_br = TEAM_NAME_TO_BR.get(home_team)
         away_br = TEAM_NAME_TO_BR.get(away_team)
 
@@ -116,7 +116,9 @@ def settle(game_date: str) -> None:
         actual_total = home_score + away_score
 
         # Grade ML
-        model_picked_home = (home_win_prob or 0.5) >= 0.5
+        # Use ensemble_prob if available, fall back to model_home_win_prob
+        _grade_prob = ensemble_prob if ensemble_prob is not None else home_win_prob
+        model_picked_home = (_grade_prob or 0.5) >= 0.5
         home_won = home_score > away_score
         home_win_correct = 1 if (model_picked_home == home_won) else 0
 
